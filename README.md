@@ -83,6 +83,7 @@ Use `-u plasmoid` instead of `-i` when the package is already installed.
 ai-usage-kde --json
 ai-usage-kde --providers=claude,codex
 ai-usage-kde --catalog
+ai-usage-kde --detect
 ai-usage-kde --check-update
 ```
 

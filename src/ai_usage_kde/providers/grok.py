@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 from ..core.environment import LoginShellEnvironment
 from ..core.http import HttpResponse, http_get, http_post_form
+from ..core.locking import CredentialLockTimeout, credential_lock
 from ..core.model import FailureKind, ProviderStatus, ProviderUsage, UsageWindow
 from ..core.parsing import jwt_expiration, non_empty, number, provider_datetime
 from ..core.storage import atomic_write_private
@@ -48,7 +49,17 @@ class GrokAuthStore:
         return Path.home() / ".grok" / "auth.json"
 
     def load_candidates(self) -> list[GrokCredentials]:
-        path = self.auth_path()
+        return self._load_path(self.auth_path())
+
+    def reload(self, credentials: GrokCredentials) -> Optional[GrokCredentials]:
+        """Re-read the exact source file and return the same account entry."""
+        for candidate in self._load_path(credentials.path):
+            if candidate.entry_key == credentials.entry_key:
+                return candidate
+        return None
+
+    @staticmethod
+    def _load_path(path: Path) -> list[GrokCredentials]:
         try:
             raw = path.read_text(encoding="utf-8")
             root = json.loads(raw)
@@ -135,11 +146,15 @@ class GrokProvider:
         getter: Callable[..., HttpResponse] = http_get,
         form_poster: Callable[..., HttpResponse] = http_post_form,
         now: Optional[Callable[[], datetime]] = None,
+        lock_timeout: float = 30.0,
     ):
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._auth = auth_store or GrokAuthStore(now=self._now)
         self._get = getter
         self._post_form = form_poster
+        self._lock_timeout = lock_timeout
+        # Refresh tokens this instance already sent; kept in memory only.
+        self._sent_refresh_tokens: set[str] = set()
 
     def is_configured(self) -> bool:
         return bool(self._auth.load_candidates())
@@ -154,7 +169,7 @@ class GrokProvider:
         saw_expired = False
         for credentials in candidates:
             if self._auth.needs_refresh(credentials):
-                refreshed, failure = self._refresh(credentials)
+                refreshed, failure = self._refresh(credentials, rejected=False)
                 if failure is not None:
                     return failure
                 if not refreshed:
@@ -164,7 +179,7 @@ class GrokProvider:
             if response is None:
                 continue
             if response.status in (401, 403):
-                refreshed, failure = self._refresh(credentials)
+                refreshed, failure = self._refresh(credentials, rejected=True)
                 if failure is not None:
                     return failure
                 if not refreshed:
@@ -203,10 +218,45 @@ class GrokProvider:
     def _refresh(
         self,
         credentials: GrokCredentials,
+        *,
+        rejected: bool,
     ) -> tuple[bool, Optional[ProviderUsage]]:
-        refresh_token = self._auth.refresh_token(credentials)
-        if refresh_token is None:
+        try:
+            with credential_lock(PROVIDER_ID, timeout=self._lock_timeout):
+                return self._refresh_locked(credentials, rejected=rejected)
+        except CredentialLockTimeout:
+            return False, errored(
+                PROVIDER_ID, DISPLAY, ICON,
+                f"{DISPLAY} is being refreshed by another process. Try again shortly.",
+                FailureKind.TRANSIENT,
+            )
+
+    def _refresh_locked(
+        self,
+        credentials: GrokCredentials,
+        *,
+        rejected: bool,
+    ) -> tuple[bool, Optional[ProviderUsage]]:
+        # Another process may have rotated the tokens while we waited.
+        live = self._auth.reload(credentials)
+        if live is None:
+            # The account entry vanished or the file became unreadable.
             return False, None
+        token_changed = live.token != credentials.token
+        changed = token_changed or (
+            self._auth.refresh_token(live) != self._auth.refresh_token(credentials)
+        )
+        self._adopt(credentials, live)
+        if changed:
+            if not rejected and not self._auth.needs_refresh(credentials):
+                return True, None
+            if rejected and token_changed:
+                return True, None
+
+        refresh_token = self._auth.refresh_token(credentials)
+        if refresh_token is None or refresh_token in self._sent_refresh_tokens:
+            return False, None
+        self._sent_refresh_tokens.add(refresh_token)
         try:
             response = self._post_form(
                 REFRESH_URL,
@@ -244,6 +294,13 @@ class GrokProvider:
                 FailureKind.STORAGE,
             )
         return True, None
+
+    @staticmethod
+    def _adopt(credentials: GrokCredentials, live: GrokCredentials) -> None:
+        credentials.token = live.token
+        credentials.entry = live.entry
+        credentials.document = live.document
+        credentials.raw_text = live.raw_text
 
     @staticmethod
     def map(

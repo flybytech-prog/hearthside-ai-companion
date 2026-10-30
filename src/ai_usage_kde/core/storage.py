@@ -19,7 +19,7 @@ def atomic_write_private(
             if current != expected_text:
                 return False
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
 
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"

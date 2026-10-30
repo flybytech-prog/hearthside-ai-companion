@@ -122,7 +122,7 @@ class SecretToolStore:
                 text=True,
                 timeout=self._timeout,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
             return None
         if result.returncode != 0:
             return None
@@ -174,7 +174,7 @@ class ClaudeAuthStore:
         source_path = path or self.credentials_path()
         try:
             raw = source_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
         document = decode_json_with_hex_fallback(raw)
         oauth = document.get("claudeAiOauth") if document else None
@@ -273,7 +273,7 @@ class CodexAuthStore:
     def load_file(self, path: Path) -> Optional[CodexCredentials]:
         try:
             raw = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
         return self._credentials(
             raw,
@@ -385,6 +385,21 @@ class CodexAuthStore:
             document=document,
             raw_text=raw.strip() if isinstance(source, SecretToolCredentialSource) else raw,
         )
+
+
+def signed_out_file(path: Path) -> bool:
+    """True when a credential file is gone or readable but holds no login.
+
+    Used after a re-read returned nothing, to tell a logout apart from a file
+    that exists but cannot be read or decoded.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeDecodeError):
+        return False
+    return decode_json_with_hex_fallback(raw) is not None
 
 
 def claude_credentials_path(

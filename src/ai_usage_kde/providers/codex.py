@@ -5,8 +5,14 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-from ..core.auth import CodexAuthStore, CodexCredentials
+from ..core.auth import (
+    CodexAuthStore,
+    CodexCredentials,
+    FileCredentialSource,
+    signed_out_file,
+)
 from ..core.http import HttpResponse, http_get, http_post_form
+from ..core.locking import CredentialLockTimeout, credential_lock
 from ..core.model import BillingUsage, FailureKind, ProviderStatus, ProviderUsage, UsageWindow
 from ..core.parsing import (
     non_empty,
@@ -51,6 +57,7 @@ class CodexProvider:
         auth_store: Optional[CodexAuthStore] = None,
         now: Optional[Callable[[], datetime]] = None,
         allow_keyring: bool = False,
+        lock_timeout: float = 30.0,
     ):
         if creds is None:
             self._credentials: list[CodexCredentials] = []
@@ -63,6 +70,9 @@ class CodexProvider:
         self._auth_store = auth_store or CodexAuthStore(now=now)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._allow_keyring = allow_keyring
+        self._lock_timeout = lock_timeout
+        # Refresh tokens this instance already sent; kept in memory only.
+        self._sent_refresh_tokens: set[str] = set()
 
     def is_configured(self) -> bool:
         return bool(self._credentials)
@@ -111,12 +121,7 @@ class CodexProvider:
 
         state = credentials
         if self._auth_store.needs_refresh(state):
-            live = self._auth_store.reload(state)
-            if live is not None and live.has_access_token:
-                state = live
-                access_token = live.access_token
-        if self._auth_store.needs_refresh(state) and state.refresh_token:
-            state, failure = self._refresh(state)
+            state, failure = self._refresh(state, rejected=False)
             if failure is not None:
                 return failure
             assert state is not None
@@ -135,7 +140,7 @@ class CodexProvider:
                     ICON,
                     "Token expired. Run `codex` to log in again.",
                 )
-            state, failure = self._refresh(state)
+            state, failure = self._refresh(state, rejected=True)
             if failure is not None:
                 return failure
             assert state is not None
@@ -192,9 +197,66 @@ class CodexProvider:
     def _refresh(
         self,
         credentials: CodexCredentials,
+        *,
+        rejected: bool,
     ) -> tuple[Optional[CodexCredentials], Optional[ProviderUsage]]:
+        try:
+            with credential_lock(PROVIDER_ID, timeout=self._lock_timeout):
+                return self._refresh_locked(credentials, rejected=rejected)
+        except CredentialLockTimeout:
+            return None, errored(
+                PROVIDER_ID,
+                DISPLAY,
+                ICON,
+                f"{DISPLAY} is being refreshed by another process. Try again shortly.",
+                FailureKind.TRANSIENT,
+            )
+
+    def _refresh_locked(
+        self,
+        credentials: CodexCredentials,
+        *,
+        rejected: bool,
+    ) -> tuple[Optional[CodexCredentials], Optional[ProviderUsage]]:
+        # Another process may have rotated the tokens while we waited.
+        if credentials.source is not None:
+            live = self._auth_store.reload(credentials)
+            source = credentials.source
+            if live is None:
+                # Logged out elsewhere, or unreadable; either way a rotated
+                # token could not be stored, so keep the refresh token unspent.
+                # A failed Secret Service lookup stays a storage failure.
+                if isinstance(source, FileCredentialSource) and signed_out_file(source.path):
+                    return None, unauthenticated(
+                        PROVIDER_ID,
+                        DISPLAY,
+                        ICON,
+                        "Not logged in. Run `codex` to authenticate.",
+                    )
+                return None, self._storage_failure()
+            if not live.has_access_token:
+                # Switched to an API-key login; the old refresh token is stale.
+                return None, unauthenticated(
+                    PROVIDER_ID,
+                    DISPLAY,
+                    ICON,
+                    "Usage not available for API key.",
+                )
+            if (
+                live.access_token != credentials.access_token
+                or live.refresh_token != credentials.refresh_token
+            ):
+                if not rejected and not self._auth_store.needs_refresh(live):
+                    return live, None
+                if rejected and live.access_token != credentials.access_token:
+                    return live, None
+            credentials = live
+
         refresh_token = non_empty(credentials.refresh_token)
-        if refresh_token is None:
+        if refresh_token is None and not rejected:
+            # Nothing to refresh with; let the usage request decide.
+            return credentials, None
+        if refresh_token is None or refresh_token in self._sent_refresh_tokens:
             return (
                 None,
                 unauthenticated(
@@ -204,6 +266,7 @@ class CodexProvider:
                     "Token expired. Run `codex` to log in again.",
                 ),
             )
+        self._sent_refresh_tokens.add(refresh_token)
         try:
             response = self._post_form(
                 REFRESH_URL,
@@ -276,16 +339,19 @@ class CodexProvider:
             last_refresh=self._utc_now().isoformat().replace("+00:00", "Z"),
         )
         if credentials.source is not None and not self._auth_store.save(updated):
-            return (
-                None,
-                unauthenticated(
-                    PROVIDER_ID,
-                    DISPLAY,
-                    ICON,
-                    "Codex login changed during refresh. Refresh again.",
-                ),
-            )
+            # The refresh token is spent; never reload and POST again.
+            return None, self._storage_failure()
         return updated, None
+
+    @staticmethod
+    def _storage_failure() -> ProviderUsage:
+        return errored(
+            PROVIDER_ID,
+            DISPLAY,
+            ICON,
+            f"{DISPLAY} credentials could not be updated.",
+            FailureKind.STORAGE,
+        )
 
     @staticmethod
     def _refresh_error_code(response: HttpResponse) -> Optional[str]:

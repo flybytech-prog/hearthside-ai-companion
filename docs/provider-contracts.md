@@ -8,8 +8,18 @@ provider APIs, so sanitized fixture tests protect the known response shapes.
 ## Discovery and failure behavior
 
 The helper merges the process and login-shell `PATH`, then checks provider CLI
-names and local data locations. Only tracked and installed providers are
-contacted. Authentication and storage failures clear the widget's previous
+names and local data locations. The login-shell capture runs `$SHELL -ilc`
+with a command built only from `echo` and `printenv`, so it works the same in
+POSIX shells and fish. It reads only the allow-listed variables
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, and `PATH`, parses only the text between its begin and end
+markers, and ignores startup-file noise. `--detect` runs only this discovery
+step: it reads no credentials and makes no network requests.
+
+Only tracked and installed providers are contacted. A sign-in file that cannot
+be read or is not valid UTF-8 skips that source, and the next source is tried.
+If a provider cannot be set up at all, only that provider reports a `storage`
+failure; the others are still refreshed. Authentication and storage failures clear the widget's previous
 reading; transient, rate-limit, and invalid-response failures preserve the
 last successful reading in Plasma memory and mark it stale.
 
@@ -92,3 +102,19 @@ Unlimited and zero-entitlement buckets are not rendered.
 
 All credential rotations use source-aware, mode-`0600` writes and avoid
 overwriting a concurrent login.
+
+Claude Code, Codex, and Grok rotate refresh tokens, so each refresh holds a
+per-provider cross-process lock (`flock` on an empty lock file, waiting up to
+30 seconds). Under the lock the helper re-reads the exact credential source.
+If another process already rotated the tokens, the helper uses them and sends
+no refresh. Otherwise it sends at most one refresh `POST` per refresh token
+and writes the result back with compare-before-write. If that write fails, the
+provider reports a `storage` failure and does not reload or retry, because the
+old refresh token has already been spent. If the lock stays busy, the provider
+reports a `transient` failure without sending a refresh. If the re-read finds the
+login gone (file deleted or emptied, or Codex switched to an API key), the
+provider reports it as signed out; if the source cannot be read or decoded, or
+the Secret Service lookup fails, it reports `storage`. Neither case sends a
+refresh. The usage request
+itself never runs under the lock. Provider CLIs do not take this lock;
+compare-before-write still catches their concurrent writes.

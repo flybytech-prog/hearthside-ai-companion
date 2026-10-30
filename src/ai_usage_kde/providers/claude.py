@@ -11,8 +11,10 @@ from ..core.auth import (
     CLAUDE_REFRESH_URL,
     ClaudeAuthStore,
     ClaudeCredentials,
+    signed_out_file,
 )
 from ..core.http import HttpResponse, http_get, http_post_json
+from ..core.locking import CredentialLockTimeout, credential_lock
 from ..core.model import BillingUsage, FailureKind, ProviderStatus, ProviderUsage, UsageWindow
 from ..core.parsing import (
     cents_to_dollars,
@@ -52,32 +54,26 @@ class ClaudeProvider:
         json_poster: Callable[..., HttpResponse] = http_post_json,
         auth_store: Optional[ClaudeAuthStore] = None,
         now: Optional[Callable[[], datetime]] = None,
+        lock_timeout: float = 30.0,
     ):
         self._creds = creds
         self._get = getter
         self._post_json = json_poster
         self._auth_store = auth_store or ClaudeAuthStore()
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._lock_timeout = lock_timeout
+        # Refresh tokens this instance already sent; kept in memory only.
+        self._sent_refresh_tokens: set[str] = set()
 
     def is_configured(self) -> bool:
         return self._creds is not None
 
     def fetch(self) -> ProviderUsage:
         if self._creds is None:
-            return unauthenticated(
-                PROVIDER_ID,
-                DISPLAY,
-                ICON,
-                "Not logged in. Run `claude` to authenticate.",
-            )
-        return self._fetch(self._creds, credential_reloads_remaining=1)
+            return self._not_logged_in()
+        return self._fetch(self._creds)
 
-    def _fetch(
-        self,
-        credentials: ClaudeCredentials,
-        *,
-        credential_reloads_remaining: int,
-    ) -> ProviderUsage:
+    def _fetch(self, credentials: ClaudeCredentials) -> ProviderUsage:
         if not self._auth_store.has_usage_scope(credentials):
             return unauthenticated(
                 PROVIDER_ID,
@@ -89,15 +85,11 @@ class ClaudeProvider:
         now = self._utc_now()
 
         if credentials.is_expired(now_ms=int(now.timestamp() * 1000)):
-            credentials, failure, changed = self._refresh(credentials)
-            if changed:
-                return self._reload_after_change(
-                    credential_reloads_remaining,
-                    credentials,
-                )
+            credentials, failure = self._refresh(credentials, rejected=False)
             if failure is not None:
                 return failure
             assert credentials is not None
+            self._creds = credentials
 
         response, failure = self._send_usage(credentials.access_token)
         if failure is not None:
@@ -112,15 +104,11 @@ class ClaudeProvider:
                     ICON,
                     "Token expired. Run `claude` to log in again.",
                 )
-            credentials, failure, changed = self._refresh(credentials)
-            if changed:
-                return self._reload_after_change(
-                    credential_reloads_remaining,
-                    credentials,
-                )
+            credentials, failure = self._refresh(credentials, rejected=True)
             if failure is not None:
                 return failure
             assert credentials is not None
+            self._creds = credentials
             response, failure = self._send_usage(credentials.access_token)
             if failure is not None:
                 return failure
@@ -172,39 +160,59 @@ class ClaudeProvider:
         self._creds = credentials
         return self._map(data, credentials)
 
-    def _reload_after_change(
-        self,
-        remaining: int,
-        previous: Optional[ClaudeCredentials],
-    ) -> ProviderUsage:
-        if remaining > 0 and previous is not None:
-            live = self._auth_store.reload(previous)
-            if live is not None:
-                self._creds = live
-                return self._fetch(live, credential_reloads_remaining=remaining - 1)
-        return unauthenticated(
-            PROVIDER_ID,
-            DISPLAY,
-            ICON,
-            "Claude login changed during refresh. Refresh again.",
-        )
-
     def _refresh(
         self,
         credentials: ClaudeCredentials,
-    ) -> tuple[Optional[ClaudeCredentials], Optional[ProviderUsage], bool]:
-        refresh_token = non_empty(credentials.refresh_token)
-        if refresh_token is None:
-            return (
-                None,
-                unauthenticated(
-                    PROVIDER_ID,
-                    DISPLAY,
-                    ICON,
-                    "Session expired. Run `claude` to log in again.",
-                ),
-                False,
+        *,
+        rejected: bool,
+    ) -> tuple[Optional[ClaudeCredentials], Optional[ProviderUsage]]:
+        try:
+            with credential_lock(PROVIDER_ID, timeout=self._lock_timeout):
+                return self._refresh_locked(credentials, rejected=rejected)
+        except CredentialLockTimeout:
+            return None, errored(
+                PROVIDER_ID,
+                DISPLAY,
+                ICON,
+                f"{DISPLAY} is being refreshed by another process. Try again shortly.",
+                FailureKind.TRANSIENT,
             )
+
+    def _refresh_locked(
+        self,
+        credentials: ClaudeCredentials,
+        *,
+        rejected: bool,
+    ) -> tuple[Optional[ClaudeCredentials], Optional[ProviderUsage]]:
+        # Another process may have rotated the tokens while we waited.
+        if credentials.source is not None:
+            live = self._auth_store.reload(credentials)
+            if live is None:
+                # Logged out elsewhere, or unreadable; either way a rotated
+                # token could not be stored, so keep the refresh token unspent.
+                if signed_out_file(credentials.source.path):
+                    return None, self._not_logged_in()
+                return None, self._storage_failure()
+            if (
+                live.access_token != credentials.access_token
+                or live.refresh_token != credentials.refresh_token
+            ):
+                now_ms = int(self._utc_now().timestamp() * 1000)
+                if not rejected and not live.is_expired(now_ms=now_ms):
+                    return live, None
+                if rejected and live.access_token != credentials.access_token:
+                    return live, None
+            credentials = live
+
+        refresh_token = non_empty(credentials.refresh_token)
+        if refresh_token is None or refresh_token in self._sent_refresh_tokens:
+            return None, unauthenticated(
+                PROVIDER_ID,
+                DISPLAY,
+                ICON,
+                "Session expired. Run `claude` to log in again.",
+            )
+        self._sent_refresh_tokens.add(refresh_token)
         try:
             response = self._post_json(
                 CLAUDE_REFRESH_URL,
@@ -217,11 +225,7 @@ class ClaudeProvider:
                 {"Accept": "application/json"},
             )
         except Exception:
-            return (
-                None,
-                errored(PROVIDER_ID, DISPLAY, ICON, "Claude could not be reached."),
-                False,
-            )
+            return None, errored(PROVIDER_ID, DISPLAY, ICON, "Claude could not be reached.")
 
         if response.status in (400, 401):
             code = None
@@ -232,36 +236,24 @@ class ClaudeProvider:
             except (ValueError, UnicodeDecodeError):
                 pass
             if code == "invalid_grant":
-                return (
-                    None,
-                    unauthenticated(
-                        PROVIDER_ID,
-                        DISPLAY,
-                        ICON,
-                        "Session expired. Run `claude` to log in again.",
-                    ),
-                    False,
-                )
-            return (
-                None,
-                errored(
+                return None, unauthenticated(
                     PROVIDER_ID,
                     DISPLAY,
                     ICON,
-                    f"Claude token refresh failed ({response.status}).",
-                ),
-                False,
+                    "Session expired. Run `claude` to log in again.",
+                )
+            return None, errored(
+                PROVIDER_ID,
+                DISPLAY,
+                ICON,
+                f"Claude token refresh failed ({response.status}).",
             )
         if not 200 <= response.status < 300:
-            return (
-                None,
-                errored(
-                    PROVIDER_ID,
-                    DISPLAY,
-                    ICON,
-                    f"Claude token refresh failed ({response.status}).",
-                ),
-                False,
+            return None, errored(
+                PROVIDER_ID,
+                DISPLAY,
+                ICON,
+                f"Claude token refresh failed ({response.status}).",
             )
         try:
             body = response.json()
@@ -269,10 +261,8 @@ class ClaudeProvider:
             body = None
         access_token = non_empty(body.get("access_token")) if isinstance(body, dict) else None
         if access_token is None:
-            return (
-                None,
-                errored(PROVIDER_ID, DISPLAY, ICON, "Claude returned an invalid refreshed token."),
-                False,
+            return None, errored(
+                PROVIDER_ID, DISPLAY, ICON, "Claude returned an invalid refreshed token.",
             )
         expires_in = number(body.get("expires_in")) if isinstance(body, dict) else None
         updated = replace(
@@ -290,8 +280,28 @@ class ClaudeProvider:
             ),
         )
         if credentials.source is not None and not self._auth_store.save(updated):
-            return updated, None, True
-        return updated, None, False
+            # The refresh token is spent; never reload and POST again.
+            return None, self._storage_failure()
+        return updated, None
+
+    @staticmethod
+    def _not_logged_in() -> ProviderUsage:
+        return unauthenticated(
+            PROVIDER_ID,
+            DISPLAY,
+            ICON,
+            "Not logged in. Run `claude` to authenticate.",
+        )
+
+    @staticmethod
+    def _storage_failure() -> ProviderUsage:
+        return errored(
+            PROVIDER_ID,
+            DISPLAY,
+            ICON,
+            f"{DISPLAY} credentials could not be updated.",
+            FailureKind.STORAGE,
+        )
 
     def _send_usage(
         self,

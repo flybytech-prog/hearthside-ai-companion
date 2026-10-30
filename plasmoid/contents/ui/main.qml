@@ -5,6 +5,7 @@ import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.kirigami as Kirigami
 import "ProviderCatalog.js" as Catalog
+import "RefreshGate.js" as RefreshGate
 
 PlasmoidItem {
     id: root
@@ -24,6 +25,11 @@ PlasmoidItem {
     property var updateInfo: null
     property string updateError: ""
     property bool updateChecking: false
+    property bool refreshInFlight: false
+    property bool refreshQueued: false
+    property double refreshStartedAt: 0
+    property string refreshSource: ""
+    property int refreshRun: 0
 
     readonly property int refreshInterval: normalizedRefresh(
         Plasmoid.configuration.refreshInterval || 300
@@ -219,9 +225,24 @@ PlasmoidItem {
         var providerIds = activeProviderIds()
         if (root.hasData && providerIds.length === 0)
             return
-        usageSource.connectSource(
-            "python3 -m ai_usage_kde --json --providers=" + providerIds.join(",")
-        )
+        // Only one helper may run at a time; extra requests collapse into a
+        // single follow-up run once the current one reports back.
+        var now = Date.now()
+        if (RefreshGate.decide(root.refreshInFlight, root.refreshStartedAt, now) === "queue") {
+            root.refreshQueued = true
+            return
+        }
+        // Drop a stale run; each run gets a unique command so its late reply
+        // can never be mistaken for the current run.
+        if (root.refreshSource !== "")
+            usageSource.disconnectSource(root.refreshSource)
+        root.refreshRun += 1
+        var command = RefreshGate.usageCommand(root.refreshRun, providerIds)
+        root.refreshInFlight = true
+        root.refreshQueued = false
+        root.refreshStartedAt = now
+        root.refreshSource = command
+        usageSource.connectSource(command)
     }
 
     function applySnapshot(payload) {
@@ -329,6 +350,10 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (source, data) => {
             usageSource.disconnectSource(source)
+            if (source === root.refreshSource) {
+                root.refreshInFlight = false
+                root.refreshSource = ""
+            }
             var code = data["exit code"]
             var output = (data["stdout"] || "").toString()
             if (code === 0 && output.trim().length > 0) {
@@ -342,6 +367,10 @@ PlasmoidItem {
                 root.lastError = errorText.length > 0
                     ? errorText.split("\n").pop()
                     : i18n("Helper exited with code %1", code)
+            }
+            if (!root.refreshInFlight && root.refreshQueued) {
+                root.refreshQueued = false
+                Qt.callLater(root.refresh)
             }
         }
     }

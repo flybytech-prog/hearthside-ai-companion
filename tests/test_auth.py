@@ -215,3 +215,44 @@ def test_secret_tool_supports_service_only_without_secret_in_argv():
 def test_missing_credentials_return_none(tmp_path):
     assert load_claude_credentials(path=tmp_path / "missing") is None
     assert load_codex_credentials(path=tmp_path / "missing") is None
+
+
+_NOT_UTF8 = b"\xff\xfe{\"claudeAiOauth\":{\"accessToken\":\"x\"}}"
+
+
+def test_claude_non_utf8_credentials_return_none(tmp_path):
+    path = tmp_path / ".credentials.json"
+    path.write_bytes(_NOT_UTF8)
+    assert ClaudeAuthStore(_environment()).load(path) is None
+
+
+def test_codex_non_utf8_first_path_still_loads_second(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    first = tmp_path / ".config" / "codex" / "auth.json"
+    second = tmp_path / ".codex" / "auth.json"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_bytes(_NOT_UTF8)
+    second.write_text(fixture("codex_auth.json").read_text(), encoding="utf-8")
+    store = CodexAuthStore(_environment(), secret_store=SecretToolStore(executable=""))
+    assert store.auth_paths() == [first, second]
+    candidates = store.load_file_candidates()
+    assert [item.source.path for item in candidates] == [second]
+    assert candidates[0].access_token == "cx-acc-1"
+
+
+def test_atomic_write_refuses_non_utf8_target(tmp_path):
+    from ai_usage_kde.core.storage import atomic_write_private
+
+    path = tmp_path / "auth.json"
+    path.write_bytes(_NOT_UTF8)
+    assert not atomic_write_private(path, "{}", expected_text="{}")
+    assert path.read_bytes() == _NOT_UTF8
+
+
+def test_secret_tool_lookup_tolerates_undecodable_output():
+    def runner(args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    store = SecretToolStore(executable="/usr/bin/secret-tool", runner=runner)
+    assert store.lookup("Codex Auth", "cli|0000") is None

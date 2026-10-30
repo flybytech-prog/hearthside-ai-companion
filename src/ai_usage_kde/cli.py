@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from . import __version__
 from .core.catalog import PROVIDER_IDS
-from .core.snapshot import catalog_snapshot, collect_snapshot
+from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 from .core.update import check_for_update
 
 
@@ -25,6 +25,11 @@ def parser() -> argparse.ArgumentParser:
         "--catalog",
         action="store_true",
         help="Print the provider catalog without reading credentials or using the network.",
+    )
+    result.add_argument(
+        "--detect",
+        action="store_true",
+        help="Print the catalog and installed provider IDs without reading credentials or using the network.",
     )
     result.add_argument(
         "--check-update",
@@ -55,6 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     elif args.catalog:
         payload = catalog_snapshot()
+    elif args.detect:
+        payload = detect_snapshot()
     else:
         payload = collect_snapshot(
             provider_ids=_provider_ids(args.providers, argument_parser),

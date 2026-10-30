@@ -17,6 +17,7 @@ _SUPPORTED_NAMES = (
 )
 _BEGIN_MARKER = "__AI_USAGE_ENV_BEGIN__"
 _END_MARKER = "__AI_USAGE_ENV_END__"
+_VAR_MARKER = "__AI_USAGE_ENV_VAR__"
 
 
 class ProcessRunner(Protocol):
@@ -41,7 +42,10 @@ def _run_process(
         timeout=timeout,
         check=False,
         capture_output=True,
-        text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -50,7 +54,8 @@ class LoginShellEnvironment:
 
     Plasma helpers do not always inherit the user's interactive PATH. Only a
     fixed allow-list is captured, and startup-file noise is ignored by parsing
-    values between NUL-delimited markers.
+    only the lines between begin/end markers. The command uses nothing but
+    ``echo`` and ``printenv`` so it runs unchanged in POSIX shells and fish.
     """
 
     def __init__(
@@ -99,14 +104,7 @@ class LoginShellEnvironment:
 
     def _capture(self) -> dict[str, str]:
         shell = self._shell()
-        names = " ".join(_SUPPORTED_NAMES)
-        command = (
-            f"printf '%s\\0' {_BEGIN_MARKER}; "
-            f"for name in {names}; do "
-            'value=$(printenv "$name"); '
-            'if [ -n "$value" ]; then printf \'%s=%s\\0\' "$name" "$value"; fi; '
-            f"done; printf '%s\\0' {_END_MARKER}"
-        )
+        command = self.command()
         child_env = {
             key: value
             for key in ("HOME", "USER", "LOGNAME", "SHELL", "TERM")
@@ -122,11 +120,11 @@ class LoginShellEnvironment:
                 env=child_env,
                 timeout=self._timeout,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             return {}
-        if result.returncode != 0:
-            return {}
-        return self.parse(result.stdout)
+        # Startup files may make the shell exit non-zero after our output;
+        # parse() only trusts text framed by both markers.
+        return self.parse(result.stdout or "")
 
     def _shell(self) -> str:
         configured = self._clean(self._environ.get("SHELL"))
@@ -141,19 +139,46 @@ class LoginShellEnvironment:
         return "/bin/sh"
 
     @staticmethod
+    def command() -> str:
+        """Shell-agnostic capture command built only from constants."""
+        parts = [f"echo {_BEGIN_MARKER}"]
+        for name in _SUPPORTED_NAMES:
+            parts.append(f"echo {_VAR_MARKER}{name}")
+            parts.append(f"printenv {name}")
+        parts.append(f"echo {_END_MARKER}")
+        return "; ".join(parts)
+
+    @staticmethod
     def parse(output: str) -> dict[str, str]:
-        begin_marker = _BEGIN_MARKER + "\0"
-        begin = output.find(begin_marker)
+        begin = output.find(_BEGIN_MARKER)
         if begin < 0:
             return {}
-        begin += len(begin_marker)
-        end = output.find("\0" + _END_MARKER, begin)
+        begin += len(_BEGIN_MARKER)
+        end = output.find(_END_MARKER, begin)
         if end < 0:
-            end = len(output)
+            return {}
+
+        # Drop any partial line in front of the end marker (prompt escapes).
+        framed = output[begin:end]
+        framed = framed[:framed.rfind("\n") + 1]
+
+        collected: dict[str, list[str]] = {}
+        current: Optional[str] = None
+        for line in framed.splitlines():
+            marker = line.find(_VAR_MARKER)
+            if marker >= 0:
+                name = line[marker + len(_VAR_MARKER):].strip()
+                current = name if name in _SUPPORTED_NAMES else None
+                if current is not None:
+                    collected[current] = []
+                continue
+            if current is not None:
+                collected[current].append(line)
+
         values: dict[str, str] = {}
-        for token in output[begin:end].split("\0"):
-            name, separator, value = token.partition("=")
-            if separator and name in _SUPPORTED_NAMES and value:
+        for name, lines in collected.items():
+            value = "\n".join(lines).strip()
+            if value and "\ufffd" not in value:
                 values[name] = value
         return values
 

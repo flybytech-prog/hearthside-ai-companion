@@ -46,6 +46,44 @@ def test_cli_catalog_does_not_collect_provider_usage(monkeypatch, capsys):
     assert payload["providers"] == []
 
 
+def test_cli_detect_reports_installed_ids_without_providers(monkeypatch, capsys):
+    import ai_usage_kde.core.snapshot as snapshot
+
+    monkeypatch.setattr(
+        cli,
+        "collect_snapshot",
+        lambda **kwargs: pytest.fail("detect must not collect provider usage"),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "provider_factory",
+        lambda *args: pytest.fail("detect must not build providers"),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "detect_installed_providers",
+        lambda environment: {"grok", "claude"},
+    )
+    assert cli.main(["--detect"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 2
+    assert len(payload["catalog"]) == 7
+    assert payload["installed_provider_ids"] == ["claude", "grok"]
+    assert payload["providers"] == []
+
+
+def test_cli_catalog_wins_over_detect(monkeypatch, capsys):
+    import ai_usage_kde.core.snapshot as snapshot
+
+    monkeypatch.setattr(
+        snapshot,
+        "detect_installed_providers",
+        lambda environment: pytest.fail("catalog must not detect providers"),
+    )
+    assert cli.main(["--catalog", "--detect"]) == 0
+    assert json.loads(capsys.readouterr().out)["installed_provider_ids"] == []
+
+
 def test_untracked_installed_provider_is_not_instantiated(monkeypatch):
     import ai_usage_kde.core.snapshot as snapshot
 

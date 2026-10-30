@@ -1,4 +1,8 @@
+import fcntl
 import json
+import os
+import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -10,7 +14,8 @@ from ai_usage_kde.core.auth import (
 )
 from ai_usage_kde.core.environment import LoginShellEnvironment
 from ai_usage_kde.core.http import HttpResponse
-from ai_usage_kde.core.model import ProviderStatus
+from ai_usage_kde.core.locking import credential_lock, lock_directory
+from ai_usage_kde.core.model import FailureKind, ProviderStatus
 from ai_usage_kde.providers.claude import ClaudeProvider, USAGE_URL
 
 
@@ -180,3 +185,272 @@ def test_claude_unconfigured_is_unauthenticated():
         creds=None,
     ).fetch()
     assert usage.status == ProviderStatus.UNAUTHENTICATED
+
+
+def _write_claude_file(path, access, refresh, expires_at_ms):
+    document = json.loads(fixture("claude_credentials.json").read_text())
+    document["claudeAiOauth"].update({
+        "accessToken": access,
+        "refreshToken": refresh,
+        "expiresAt": expires_at_ms,
+    })
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _saved_tokens(path):
+    oauth = json.loads(path.read_text())["claudeAiOauth"]
+    return oauth["accessToken"], oauth["refreshToken"]
+
+
+def _bearer_getter(seen):
+    def getter(url, headers, timeout=15.0):
+        seen.append(headers["Authorization"])
+        return _response()
+
+    return getter
+
+
+def test_claude_concurrent_instances_send_one_refresh(tmp_path):
+    path = tmp_path / ".credentials.json"
+    _write_claude_file(path, "old-access", "old-refresh", 0)
+    first_credentials, first_store = _credentials(path)
+    second_credentials, second_store = _credentials(path)
+    posts = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(data["refresh_token"])
+        entered.set()
+        assert release.wait(5)
+        return _response(200, {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        })
+
+    seen = []
+    results = {}
+    providers = {
+        name: ClaudeProvider(
+            creds=credentials,
+            auth_store=store,
+            getter=_bearer_getter(seen),
+            json_poster=poster,
+            now=lambda: NOW,
+        )
+        for name, credentials, store in (
+            ("first", first_credentials, first_store),
+            ("second", second_credentials, second_store),
+        )
+    }
+
+    def run(name):
+        results[name] = providers[name].fetch()
+
+    first = threading.Thread(target=run, args=("first",))
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=run, args=("second",))
+    second.start()
+    time.sleep(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert posts == ["old-refresh"]
+    assert results["first"].status == ProviderStatus.OK
+    assert results["second"].status == ProviderStatus.OK
+    assert seen == ["Bearer new-access", "Bearer new-access"]
+    assert _saved_tokens(path) == ("new-access", "new-refresh")
+
+
+def test_claude_uses_tokens_rotated_before_lock_without_posting(tmp_path):
+    path = tmp_path / ".credentials.json"
+    _write_claude_file(path, "old-access", "old-refresh", 0)
+    credentials, store = _credentials(path)
+    future_ms = (NOW.timestamp() + 3600) * 1000
+    _write_claude_file(path, "cli-access", "cli-refresh", future_ms)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    seen = []
+    usage = ClaudeProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=_bearer_getter(seen),
+        json_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.OK
+    assert seen == ["Bearer cli-access"]
+
+
+def test_claude_401_adopts_access_token_rotated_elsewhere(tmp_path):
+    path = tmp_path / ".credentials.json"
+    future_ms = (NOW.timestamp() + 3600) * 1000
+    _write_claude_file(path, "old-access", "old-refresh", future_ms)
+    credentials, store = _credentials(path)
+    _write_claude_file(path, "cli-access", "cli-refresh", future_ms)
+    responses = [_response(401, {}), _response()]
+    seen = []
+
+    def getter(url, headers, timeout=15.0):
+        seen.append(headers["Authorization"])
+        return responses.pop(0)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    usage = ClaudeProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=getter,
+        json_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.OK
+    assert seen == ["Bearer old-access", "Bearer cli-access"]
+
+
+def test_claude_failed_save_is_storage_error_after_one_post(tmp_path):
+    path = tmp_path / ".credentials.json"
+    _write_claude_file(path, "old-access", "old-refresh", 0)
+    credentials, store = _credentials(path)
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(data["refresh_token"])
+        # An external CLI (which does not take our lock) rewrites the file.
+        _write_claude_file(path, "cli-access", "cli-refresh", 0)
+        return _response(200, {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        })
+
+    def getter(*args, **kwargs):
+        raise AssertionError("usage must not be requested")
+
+    usage = ClaudeProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=getter,
+        json_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert usage.error_message == "Claude Code credentials could not be updated."
+    assert posts == ["old-refresh"]
+    assert _saved_tokens(path) == ("cli-access", "cli-refresh")
+
+
+def test_claude_lock_timeout_is_transient_without_posting(tmp_path):
+    path = tmp_path / ".credentials.json"
+    _write_claude_file(path, "old-access", "old-refresh", 0)
+    credentials, store = _credentials(path)
+    with credential_lock("claude"):
+        pass
+    holder = os.open(lock_directory() / "claude.lock", os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    try:
+        usage = ClaudeProvider(
+            creds=credentials,
+            auth_store=store,
+            json_poster=poster,
+            now=lambda: NOW,
+            lock_timeout=0.2,
+        ).fetch()
+    finally:
+        os.close(holder)
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.TRANSIENT
+    assert "being refreshed by another process" in usage.error_message
+
+
+def test_claude_never_sends_the_same_refresh_token_twice(tmp_path):
+    path = tmp_path / ".credentials.json"
+    future_ms = (NOW.timestamp() + 3600) * 1000
+    _write_claude_file(path, "old-access", "old-refresh", future_ms)
+    credentials, store = _credentials(path)
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(data["refresh_token"])
+        return _response(503, {})
+
+    provider = ClaudeProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=lambda *args, **kwargs: _response(401, {}),
+        json_poster=poster,
+        now=lambda: NOW,
+    )
+    first = provider.fetch()
+    second = provider.fetch()
+    assert first.failure_kind == FailureKind.TRANSIENT
+    assert second.status == ProviderStatus.UNAUTHENTICATED
+    assert posts == ["old-refresh"]
+
+
+def _refuse_post(posts):
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(data)
+        raise AssertionError("refresh must not be sent")
+
+    return poster
+
+
+def _claude_refresh_after(path, mutate):
+    _write_claude_file(path, "old-access", "old-refresh", 0)
+    credentials, store = _credentials(path)
+    mutate(path)
+    posts = []
+    usage = ClaudeProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=_refuse_usage,
+        json_poster=_refuse_post(posts),
+        now=lambda: NOW,
+    ).fetch()
+    return usage, posts
+
+
+def _refuse_usage(*args, **kwargs):
+    raise AssertionError("usage must not be requested")
+
+
+def test_claude_logout_before_refresh_is_not_logged_in(tmp_path):
+    usage, posts = _claude_refresh_after(
+        tmp_path / ".credentials.json",
+        lambda path: path.unlink(),
+    )
+    assert usage.status == ProviderStatus.UNAUTHENTICATED
+    assert usage.failure_kind == FailureKind.AUTHENTICATION
+    assert usage.error_message == "Not logged in. Run `claude` to authenticate."
+    assert posts == []
+
+
+def test_claude_logout_that_empties_the_file_is_not_logged_in(tmp_path):
+    usage, posts = _claude_refresh_after(
+        tmp_path / ".credentials.json",
+        lambda path: path.write_text("{}", encoding="utf-8"),
+    )
+    assert usage.status == ProviderStatus.UNAUTHENTICATED
+    assert posts == []
+
+
+def test_claude_unreadable_file_at_reread_is_storage_error(tmp_path):
+    usage, posts = _claude_refresh_after(
+        tmp_path / ".credentials.json",
+        lambda path: path.write_bytes(b"\xff\xfe not utf-8"),
+    )
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert posts == []

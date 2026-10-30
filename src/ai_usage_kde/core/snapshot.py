@@ -147,7 +147,7 @@ def collect_snapshot(
         installed = (
             set(installed_provider_ids)
             if installed_provider_ids is not None
-            else availability_detector(environment)
+            else _safe_detect(availability_detector, environment)
         )
         requested = set(provider_ids) if provider_ids is not None else set(PROVIDER_IDS)
         selected = [
@@ -156,7 +156,7 @@ def collect_snapshot(
             if provider_id in installed and provider_id in requested
         ]
         provider_list = [
-            provider_factory(provider_id, environment)
+            _safe_create(provider_id, environment)
             for provider_id in selected
         ]
     else:
@@ -177,6 +177,61 @@ def collect_snapshot(
 
 def catalog_snapshot() -> dict:
     return build_snapshot([], installed_provider_ids=[])
+
+
+def detect_snapshot(
+    environment: Optional[LoginShellEnvironment] = None,
+    availability_detector: Optional[Callable[..., set[str]]] = None,
+) -> dict:
+    """Report installed providers without reading credentials or using the network."""
+    environment = environment or LoginShellEnvironment()
+    detected = _safe_detect(
+        availability_detector or detect_installed_providers,
+        environment,
+    )
+    return build_snapshot([], installed_provider_ids=detected)
+
+
+def _safe_detect(
+    availability_detector: Callable[..., set[str]],
+    environment: LoginShellEnvironment,
+) -> set[str]:
+    try:
+        return set(availability_detector(environment))
+    except Exception:
+        return set()
+
+
+class _UnreadableProvider:
+    """Stand-in for a provider whose local sign-in data could not be loaded."""
+
+    def __init__(self, provider_id: str):
+        catalog = CATALOG_BY_ID.get(provider_id)
+        self.id = provider_id
+        self.display_name = catalog.display_name if catalog else provider_id.title()
+        self._icon = catalog.icon if catalog else f"provider-{provider_id}.svg"
+
+    def is_configured(self) -> bool:
+        return False
+
+    def fetch(self) -> ProviderUsage:
+        return ProviderUsage(
+            provider_id=self.id,
+            display_name=self.display_name,
+            icon=self._icon,
+            plan=None,
+            status=ProviderStatus.ERROR,
+            error_message=f"{self.display_name} sign-in data could not be read.",
+            failure_kind=FailureKind.STORAGE,
+        )
+
+
+def _safe_create(provider_id: str, environment: LoginShellEnvironment):
+    # Exception text may quote file contents, so it is deliberately dropped.
+    try:
+        return provider_factory(provider_id, environment)
+    except Exception:
+        return _UnreadableProvider(provider_id)
 
 
 def _safe_fetch(provider) -> ProviderUsage:

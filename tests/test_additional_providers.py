@@ -1,7 +1,10 @@
 import base64
+import fcntl
 import json
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from ai_usage_kde.core.auth import SecretToolStore
 from ai_usage_kde.core.environment import LoginShellEnvironment
 from ai_usage_kde.core.http import HttpResponse
+from ai_usage_kde.core.locking import credential_lock, lock_directory
 from ai_usage_kde.core.model import FailureKind, ProviderStatus
 from ai_usage_kde.core.sqlite_store import SQLiteStateStore
 from ai_usage_kde.providers.antigravity import (
@@ -26,7 +30,7 @@ from ai_usage_kde.providers.cursor import (
     CursorProvider,
 )
 from ai_usage_kde.providers.devin import DevinAuthStore, DevinProvider
-from ai_usage_kde.providers.grok import GrokAuthStore, GrokProvider
+from ai_usage_kde.providers.grok import SETTINGS_URL, USAGE_URL, GrokAuthStore, GrokProvider
 
 
 NOW = datetime(2027, 1, 15, tzinfo=timezone.utc)
@@ -260,6 +264,36 @@ def test_devin_toml_and_quota_mapper(tmp_path):
     }
 
 
+def test_copilot_non_utf8_apps_json_falls_back_to_hosts_json(tmp_path):
+    config = tmp_path / "config"
+    folder = config / "github-copilot"
+    folder.mkdir(parents=True)
+    (folder / "apps.json").write_bytes(b"\xff\xfe not utf-8")
+    (folder / "hosts.json").write_text(json.dumps({
+        "github.com": {"oauth_token": "hosts-token"}
+    }))
+    store = CopilotAuthStore(
+        environment({"XDG_CONFIG_HOME": str(config)}),
+        SecretToolStore(executable=""),
+    )
+    assert store.load_token() == "hosts-token"
+
+
+def test_devin_non_utf8_credentials_toml_is_skipped(tmp_path):
+    data = tmp_path / "data"
+    path = data / "devin/credentials.toml"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'windsurf_api_key = "\xff\xfe"\n')
+    store = DevinAuthStore(environment({
+        "XDG_DATA_HOME": str(data),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }))
+    assert store.load_file() is None
+    assert store.load_candidates() == []
+    usage = DevinProvider(auth_store=store).fetch()
+    assert usage.status == ProviderStatus.UNAUTHENTICATED
+
+
 def test_grok_source_aware_save_and_weekly_mapper(tmp_path, monkeypatch):
     path = tmp_path / "auth.json"
     path.write_text(json.dumps({
@@ -307,3 +341,213 @@ def test_grok_source_aware_save_and_weekly_mapper(tmp_path, monkeypatch):
 def test_new_provider_http_failures_are_classified(status, kind):
     mapped = CursorProvider.map(response({}, status=status), None, NOW)
     assert mapped.failure_kind == kind
+
+
+GROK_EXPIRED = "2027-01-14T00:00:00+00:00"
+GROK_FRESH = "2027-01-16T00:00:00+00:00"
+
+
+def _write_grok_file(path, access, refresh, expires_at):
+    path.write_text(json.dumps({
+        "user::client-id": {
+            "key": access,
+            "refresh_token": refresh,
+            "expires_at": expires_at,
+        }
+    }), encoding="utf-8")
+
+
+def _grok_store(path, monkeypatch):
+    store = GrokAuthStore(environment(), now=lambda: NOW)
+    monkeypatch.setattr(store, "auth_path", lambda: path)
+    return store
+
+
+def _grok_getter(seen):
+    def getter(url, headers, timeout=15.0):
+        if url == SETTINGS_URL:
+            return response({"subscription_tier_display": "SuperGrok"})
+        assert url == USAGE_URL
+        seen.append(headers["Authorization"])
+        return response({
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2027-02-01T00:00:00Z",
+                },
+                "creditUsagePercent": 36,
+            }
+        })
+
+    return getter
+
+
+def _grok_saved(path):
+    entry = json.loads(path.read_text())["user::client-id"]
+    return entry["key"], entry["refresh_token"]
+
+
+def test_grok_reload_returns_same_entry_from_exact_source(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_FRESH)
+    store = _grok_store(path, monkeypatch)
+    credentials = store.load_candidates()[0]
+    _write_grok_file(path, "cli-access", "cli-refresh", GROK_FRESH)
+    live = store.reload(credentials)
+    assert live.entry_key == credentials.entry_key
+    assert live.token == "cli-access"
+    path.write_text('{"other::id":{"key":"x"}}', encoding="utf-8")
+    assert store.reload(credentials) is None
+
+
+def test_grok_concurrent_instances_send_one_refresh(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_EXPIRED)
+    posts = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(dict(data)["refresh_token"])
+        entered.set()
+        assert release.wait(5)
+        return response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        })
+
+    seen = []
+    results = {}
+    providers = {
+        name: GrokProvider(
+            auth_store=_grok_store(path, monkeypatch),
+            getter=_grok_getter(seen),
+            form_poster=poster,
+            now=lambda: NOW,
+        )
+        for name in ("first", "second")
+    }
+
+    def run(name):
+        results[name] = providers[name].fetch()
+
+    first = threading.Thread(target=run, args=("first",))
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=run, args=("second",))
+    second.start()
+    time.sleep(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert posts == ["old-refresh"]
+    assert results["first"].status == ProviderStatus.OK
+    assert results["second"].status == ProviderStatus.OK
+    assert seen == ["Bearer new-access", "Bearer new-access"]
+    assert _grok_saved(path) == ("new-access", "new-refresh")
+
+
+def test_grok_uses_tokens_rotated_before_lock_without_posting(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_EXPIRED)
+    store = _grok_store(path, monkeypatch)
+    original_load = store.load_candidates
+
+    def load_then_rotate():
+        loaded = original_load()
+        _write_grok_file(path, "cli-access", "cli-refresh", GROK_FRESH)
+        return loaded
+
+    monkeypatch.setattr(store, "load_candidates", load_then_rotate)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    seen = []
+    usage = GrokProvider(
+        auth_store=store,
+        getter=_grok_getter(seen),
+        form_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.OK
+    assert seen == ["Bearer cli-access"]
+
+
+def test_grok_failed_save_is_storage_error_after_one_post(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_EXPIRED)
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(dict(data)["refresh_token"])
+        # An external CLI (which does not take our lock) rewrites the file.
+        _write_grok_file(path, "cli-access", "cli-refresh", GROK_EXPIRED)
+        return response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        })
+
+    def getter(*args, **kwargs):
+        raise AssertionError("usage must not be requested")
+
+    usage = GrokProvider(
+        auth_store=_grok_store(path, monkeypatch),
+        getter=getter,
+        form_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert usage.error_message == "Grok credentials could not be updated."
+    assert posts == ["old-refresh"]
+    assert _grok_saved(path) == ("cli-access", "cli-refresh")
+
+
+def test_grok_lock_timeout_is_transient_without_posting(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_EXPIRED)
+    with credential_lock("grok"):
+        pass
+    holder = os.open(lock_directory() / "grok.lock", os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    try:
+        usage = GrokProvider(
+            auth_store=_grok_store(path, monkeypatch),
+            form_poster=poster,
+            now=lambda: NOW,
+            lock_timeout=0.2,
+        ).fetch()
+    finally:
+        os.close(holder)
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.TRANSIENT
+    assert "being refreshed by another process" in usage.error_message
+
+
+def test_grok_never_sends_the_same_refresh_token_twice(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_FRESH)
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(dict(data)["refresh_token"])
+        return response({}, status=503)
+
+    provider = GrokProvider(
+        auth_store=_grok_store(path, monkeypatch),
+        getter=lambda *args, **kwargs: response({}, status=401),
+        form_poster=poster,
+        now=lambda: NOW,
+    )
+    first = provider.fetch()
+    second = provider.fetch()
+    assert first.status == ProviderStatus.UNAUTHENTICATED
+    assert second.status == ProviderStatus.UNAUTHENTICATED
+    assert posts == ["old-refresh"]

@@ -64,7 +64,7 @@ class DevinAuthStore:
     def load_file(self) -> Optional[DevinCredentials]:
         try:
             text = self.credentials_path().read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
         api_key = self.read_toml_string(text, "windsurf_api_key")
         if api_key is None:

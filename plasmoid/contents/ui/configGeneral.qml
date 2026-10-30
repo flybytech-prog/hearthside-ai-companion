@@ -35,6 +35,8 @@ KCM.ScrollViewKCM {
     property var updateInfo: null
     property string updateMessage: ""
     property bool checkingProviders: false
+    property bool detecting: false
+    readonly property string detectCommand: "python3 -m ai_usage_kde --detect"
     property bool checkingUpdate: false
     readonly property var refreshChoices: [
         { value: 60, text: i18n("1 minute") },
@@ -147,8 +149,10 @@ KCM.ScrollViewKCM {
     }
 
     function providerStatus(providerId) {
-        if (!contains(page.installedProviderIds, providerId))
-            return i18n("Not detected")
+        if (!contains(page.installedProviderIds, providerId)) {
+            return page.detecting && page.installedProviderIds.length === 0
+                ? i18n("Checking…") : i18n("Not detected")
+        }
         var result = resultFor(providerId)
         if (!result)
             return page.checkingProviders ? i18n("Checking…") : i18n("Detected")
@@ -193,6 +197,12 @@ KCM.ScrollViewKCM {
         )
     }
 
+    // Network-free: only reports which providers are installed.
+    function detectProviders() {
+        page.detecting = true
+        providerSource.connectSource(page.detectCommand)
+    }
+
     function checkForUpdates() {
         page.checkingUpdate = true
         page.updateMessage = ""
@@ -203,7 +213,7 @@ KCM.ScrollViewKCM {
         page.cfg_refreshInterval = normalizedRefresh(page.cfg_refreshInterval)
         page.cfg_configSchemaVersion = 2
         page.cfg_initialSetupComplete = true
-        Qt.callLater(page.refreshProviders)
+        Qt.callLater(page.detectProviders)
     }
 
     Plasma5Support.DataSource {
@@ -212,7 +222,11 @@ KCM.ScrollViewKCM {
         connectedSources: []
         onNewData: (source, data) => {
             providerSource.disconnectSource(source)
-            page.checkingProviders = false
+            var detectOnly = source === page.detectCommand
+            if (detectOnly)
+                page.detecting = false
+            else
+                page.checkingProviders = false
             try {
                 var payload = JSON.parse((data["stdout"] || "").toString())
                 if (payload.schema_version !== 2)
@@ -220,6 +234,9 @@ KCM.ScrollViewKCM {
                 if (payload.catalog && payload.catalog.length)
                     page.catalogModel = payload.catalog
                 page.installedProviderIds = payload.installed_provider_ids || []
+                // Detection carries no status; keep results from a network run.
+                if (detectOnly)
+                    return
                 var results = {}
                 var providers = payload.providers || []
                 for (var index = 0; index < providers.length; index++)

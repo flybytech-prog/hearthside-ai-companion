@@ -42,13 +42,13 @@ class CopilotAuthStore:
         for path in self.paths()[:2]:
             try:
                 token = self.oauth_token(path.read_text(encoding="utf-8"))
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 continue
             if token:
                 return token
         try:
             token = self.yaml_value(self.paths()[2].read_text(encoding="utf-8"), "oauth_token")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             token = None
         if token:
             return token

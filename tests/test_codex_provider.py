@@ -1,12 +1,17 @@
 import base64
+import fcntl
 import json
+import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from conftest import fixture
 from ai_usage_kde.core.auth import CodexAuthStore, SecretToolStore
 from ai_usage_kde.core.environment import LoginShellEnvironment
 from ai_usage_kde.core.http import HttpResponse
-from ai_usage_kde.core.model import ProviderStatus
+from ai_usage_kde.core.locking import credential_lock, lock_directory
+from ai_usage_kde.core.model import FailureKind, ProviderStatus
 from ai_usage_kde.providers.codex import (
     CLIENT_ID,
     REFRESH_URL,
@@ -226,3 +231,275 @@ def test_codex_unconfigured_is_unauthenticated():
         creds=None,
     ).fetch()
     assert usage.status == ProviderStatus.UNAUTHENTICATED
+
+
+EXPIRING = _jwt(NOW.timestamp() + 60)
+FRESH = _jwt(NOW.timestamp() + 3600)
+ROTATED = _jwt(NOW.timestamp() + 7200)
+
+
+def _write_codex_file(path, access, refresh):
+    document = json.loads(fixture("codex_auth.json").read_text())
+    document["tokens"]["access_token"] = access
+    document["tokens"]["refresh_token"] = refresh
+    document["last_refresh"] = None
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _saved_codex_tokens(path):
+    tokens = json.loads(path.read_text())["tokens"]
+    return tokens["access_token"], tokens["refresh_token"]
+
+
+def _form_value(data, name):
+    return next(value for key, value in data if key == name)
+
+
+def _bearer_getter(seen):
+    def getter(url, headers, timeout=15.0):
+        seen.append(headers["Authorization"])
+        return _response()
+
+    return getter
+
+
+def test_codex_concurrent_instances_send_one_refresh(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_codex_file(path, EXPIRING, "old-refresh")
+    posts = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(_form_value(data, "refresh_token"))
+        entered.set()
+        assert release.wait(5)
+        return _response(200, {"access_token": ROTATED, "refresh_token": "new-refresh"})
+
+    seen = []
+    results = {}
+    providers = {}
+    for name in ("first", "second"):
+        store = _store()
+        providers[name] = CodexProvider(
+            creds=store.load_file(path),
+            auth_store=store,
+            getter=_bearer_getter(seen),
+            form_poster=poster,
+            now=lambda: NOW,
+        )
+
+    def run(name):
+        results[name] = providers[name].fetch()
+
+    first = threading.Thread(target=run, args=("first",))
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=run, args=("second",))
+    second.start()
+    time.sleep(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert posts == ["old-refresh"]
+    assert results["first"].status == ProviderStatus.OK
+    assert results["second"].status == ProviderStatus.OK
+    assert seen == [f"Bearer {ROTATED}", f"Bearer {ROTATED}"]
+    assert _saved_codex_tokens(path) == (ROTATED, "new-refresh")
+
+
+def test_codex_uses_tokens_rotated_before_lock_without_posting(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_codex_file(path, EXPIRING, "old-refresh")
+    store = _store()
+    credentials = store.load_file(path)
+    _write_codex_file(path, FRESH, "cli-refresh")
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    seen = []
+    usage = CodexProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=_bearer_getter(seen),
+        form_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.OK
+    assert seen == [f"Bearer {FRESH}"]
+
+
+def test_codex_failed_save_is_storage_error_after_one_post(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_codex_file(path, EXPIRING, "old-refresh")
+    store = _store()
+    credentials = store.load_file(path)
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(_form_value(data, "refresh_token"))
+        # An external CLI (which does not take our lock) rewrites the file.
+        _write_codex_file(path, EXPIRING, "cli-refresh")
+        return _response(200, {"access_token": ROTATED, "refresh_token": "new-refresh"})
+
+    def getter(*args, **kwargs):
+        raise AssertionError("usage must not be requested")
+
+    usage = CodexProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=getter,
+        form_poster=poster,
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert usage.error_message == "Codex credentials could not be updated."
+    assert posts == ["old-refresh"]
+    assert _saved_codex_tokens(path) == (EXPIRING, "cli-refresh")
+
+
+def test_codex_lock_timeout_is_transient_without_posting(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_codex_file(path, EXPIRING, "old-refresh")
+    store = _store()
+    credentials = store.load_file(path)
+    with credential_lock("codex"):
+        pass
+    holder = os.open(lock_directory() / "codex.lock", os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+
+    def poster(*args, **kwargs):
+        raise AssertionError("refresh must not be sent")
+
+    try:
+        usage = CodexProvider(
+            creds=credentials,
+            auth_store=store,
+            form_poster=poster,
+            now=lambda: NOW,
+            lock_timeout=0.2,
+        ).fetch()
+    finally:
+        os.close(holder)
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.TRANSIENT
+    assert "being refreshed by another process" in usage.error_message
+
+
+def test_codex_never_sends_the_same_refresh_token_twice(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_codex_file(path, FRESH, "old-refresh")
+    store = _store()
+    posts = []
+
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(_form_value(data, "refresh_token"))
+        return _response(503, {})
+
+    file_credentials = store.load_file(path)
+    # The same login reachable twice (e.g. file and keyring copies).
+    duplicate = store.load_file(path)
+    provider = CodexProvider(
+        creds=[file_credentials, duplicate],
+        auth_store=store,
+        getter=lambda *args, **kwargs: _response(401, {}),
+        form_poster=poster,
+        now=lambda: NOW,
+    )
+    first = provider.fetch()
+    second = provider.fetch()
+    assert first.failure_kind == FailureKind.TRANSIENT
+    assert second.status == ProviderStatus.UNAUTHENTICATED
+    assert posts == ["old-refresh"]
+
+
+def _refuse_post(posts):
+    def poster(url, data, headers, timeout=15.0):
+        posts.append(data)
+        raise AssertionError("refresh must not be sent")
+
+    return poster
+
+
+def _refuse_usage(*args, **kwargs):
+    raise AssertionError("usage must not be requested")
+
+
+def _codex_refresh_after(path, mutate):
+    _write_codex_file(path, EXPIRING, "old-refresh")
+    store = _store()
+    credentials = store.load_file(path)
+    mutate(path)
+    posts = []
+    usage = CodexProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=_refuse_usage,
+        form_poster=_refuse_post(posts),
+        now=lambda: NOW,
+    ).fetch()
+    return usage, posts
+
+
+def test_codex_logout_before_refresh_is_not_logged_in(tmp_path):
+    usage, posts = _codex_refresh_after(tmp_path / "auth.json", lambda path: path.unlink())
+    assert usage.status == ProviderStatus.UNAUTHENTICATED
+    assert usage.failure_kind == FailureKind.AUTHENTICATION
+    assert usage.error_message == "Not logged in. Run `codex` to authenticate."
+    assert posts == []
+
+
+def test_codex_unreadable_file_at_reread_is_storage_error(tmp_path):
+    usage, posts = _codex_refresh_after(
+        tmp_path / "auth.json",
+        lambda path: path.write_bytes(b"\xff\xfe not utf-8"),
+    )
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert posts == []
+
+
+def test_codex_switch_to_api_key_before_refresh_sends_nothing(tmp_path):
+    usage, posts = _codex_refresh_after(
+        tmp_path / "auth.json",
+        lambda path: path.write_text('{"OPENAI_API_KEY":"sk-test"}', encoding="utf-8"),
+    )
+    assert usage.status == ProviderStatus.UNAUTHENTICATED
+    assert usage.error_message == "Usage not available for API key."
+    assert posts == []
+
+
+def test_codex_keyring_lookup_failure_at_reread_is_storage_error(tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+
+    document = json.loads(fixture("codex_auth.json").read_text())
+    document["tokens"]["access_token"] = EXPIRING
+    lookups = []
+
+    def runner(args, **kwargs):
+        lookups.append(args[1])
+        if len(lookups) > 1:
+            raise subprocess.TimeoutExpired(args, 5)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
+
+    store = CodexAuthStore(
+        LoginShellEnvironment(environ={"PATH": "/usr/bin", "CODEX_HOME": str(tmp_path)}),
+        secret_store=SecretToolStore(executable="/usr/bin/secret-tool", runner=runner),
+        now=lambda: NOW,
+    )
+    credentials = store.load_keyring()
+    posts = []
+    usage = CodexProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=_refuse_usage,
+        form_poster=_refuse_post(posts),
+        now=lambda: NOW,
+    ).fetch()
+    assert usage.status == ProviderStatus.ERROR
+    assert usage.failure_kind == FailureKind.STORAGE
+    assert posts == []
