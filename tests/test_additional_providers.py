@@ -548,6 +548,9 @@ def test_grok_never_sends_the_same_refresh_token_twice(tmp_path, monkeypatch):
     )
     first = provider.fetch()
     second = provider.fetch()
-    assert first.status == ProviderStatus.UNAUTHENTICATED
-    assert second.status == ProviderStatus.UNAUTHENTICATED
+    # A refresh outage is not a sign-out; the second fetch reports the same
+    # failure without resending the refresh token.
+    for usage in (first, second):
+        assert usage.status == ProviderStatus.ERROR
+        assert usage.failure_kind == FailureKind.TRANSIENT
     assert posts == ["old-refresh"]

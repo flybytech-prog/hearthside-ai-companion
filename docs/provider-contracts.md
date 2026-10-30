@@ -1,9 +1,8 @@
 # Provider contracts
 
-The implementation follows
-[`ai-usage-menubar` at `3df27e9`](https://github.com/burakgon/ai-usage-menubar/tree/3df27e9081192bc5c954f932e4e807e097a49c02),
-using Linux/XDG equivalents for local storage. These endpoints are not public
-provider APIs, so sanitized fixture tests protect the known response shapes.
+The implementation follows the macOS AI Usage menubar app, using Linux/XDG
+equivalents for local storage. These endpoints are not public provider APIs,
+so sanitized fixture tests protect the known response shapes.
 
 ## Discovery and failure behavior
 
@@ -23,7 +22,15 @@ failure; the others are still refreshed. Authentication and storage failures cle
 reading; transient, rate-limit, and invalid-response failures preserve the
 last successful reading in Plasma memory and mark it stale.
 
-`Retry-After` accepts seconds or an HTTP date and defaults to five minutes.
+A failed token refresh is classified by what the token endpoint said, not as a
+sign-out by default: a network error or a `5xx` reply is `transient`, a `429`
+is `rate_limited` with a cooldown from `Retry-After`, and only a `4xx` grant
+error (or an explicit logout flag) reports the provider as signed out. This
+applies to Cursor, Antigravity, and Grok.
+
+`Retry-After` accepts seconds or an HTTP date and defaults to five minutes
+when missing or unparseable. The resulting cooldown is clamped to between now
+and 24 hours from now.
 Cooldowns are held in Plasma memory and are not written to disk.
 
 ## Claude Code
@@ -61,6 +68,12 @@ usage.
 - Refresh: `POST https://api2.cursor.sh/oauth/token`
 - Metrics: Total Usage, Auto Usage, API Usage
 
+Cursor refreshes early, within five minutes of the access token's expiry. If
+that early refresh hits an outage or a `429` while the access token is still
+valid, the helper uses the current token; the failure is reported only once
+the token has actually expired. A refused grant still reports signed out. Each
+helper run sends a given refresh token at most once.
+
 ## Antigravity
 
 - Auth: Secret Service service `gemini`, username `antigravity`
@@ -71,6 +84,13 @@ usage.
   `fetchAvailableModels`, on Google's daily Cloud Code and Cloud Code hosts
 - Plan: `loadCodeAssist`
 - Metrics: Gemini Session/Weekly and Claude Session/Weekly
+
+The fallback also runs when the summary succeeds but holds no known quota
+bucket. Each request tries both hosts. A `429` from one host is reported as
+`rate_limited` (with its `Retry-After`) only if no host succeeds, and then no
+further plan or quota requests are sent. If neither host answers, the provider
+reports `transient`. A refresh outage leaves the derived-token cache untouched,
+and each helper run sends a given refresh token at most once.
 
 The derived access-token cache is documented in [Privacy](privacy.md).
 
@@ -100,8 +120,16 @@ Unlimited and zero-entitlement buckets are not rendered.
 - Plan: `GET https://cli-chat-proxy.grok.com/v1/settings`
 - Metric: Weekly
 
+A missing or empty `auth.json`, or one with no usable account entry, reports
+signed out. A file that exists but cannot be read, is not valid UTF-8, or is
+not valid JSON reports `storage`. A usage `429` reports `rate_limited` with
+its `Retry-After` and skips the plan request.
+
 All credential rotations use source-aware, mode-`0600` writes and avoid
-overwriting a concurrent login.
+overwriting a concurrent login. A credential file that is a symlink is written
+through to its final target, leaving the link in place; the write is refused
+(`storage`) if the target is missing, is not a regular file, or is not owned
+by the current user.
 
 Claude Code, Codex, and Grok rotate refresh tokens, so each refresh holds a
 per-provider cross-process lock (`flock` on an empty lock file, waiting up to
@@ -111,7 +139,12 @@ no refresh. Otherwise it sends at most one refresh `POST` per refresh token
 and writes the result back with compare-before-write. If that write fails, the
 provider reports a `storage` failure and does not reload or retry, because the
 old refresh token has already been spent. If the lock stays busy, the provider
-reports a `transient` failure without sending a refresh. If the re-read finds the
+reports a `transient` failure without sending a refresh. Grok refreshes early,
+within five minutes of expiry; if that early refresh fails for any reason
+other than storage (including a busy lock) while its access token has not yet
+expired, Grok still uses the current access token, and reports the failure
+only once the token has expired. A refresh token that already failed in this
+run is not resent; the earlier failure is reported again. If the re-read finds the
 login gone (file deleted or emptied, or Codex switched to an API key), the
 provider reports it as signed out; if the source cannot be read or decoded, or
 the Secret Service lookup fails, it reports `storage`. Neither case sends a

@@ -32,12 +32,10 @@ KCM.ScrollViewKCM {
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []
     property var providerResults: ({})
-    property var updateInfo: null
-    property string updateMessage: ""
+    property string statusMessage: ""
     property bool checkingProviders: false
     property bool detecting: false
     readonly property string detectCommand: "python3 -m ai_usage_kde --detect"
-    property bool checkingUpdate: false
     readonly property var refreshChoices: [
         { value: 60, text: i18n("1 minute") },
         { value: 300, text: i18n("5 minutes") },
@@ -203,12 +201,6 @@ KCM.ScrollViewKCM {
         providerSource.connectSource(page.detectCommand)
     }
 
-    function checkForUpdates() {
-        page.checkingUpdate = true
-        page.updateMessage = ""
-        updateSource.connectSource("python3 -m ai_usage_kde --check-update")
-    }
-
     Component.onCompleted: {
         page.cfg_refreshInterval = normalizedRefresh(page.cfg_refreshInterval)
         page.cfg_configSchemaVersion = 2
@@ -233,6 +225,7 @@ KCM.ScrollViewKCM {
                     throw new Error("schema")
                 if (payload.catalog && payload.catalog.length)
                     page.catalogModel = payload.catalog
+                page.statusMessage = ""
                 page.installedProviderIds = payload.installed_provider_ids || []
                 // Detection carries no status; keep results from a network run.
                 if (detectOnly)
@@ -243,32 +236,7 @@ KCM.ScrollViewKCM {
                     results[providers[index].provider_id] = providers[index]
                 page.providerResults = results
             } catch (error) {
-                page.updateMessage = i18n("Could not read provider status.")
-            }
-        }
-    }
-
-    Plasma5Support.DataSource {
-        id: updateSource
-        engine: "executable"
-        connectedSources: []
-        onNewData: (source, data) => {
-            updateSource.disconnectSource(source)
-            page.checkingUpdate = false
-            try {
-                var payload = JSON.parse((data["stdout"] || "").toString())
-                page.updateInfo = payload.update || null
-                if (page.updateInfo.error)
-                    page.updateMessage = page.updateInfo.error
-                else if (page.updateInfo.update_available)
-                    page.updateMessage = i18n(
-                        "Version %1 is available.",
-                        page.updateInfo.latest_version
-                    )
-                else
-                    page.updateMessage = i18n("AI Usage is up to date.")
-            } catch (error) {
-                page.updateMessage = i18n("Could not check for updates.")
+                page.statusMessage = i18n("Could not read provider status.")
             }
         }
     }
@@ -469,26 +437,13 @@ KCM.ScrollViewKCM {
             QQC2.Label {
                 Layout.fillWidth: true
                 text: i18n(
-                    "Credentials stay on this computer. The helper only contacts each provider's usage API and GitHub when checking for updates."
+                    "Credentials stay on this computer. The helper only contacts the usage APIs of providers you track."
                 )
                 wrapMode: Text.WordWrap
                 opacity: 0.72
             }
             RowLayout {
                 Layout.fillWidth: true
-                QQC2.Button {
-                    text: i18n("Check for Updates")
-                    icon.name: "software-update-available"
-                    enabled: !page.checkingUpdate
-                    onClicked: page.checkForUpdates()
-                }
-                QQC2.Button {
-                    text: i18n("Open GitHub")
-                    icon.name: "internet-services"
-                    onClicked: Qt.openUrlExternally(
-                        "https://github.com/burakgon/ai-usage-kde-widget"
-                    )
-                }
                 Item {
                     Layout.fillWidth: true
                 }
@@ -503,9 +458,9 @@ KCM.ScrollViewKCM {
                 }
             }
             QQC2.Label {
-                visible: page.updateMessage !== ""
+                visible: page.statusMessage !== ""
                 Layout.fillWidth: true
-                text: page.updateMessage
+                text: page.statusMessage
                 wrapMode: Text.WordWrap
                 opacity: 0.72
             }

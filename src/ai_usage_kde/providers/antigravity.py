@@ -14,9 +14,15 @@ from ..core.auth import SecretToolStore
 from ..core.environment import LoginShellEnvironment
 from ..core.http import HttpResponse, http_post_form, http_post_json
 from ..core.model import FailureKind, ProviderStatus, ProviderUsage, UsageWindow
-from ..core.parsing import non_empty, number, provider_datetime, title_case_identifier
+from ..core.parsing import (
+    non_empty,
+    number,
+    provider_datetime,
+    retry_datetime,
+    title_case_identifier,
+)
 from ..core.storage import atomic_write_private
-from .base import errored, unauthenticated
+from .base import errored, rate_limited, unauthenticated
 
 
 PROVIDER_ID = "antigravity"
@@ -254,6 +260,9 @@ class AntigravityProvider:
         )
         self._post_json = json_poster
         self._post_form = form_poster
+        # Refresh tokens this instance already sent, mapped to what that send
+        # produced. Memory only; a refresh token is never sent twice.
+        self._sent_refresh_tokens: dict[str, str | ProviderUsage | None] = {}
 
     def is_configured(self) -> bool:
         return self._auth.load() is not None
@@ -267,7 +276,10 @@ class AntigravityProvider:
             )
         token = self._auth.usable_access_token(credentials)
         if token is None and credentials.refresh_token:
-            token = self._refresh(credentials.refresh_token)
+            refreshed = self._refresh(credentials.refresh_token)
+            if isinstance(refreshed, ProviderUsage):
+                return refreshed
+            token = refreshed
         if token is None:
             return unauthenticated(
                 PROVIDER_ID, DISPLAY, ICON,
@@ -276,7 +288,9 @@ class AntigravityProvider:
         outcome, summary = self._cloud(SUMMARY_PATH, token, "antigravity")
         if outcome == "authentication" and credentials.refresh_token:
             refreshed = self._refresh(credentials.refresh_token)
-            if refreshed:
+            if isinstance(refreshed, ProviderUsage):
+                return refreshed
+            if refreshed and refreshed != token:
                 token = refreshed
                 outcome, summary = self._cloud(SUMMARY_PATH, token, "antigravity")
         if outcome == "authentication":
@@ -284,6 +298,8 @@ class AntigravityProvider:
                 PROVIDER_ID, DISPLAY, ICON,
                 "Antigravity session expired. Sign in again.",
             )
+        if outcome == "rate_limited":
+            return self._rate_limited(summary)
         _, plan_response = self._cloud(PLAN_PATH, token, "agy")
         plan = self._plan(plan_response)
         if outcome == "success" and summary is not None:
@@ -291,6 +307,8 @@ class AntigravityProvider:
             if mapped is not None:
                 return mapped
         model_outcome, models = self._cloud(MODELS_PATH, token, "antigravity")
+        if model_outcome == "rate_limited":
+            return self._rate_limited(models)
         if model_outcome == "success" and models is not None:
             mapped = self._map_legacy(models, plan, self._utc_now())
             if mapped is not None:
@@ -317,6 +335,13 @@ class AntigravityProvider:
         access_token: str,
         user_agent: str,
     ) -> tuple[str, Optional[HttpResponse]]:
+        """Try each Cloud Code host in turn.
+
+        Returns ("success" | "authentication" | "rate_limited" | "unavailable",
+        response). A 429 from one host does not stop the next host from being
+        tried; it is reported only if no host succeeds.
+        """
+        throttled: Optional[HttpResponse] = None
         for base in CLOUD_BASES:
             try:
                 response = self._post_json(
@@ -334,12 +359,38 @@ class AntigravityProvider:
                 return "authentication", response
             if 200 <= response.status < 300:
                 return "success", response
+            if response.status == 429 and throttled is None:
+                throttled = response
+        if throttled is not None:
+            return "rate_limited", throttled
         return "unavailable", None
 
-    def _refresh(self, refresh_token: str) -> Optional[str]:
+    def _rate_limited(self, response: Optional[HttpResponse]) -> ProviderUsage:
+        return rate_limited(
+            PROVIDER_ID, DISPLAY, ICON,
+            "Antigravity is rate limited. Try again later.",
+            retry_datetime(
+                response.header("retry-after") if response is not None else None,
+                self._utc_now(),
+            ),
+        )
+
+    def _refresh(self, refresh_token: str) -> str | ProviderUsage | None:
+        """Return a fresh access token, an outage failure, or None if refused."""
+        if refresh_token in self._sent_refresh_tokens:
+            return self._sent_refresh_tokens[refresh_token]
         client = self._oauth.load()
         if client is None:
             return None
+        result = self._send_refresh(client, refresh_token)
+        self._sent_refresh_tokens[refresh_token] = result
+        return result
+
+    def _send_refresh(
+        self,
+        client: AntigravityOAuthClient,
+        refresh_token: str,
+    ) -> str | ProviderUsage | None:
         try:
             response = self._post_form(
                 REFRESH_URL,
@@ -351,11 +402,30 @@ class AntigravityProvider:
                 ],
                 {},
             )
-            body = response.json()
         except Exception:
+            return errored(
+                PROVIDER_ID, DISPLAY, ICON,
+                "Antigravity could not refresh its session.",
+                FailureKind.TRANSIENT,
+            )
+        # Outages and throttles at the token endpoint are not a sign-out, and
+        # they leave the derived-token cache untouched.
+        if response.status == 429:
+            return self._rate_limited(response)
+        if response.status >= 500:
+            return errored(
+                PROVIDER_ID, DISPLAY, ICON,
+                "Antigravity could not refresh its session.",
+                FailureKind.TRANSIENT,
+            )
+        if not 200 <= response.status < 300:
+            return None
+        try:
+            body = response.json()
+        except (ValueError, UnicodeDecodeError):
             return None
         token = non_empty(body.get("access_token")) if isinstance(body, dict) else None
-        if not 200 <= response.status < 300 or token is None:
+        if token is None:
             return None
         expires_in = number(body.get("expires_in")) or 3600
         self._auth.cache(token, expires_in, refresh_token)
@@ -401,6 +471,9 @@ class AntigravityProvider:
                     round(min(max((1 - remaining) * 100, 0), 100)),
                     provider_datetime(bucket.get("resetTime")),
                 ))
+        if not windows:
+            # No known bucket: let the caller fall back to fetchAvailableModels.
+            return None
         order = {"session": 0, "weekly": 1, "claude_pool": 2, "claude_pool_weekly": 3}
         windows.sort(key=lambda item: order.get(item.kind, 99))
         return ProviderUsage(

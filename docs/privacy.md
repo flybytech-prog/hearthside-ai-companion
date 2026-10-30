@@ -19,6 +19,10 @@ is written to `$XDG_CACHE_HOME/ai-usage-kde/antigravity-auth.json` (falling back
 to `~/.cache`) with mode `0600`. It contains a short-lived access token, expiry,
 and a SHA-256 refresh-token fingerprint. It never contains the refresh token.
 
+When a credential file is a symlink, refreshed credentials are written to the
+file it points to with mode `0600`, and only if that file already exists, is a
+regular file, and is owned by the current user.
+
 To keep two helper runs from refreshing the same token, the helper creates
 empty lock files named `<provider>.lock` in `$XDG_RUNTIME_DIR/ai-usage-kde/`
 (falling back to `<temp dir>/ai-usage-kde-<uid>/`). The directory is mode
@@ -31,5 +35,5 @@ shell once per run. That shell prints only the allow-listed variables
 `XDG_DATA_HOME`, and `PATH`. The values stay in memory and are never cached to
 disk.
 
-The optional update check contacts GitHub's public Releases API without
-credentials. No analytics or telemetry are collected.
+AI Usage makes no network requests other than to the tracked providers'
+endpoints. No analytics or telemetry are collected.

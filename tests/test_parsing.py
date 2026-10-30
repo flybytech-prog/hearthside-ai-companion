@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ai_usage_kde.core.parsing import (
     decode_json_with_hex_fallback,
@@ -43,6 +43,22 @@ def test_retry_after_and_jwt_expiration():
         now.timestamp() + 60,
         tz=timezone.utc,
     )
+
+
+def test_retry_after_is_clamped_to_a_day_and_never_raises():
+    now = datetime(2027, 1, 15, tzinfo=timezone.utc)
+    day = timedelta(hours=24)
+    for value in ("inf", "1e20", "Fri, 31 Dec 9999 23:59:59 GMT", "86401"):
+        assert retry_datetime(value, now) - now == day, value
+    for value in ("-5", "-inf", "Wed, 21 Oct 2015 07:28:00 GMT"):
+        assert retry_datetime(value, now) == now, value
+    for value in ("nan", None, "", "   ", "garbage", "Fri, 99 Foo"):
+        assert retry_datetime(value, now) - now == timedelta(minutes=5), value
+    assert retry_datetime("120", now) - now == timedelta(seconds=120)
+    assert retry_datetime(
+        "Fri, 15 Jan 2027 00:10:00 GMT",
+        now,
+    ) - now == timedelta(minutes=10)
 
 
 def _segment(value):

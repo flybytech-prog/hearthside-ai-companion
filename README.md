@@ -41,7 +41,6 @@ panel support **Left** and **Used** display modes.
   compare-before-write protection.
 - Uses Linux Secret Service through `secret-tool` without placing secrets in
   process arguments.
-- Checks GitHub Releases on launch, every 24 hours, or manually from Settings.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
   remains on a panel.
 
@@ -84,7 +83,6 @@ ai-usage-kde --json
 ai-usage-kde --providers=claude,codex
 ai-usage-kde --catalog
 ai-usage-kde --detect
-ai-usage-kde --check-update
 ```
 
 The JSON v2 response includes the provider catalog, detected provider IDs,

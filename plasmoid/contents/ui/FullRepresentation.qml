@@ -5,6 +5,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
+import "SnapshotLogic.js" as SnapshotLogic
 
 PlasmaExtras.Representation {
     id: full
@@ -13,6 +14,17 @@ PlasmaExtras.Representation {
     Layout.minimumHeight: Kirigami.Units.gridUnit * 15
     Layout.preferredWidth: Kirigami.Units.gridUnit * 23
     Layout.preferredHeight: Kirigami.Units.gridUnit * 28
+
+    // Wall clock for the reset and retry countdowns; ticks only while open.
+    property double nowMs: Date.now()
+
+    Timer {
+        interval: 30000
+        repeat: true
+        triggeredOnStart: true
+        running: root.expanded
+        onTriggered: full.nowMs = Date.now()
+    }
 
     header: PlasmaExtras.PlasmoidHeading {
         ColumnLayout {
@@ -70,22 +82,6 @@ PlasmaExtras.Representation {
 
     contentItem: ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
-
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            visible: root.updateInfo && root.updateInfo.update_available
-            type: Kirigami.MessageType.Information
-            text: root.updateInfo
-                ? i18n("AI Usage %1 is available.", root.updateInfo.latest_version)
-                : ""
-            actions: [
-                Kirigami.Action {
-                    text: i18n("View update")
-                    icon.name: "software-update-available"
-                    onTriggered: root.openUpdate()
-                }
-            ]
-        }
 
         PlasmaExtras.PlaceholderMessage {
             Layout.fillWidth: true
@@ -191,7 +187,7 @@ PlasmaExtras.Representation {
                                 || providerSection.modelData.status === "rate_limited"
                                 ? Kirigami.MessageType.Warning
                                 : Kirigami.MessageType.Error
-                            text: full.failureText(providerSection.modelData)
+                            text: full.failureText(providerSection.modelData, full.nowMs)
                         }
 
                         GridLayout {
@@ -288,9 +284,10 @@ PlasmaExtras.Representation {
                                         }
 
                                         PlasmaComponents.Label {
-                                            visible: !!quotaCard.modelData.resets_at
+                                            visible: text !== ""
                                             text: full.relativeReset(
-                                                quotaCard.modelData.resets_at
+                                                quotaCard.modelData.resets_at,
+                                                full.nowMs
                                             )
                                             opacity: 0.55
                                             font: Kirigami.Theme.smallFont
@@ -387,19 +384,20 @@ PlasmaExtras.Representation {
         }
     }
 
-    function failureText(providerData) {
+    function failureText(providerData, nowMs) {
         var text = providerData.error_message || providerData.status
         if (providerData.status === "stale")
             text = i18n("Showing the last successful reading. %1", text)
-        if (providerData.retry_at)
-            text += " " + relativeRetry(providerData.retry_at)
+        var retry = relativeRetry(providerData.retry_at, nowMs)
+        if (retry !== "")
+            text += " " + retry
         return text
     }
 
-    function relativeReset(iso) {
-        if (!iso)
+    function relativeReset(iso, nowMs) {
+        var difference = SnapshotLogic.millisUntil(iso, nowMs)
+        if (difference === null)
             return ""
-        var difference = new Date(iso).getTime() - Date.now()
         if (difference <= 0)
             return i18n("Resetting…")
         var minutes = Math.max(1, Math.round(difference / 60000))
@@ -412,8 +410,10 @@ PlasmaExtras.Representation {
         return i18n("Resets in %1d %2h", days, hours % 24)
     }
 
-    function relativeRetry(iso) {
-        var difference = new Date(iso).getTime() - Date.now()
+    function relativeRetry(iso, nowMs) {
+        var difference = SnapshotLogic.millisUntil(iso, nowMs)
+        if (difference === null)
+            return ""
         if (difference <= 0)
             return i18n("Ready to retry.")
         var minutes = Math.max(1, Math.ceil(difference / 60000))

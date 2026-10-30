@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from . import __version__
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
-from .core.update import check_for_update
 
 
 def parser() -> argparse.ArgumentParser:
@@ -31,11 +30,6 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the catalog and installed provider IDs without reading credentials or using the network.",
     )
-    result.add_argument(
-        "--check-update",
-        action="store_true",
-        help="Check the latest GitHub release without reading provider credentials.",
-    )
     result.add_argument("--version", action="version", version=__version__)
     return result
 
@@ -53,12 +47,7 @@ def _provider_ids(value: str | None, argument_parser: argparse.ArgumentParser):
 def main(argv: Sequence[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
-    if args.check_update:
-        payload = {
-            "schema_version": 2,
-            "update": check_for_update(__version__),
-        }
-    elif args.catalog:
+    if args.catalog:
         payload = catalog_snapshot()
     elif args.detect:
         payload = detect_snapshot()

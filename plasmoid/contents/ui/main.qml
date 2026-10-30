@@ -6,6 +6,7 @@ import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.kirigami as Kirigami
 import "ProviderCatalog.js" as Catalog
 import "RefreshGate.js" as RefreshGate
+import "SnapshotLogic.js" as SnapshotLogic
 
 PlasmoidItem {
     id: root
@@ -22,9 +23,6 @@ PlasmoidItem {
     property bool hasData: false
     property string lastError: ""
     property date lastUpdate: new Date(0)
-    property var updateInfo: null
-    property string updateError: ""
-    property bool updateChecking: false
     property bool refreshInFlight: false
     property bool refreshQueued: false
     property double refreshStartedAt: 0
@@ -100,53 +98,17 @@ PlasmoidItem {
         return root.providerStates[providerId] || null
     }
 
+    // Thin wrappers: reading root.usageMode here keeps callers' bindings live.
     function windowFor(providerData, metricId) {
-        var windows = providerData && providerData.windows ? providerData.windows : []
-        for (var index = 0; index < windows.length; index++) {
-            if (windows[index].kind === metricId)
-                return windows[index]
-        }
-        return null
+        return SnapshotLogic.windowFor(providerData, metricId)
     }
 
     function metricReading(providerData, metricId) {
-        var window = windowFor(providerData, metricId)
-        if (window) {
-            return {
-                type: "percentage",
-                raw_used: Number(window.used_percent),
-                value: displayedPercent(Number(window.used_percent))
-            }
-        }
-        var billing = providerData ? providerData.billing_usage : null
-        if (!billing)
-            return null
-        if (metricId === "extra_usage"
-                && (billing.kind === "bounded_spend"
-                    || billing.kind === "unbounded_spend")) {
-            var amount = Number(billing.used_amount || 0)
-            if (root.usageMode === "remaining" && billing.kind === "bounded_spend")
-                amount = Math.max(Number(billing.limit_amount || 0) - amount, 0)
-            return {
-                type: "money",
-                value: amount,
-                currency: billing.currency_code || "USD"
-            }
-        }
-        if (metricId === "credits" && billing.kind === "flex_credit_balance") {
-            return {
-                type: "credits",
-                value: Number(billing.remaining_credits || 0),
-                usd: Number(billing.usd_value || 0)
-            }
-        }
-        return null
+        return SnapshotLogic.metricReading(providerData, metricId, root.usageMode)
     }
 
     function displayedPercent(rawUsed) {
-        if (root.usageMode === "used")
-            return rawUsed
-        return 100 - Math.max(0, Math.min(100, rawUsed))
+        return SnapshotLogic.displayedPercent(rawUsed, root.usageMode)
     }
 
     function formatReading(reading) {
@@ -248,40 +210,13 @@ PlasmoidItem {
     function applySnapshot(payload) {
         if (!payload || payload.schema_version !== 2)
             throw new Error("Unsupported helper schema")
-        var states = Object.assign({}, root.providerStates)
-        var goods = Object.assign({}, root.lastGoodProviders)
-        var cooldowns = Object.assign({}, root.cooldownUntil)
-        var results = payload.providers || []
-        for (var index = 0; index < results.length; index++) {
-            var current = results[index]
-            var providerId = current.provider_id
-            if (current.status === "ok") {
-                current.stale = false
-                states[providerId] = current
-                goods[providerId] = current
-                delete cooldowns[providerId]
-                continue
-            }
-            var preserves = current.failure_kind === "transient"
-                || current.failure_kind === "rate_limited"
-                || current.failure_kind === "invalid_response"
-            if (preserves && goods[providerId]) {
-                states[providerId] = Object.assign({}, goods[providerId], {
-                    status: "stale",
-                    stale: true,
-                    failure_kind: current.failure_kind,
-                    error_message: current.error_message,
-                    retry_at: current.retry_at
-                })
-            } else {
-                current.stale = false
-                states[providerId] = current
-                if (!preserves)
-                    delete goods[providerId]
-            }
-            if (current.failure_kind === "rate_limited" && current.retry_at)
-                cooldowns[providerId] = new Date(current.retry_at).getTime()
-        }
+        var merged = SnapshotLogic.mergeResults(
+            root.providerStates,
+            root.lastGoodProviders,
+            root.cooldownUntil,
+            payload.providers || []
+        )
+        var states = merged.states
 
         var installed = payload.installed_provider_ids || []
         var visible = []
@@ -296,8 +231,8 @@ PlasmoidItem {
             }
         }
         root.providerStates = states
-        root.lastGoodProviders = goods
-        root.cooldownUntil = cooldowns
+        root.lastGoodProviders = merged.goods
+        root.cooldownUntil = merged.cooldowns
         root.snapshot = {
             schema_version: 2,
             generated_at: payload.generated_at,
@@ -331,19 +266,6 @@ PlasmoidItem {
         Plasmoid.configuration.usageMode = mode === "used" ? "used" : "remaining"
     }
 
-    function checkForUpdates() {
-        root.updateChecking = true
-        root.updateError = ""
-        updateSource.connectSource("python3 -m ai_usage_kde --check-update")
-    }
-
-    function openUpdate() {
-        var url = root.updateInfo && root.updateInfo.release_url
-            ? root.updateInfo.release_url
-            : "https://github.com/burakgon/ai-usage-kde-widget/releases"
-        Qt.openUrlExternally(url)
-    }
-
     Plasma5Support.DataSource {
         id: usageSource
         engine: "executable"
@@ -375,38 +297,12 @@ PlasmoidItem {
         }
     }
 
-    Plasma5Support.DataSource {
-        id: updateSource
-        engine: "executable"
-        connectedSources: []
-        onNewData: (source, data) => {
-            updateSource.disconnectSource(source)
-            root.updateChecking = false
-            try {
-                var payload = JSON.parse((data["stdout"] || "").toString())
-                root.updateInfo = payload.update || null
-                root.updateError = root.updateInfo && root.updateInfo.error
-                    ? root.updateInfo.error : ""
-            } catch (error) {
-                root.updateError = i18n("Could not check for updates")
-            }
-        }
-    }
-
     Timer {
         interval: root.refreshInterval * 1000
         running: true
         repeat: true
         triggeredOnStart: true
         onTriggered: root.refresh()
-    }
-
-    Timer {
-        interval: 24 * 60 * 60 * 1000
-        running: true
-        repeat: true
-        triggeredOnStart: true
-        onTriggered: root.checkForUpdates()
     }
 
     Timer {
@@ -466,12 +362,6 @@ PlasmoidItem {
             text: i18n("Refresh now")
             icon.name: "view-refresh"
             onTriggered: root.refresh()
-        },
-        PlasmaCore.Action {
-            visible: root.updateInfo && root.updateInfo.update_available
-            text: i18n("Update available")
-            icon.name: "software-update-available"
-            onTriggered: root.openUpdate()
         }
     ]
 }

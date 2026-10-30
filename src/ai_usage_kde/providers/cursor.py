@@ -110,6 +110,11 @@ class CursorAuthStore:
         expiration = jwt_expiration(access_token or "")
         return expiration is None or (expiration - self._utc_now()).total_seconds() <= 300
 
+    def is_expired(self, access_token: Optional[str]) -> bool:
+        """True unless the token is a JWT whose expiry is still in the future."""
+        expiration = jwt_expiration(access_token or "")
+        return expiration is None or self._utc_now() >= expiration
+
     def save_access_token(self, credentials: CursorCredentials, token: str) -> bool:
         source = credentials.source
         if source.kind == "sqlite" and source.path is not None:
@@ -159,6 +164,9 @@ class CursorProvider:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._auth = auth_store or CursorAuthStore(now=self._now)
         self._post = poster
+        # Refresh tokens this instance already sent, mapped to the failure that
+        # send produced (None on success). Memory only; never sent twice.
+        self._sent_refresh_tokens: dict[str, Optional[ProviderUsage]] = {}
 
     def is_configured(self) -> bool:
         return self._auth.load() is not None
@@ -172,8 +180,13 @@ class CursorProvider:
             )
         if self._auth.needs_refresh(credentials.access_token):
             failure = self._refresh(credentials)
-            if failure is not None:
+            if failure is not None and (
+                failure.failure_kind not in (FailureKind.TRANSIENT, FailureKind.RATE_LIMITED)
+                or self._auth.is_expired(credentials.access_token)
+            ):
                 return failure
+            # Otherwise the access token is still valid: an early refresh that
+            # hit an outage or a throttle is not fatal.
         token = non_empty(credentials.access_token)
         if token is None:
             return unauthenticated(
@@ -230,6 +243,17 @@ class CursorProvider:
                 PROVIDER_ID, DISPLAY, ICON,
                 "Cursor session expired. Sign in again.",
             )
+        if refresh_token in self._sent_refresh_tokens:
+            return self._sent_refresh_tokens[refresh_token]
+        failure = self._send_refresh(credentials, refresh_token)
+        self._sent_refresh_tokens[refresh_token] = failure
+        return failure
+
+    def _send_refresh(
+        self,
+        credentials: CursorCredentials,
+        refresh_token: str,
+    ) -> Optional[ProviderUsage]:
         try:
             response = self._post(
                 REFRESH_URL,
@@ -241,6 +265,20 @@ class CursorProvider:
                 {},
             )
         except Exception:
+            return errored(
+                PROVIDER_ID, DISPLAY, ICON,
+                "Cursor could not refresh its session.",
+                FailureKind.TRANSIENT,
+            )
+        # An outage or throttle at the token endpoint says nothing about the
+        # session itself, so it must not be reported as a sign-out.
+        if response.status == 429:
+            return rate_limited(
+                PROVIDER_ID, DISPLAY, ICON,
+                "Cursor is rate limited. Try again later.",
+                retry_datetime(response.header("retry-after"), self._utc_now()),
+            )
+        if response.status >= 500:
             return errored(
                 PROVIDER_ID, DISPLAY, ICON,
                 "Cursor could not refresh its session.",

@@ -4,9 +4,7 @@ import pytest
 
 from ai_usage_kde import cli
 from ai_usage_kde.core.catalog import PROVIDER_IDS, catalog_json
-from ai_usage_kde.core.http import HttpResponse
 from ai_usage_kde.core.snapshot import collect_snapshot
-from ai_usage_kde.core.update import check_for_update, is_newer
 
 
 def test_catalog_has_reference_order_defaults_and_metrics():
@@ -100,28 +98,10 @@ def test_untracked_installed_provider_is_not_instantiated(monkeypatch):
     assert payload["providers"] == []
 
 
-def test_semver_and_update_check():
-    assert is_newer("v2.1.0", "2.0.0")
-    assert is_newer("2.0.0", "2.0.0-rc.2")
-    assert is_newer("2.0.0-rc.10", "2.0.0-rc.2")
-    assert not is_newer("1.9.9", "2.0.0")
-
-    result = check_for_update(
-        "2.0.0",
-        getter=lambda *args, **kwargs: HttpResponse(
-            200,
-            b'{"tag_name":"v2.1.0","html_url":"https://github.com/example/release"}',
-            {},
-        ),
-    )
-    assert result["update_available"] is True
-    assert result["latest_version"] == "2.1.0"
-    assert result["release_url"] == "https://github.com/example/release"
-
-    no_releases = check_for_update(
-        "2.0.0",
-        getter=lambda *args, **kwargs: HttpResponse(404, b"{}", {}),
-    )
-    assert no_releases["error"] is None
-    assert no_releases["update_available"] is False
-    assert no_releases["latest_version"] == "2.0.0"
+def test_cli_has_no_update_check(capsys):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--check-update"])
+    assert raised.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "--check-update" in output.err

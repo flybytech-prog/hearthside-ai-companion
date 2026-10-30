@@ -74,21 +74,37 @@ def provider_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+MAX_RETRY_DELAY = timedelta(hours=24)
+DEFAULT_RETRY_DELAY = timedelta(minutes=5)
+
+
 def retry_datetime(value: Optional[str], now: datetime) -> datetime:
-    if value:
-        cleaned = value.strip()
-        try:
-            seconds = max(float(cleaned), 0)
-            return now + timedelta(seconds=seconds)
-        except ValueError:
-            try:
-                parsed = parsedate_to_datetime(cleaned)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed.astimezone(timezone.utc)
-            except (TypeError, ValueError, OverflowError):
-                pass
-    return now + timedelta(minutes=5)
+    """Turn a Retry-After header into a cooldown end clamped to [now, now + 24h]."""
+    cleaned = value.strip() if isinstance(value, str) else ""
+    if not cleaned:
+        return now + DEFAULT_RETRY_DELAY
+    try:
+        seconds = float(cleaned)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if math.isnan(seconds):
+            return now + DEFAULT_RETRY_DELAY
+        seconds = min(max(seconds, 0.0), MAX_RETRY_DELAY.total_seconds())
+        return now + timedelta(seconds=seconds)
+    try:
+        parsed = parsedate_to_datetime(cleaned)
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return now + DEFAULT_RETRY_DELAY
+    if parsed is None:
+        return now + DEFAULT_RETRY_DELAY
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        parsed = parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return now + MAX_RETRY_DELAY
+    return min(max(parsed, now), now + MAX_RETRY_DELAY)
 
 
 def jwt_expiration(token: str) -> Optional[datetime]:
