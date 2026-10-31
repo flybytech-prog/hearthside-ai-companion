@@ -43,6 +43,12 @@ panel support **Left** and **Used** display modes.
   process arguments.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
   remains on a panel.
+- Optional **Chat** tab next to the usage view: pick Claude, ChatGPT, Grok,
+  Gemini (best effort), GitHub Copilot, or Microsoft Copilot from a dropdown
+  and use the provider's own website right in the popup. It runs in a private,
+  in-memory browser profile: you sign in on each site normally, nothing is
+  saved to disk, and you are signed out when Plasma restarts or you choose
+  **Clear chat data**. Choose the sites under **Settings → Chat**.
 
 Fresh installs track all providers, show Claude Code and Codex in the panel,
 select Weekly for each, display usage left, and refresh every five minutes.
@@ -94,6 +100,15 @@ usage, reset/retry times, and no credential data.
 - KDE Plasma 6 and Qt 6
 - Python 3.11 or newer; standard library only
 - `secret-tool` when a provider stores its session in Linux Secret Service
+- For the Chat tab only: Qt WebEngine 6.8 or newer with its QML module
+  (Arch: `qt6-webengine`; Fedora: `qt6-qtwebengine`; Debian/Ubuntu:
+  `qml6-module-qtwebengine`; package names may vary). It also needs the Qt
+  Quick Dialogs QML module, usually already installed with Plasma (Arch:
+  `qt6-declarative`; Debian/Ubuntu: `qml6-module-qtquick-dialogs`). Without
+  these the usage view works as before and the Chat tab explains what to
+  install. Each open
+  chat site uses roughly 200–500 MB of memory until Plasma restarts or you
+  clear chat data.
 
 ## Privacy
 
@@ -101,7 +116,17 @@ No tokens, credential fingerprints, raw API responses, local transcripts, or
 usage history are printed or cached. Antigravity's derived access-token cache
 is the only authentication cache created by AI Usage; it is stored with mode
 `0600` under `$XDG_CACHE_HOME/ai-usage-kde` and keyed to a one-way refresh-token
-fingerprint. See [Privacy](docs/privacy.md) and
+fingerprint.
+
+The Chat tab keeps cookies, sessions, and site data in memory only, denies
+every site permission (microphone, camera, screen sharing, notifications,
+location, clipboard reading), asks before each download, opens outside links
+in your browser (which may keep them in its history), and never reads or
+scripts the pages. Page console messages
+are discarded. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
+list what it does not protect against.
+
+See [Privacy](docs/privacy.md) and
 [Provider contracts](docs/provider-contracts.md).
 
 ## Development

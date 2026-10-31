@@ -7,6 +7,7 @@ import org.kde.kirigami as Kirigami
 import "ProviderCatalog.js" as Catalog
 import "RefreshGate.js" as RefreshGate
 import "SnapshotLogic.js" as SnapshotLogic
+import "ChatSites.js" as ChatSites
 
 PlasmoidItem {
     id: root
@@ -28,6 +29,14 @@ PlasmoidItem {
     property double refreshStartedAt: 0
     property string refreshSource: ""
     property int refreshRun: 0
+
+    // Chat tab runtime state; never written to the configuration.
+    property string popupTab: "usage"
+    property string chatSiteId: ""
+    property bool chatPinned: false
+    property bool chatDialogOpen: false
+    readonly property var chatSites: ChatSites.enabledSites(Plasmoid.configuration.chatSites)
+    readonly property var chatSiteIds: root.chatSites.map(function (site) { return site.id })
 
     readonly property int refreshInterval: normalizedRefresh(
         Plasmoid.configuration.refreshInterval || 300
@@ -262,6 +271,16 @@ PlasmoidItem {
         root.snapshot = Object.assign({}, root.snapshot, {providers: visible})
     }
 
+    function syncChatSite() {
+        if (root.chatSiteIds.indexOf(root.chatSiteId) < 0)
+            root.chatSiteId = ChatSites.initialSite(
+                root.chatSiteIds,
+                Plasmoid.configuration.chatDefaultSite
+            )
+        if (root.chatSiteIds.length === 0)
+            root.popupTab = "usage"
+    }
+
     function setUsageMode(mode) {
         Plasmoid.configuration.usageMode = mode === "used" ? "used" : "remaining"
     }
@@ -321,13 +340,22 @@ PlasmoidItem {
             Plasmoid.configuration.initialSetupComplete = true
             firstRunSettingsTimer.start()
         }
+        root.syncChatSite()
     }
 
     onTrackedProvidersChanged: {
         root.rebuildVisibleProviders()
         root.refresh()
     }
-    onExpandedChanged: if (root.expanded) root.refresh()
+    onExpandedChanged: {
+        if (root.expanded)
+            root.refresh()
+        else
+            root.chatPinned = false
+    }
+    onChatSiteIdsChanged: root.syncChatSite()
+
+    hideOnWindowDeactivate: !root.chatPinned && !root.chatDialogOpen
 
     Plasmoid.icon: "speedometer"
     Plasmoid.busy: !root.hasData && root.lastError === ""

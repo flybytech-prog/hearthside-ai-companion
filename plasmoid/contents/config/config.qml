@@ -7,4 +7,9 @@ ConfigModel {
         icon: "configure"
         source: "configGeneral.qml"
     }
+    ConfigCategory {
+        name: i18n("Chat")
+        icon: "dialog-messages"
+        source: "configChat.qml"
+    }
 }

@@ -151,3 +151,45 @@ the Secret Service lookup fails, it reports `storage`. Neither case sends a
 refresh. The usage request
 itself never runs under the lock. Provider CLIs do not take this lock;
 compare-before-write still catches their concurrent writes.
+
+## Chat tab
+
+The Chat tab is not a provider contract: it shows each provider's own website
+and never calls an API, runs the helper, or reads the pages. Sites, their home
+pages and host lists live only in `plasmoid/contents/ui/ChatSites.js`.
+
+| Site | Home page | Site hosts | Sign-in hosts |
+| --- | --- | --- | --- |
+| Claude | `https://claude.ai/new` | claude.ai, claude.com, anthropic.com | accounts.google.com, appleid.apple.com |
+| ChatGPT | `https://chatgpt.com/` | chatgpt.com, openai.com | accounts.google.com, login.microsoftonline.com, login.live.com, appleid.apple.com |
+| Grok | `https://grok.com/` | grok.com, x.ai, x.com | accounts.google.com, appleid.apple.com |
+| Gemini (best effort) | `https://gemini.google.com/app` | gemini.google.com, accounts.google.com, consent.google.com | accounts.google.com |
+| GitHub Copilot | `https://github.com/copilot` | github.com | github.com |
+| Microsoft Copilot | `https://copilot.microsoft.com/` | copilot.microsoft.com, microsoft.com, bing.com | login.microsoftonline.com, login.live.com, account.live.com, accounts.google.com, appleid.apple.com |
+
+A host matches when it equals a listed host or ends with `.` plus that host,
+case-insensitively, so `evilclaude.ai` never matches `claude.ai`.
+
+Navigation in a site view (subframes are left to the page):
+
+- Only `https:` main-frame pages load, plus `about:blank`. `http:`, `file:`,
+  `data:`, `javascript:`, `view-source:`, `chrome:`, `qrc:`, other schemes, and
+  malformed URLs (including user info in the host) are blocked.
+- A clicked link to a host outside the site and sign-in hosts is cancelled and
+  opened in the system browser.
+- Other `https:` navigations, such as sign-in redirects and form posts, stay
+  in the view.
+
+New windows requested by a page:
+
+- A popup dialog (`about:blank` or `https:`) or an `https:` window on one of
+  the site's sign-in hosts opens in a sign-in overlay inside the popup, using
+  the same private profile, and closes when the page closes it.
+- Any other `https:` window, or a sign-in window opened from the overlay,
+  opens in the system browser only when you clicked to open it; windows a
+  page opens by itself are dropped.
+- Everything else is blocked.
+
+Gemini sign-in may be refused by Google inside embedded browsers. The
+Microsoft Copilot host lists are a best guess; a wrong entry only changes
+whether a link opens inside the widget or in the browser.

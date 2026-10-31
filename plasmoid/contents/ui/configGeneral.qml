@@ -28,6 +28,12 @@ KCM.ScrollViewKCM {
     property int cfg_configSchemaVersionDefault: 2
     property bool cfg_initialSetupComplete: false
     property bool cfg_initialSetupCompleteDefault: false
+    property string cfg_chatSites:
+        "[\"claude\",\"chatgpt\",\"grok\",\"gemini\",\"copilot\",\"mscopilot\"]"
+    property string cfg_chatSitesDefault:
+        "[\"claude\",\"chatgpt\",\"grok\",\"gemini\",\"copilot\",\"mscopilot\"]"
+    property string cfg_chatDefaultSite: "claude"
+    property string cfg_chatDefaultSiteDefault: "claude"
 
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []
