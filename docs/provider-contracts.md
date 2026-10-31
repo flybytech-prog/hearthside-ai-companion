@@ -164,17 +164,42 @@ pages and host lists live only in `plasmoid/contents/ui/ChatSites.js`.
 | ChatGPT | `https://chatgpt.com/` | chatgpt.com, openai.com | accounts.google.com, login.microsoftonline.com, login.live.com, appleid.apple.com |
 | Grok | `https://grok.com/` | grok.com, x.ai, x.com | accounts.google.com, appleid.apple.com |
 | Gemini (best effort) | `https://gemini.google.com/app` | gemini.google.com, accounts.google.com, consent.google.com | accounts.google.com |
-| GitHub Copilot | `https://github.com/copilot` | github.com | github.com |
+| GitHub Copilot | `https://github.com/login?return_to=%2Fcopilot` | github.com | github.com, accounts.google.com, appleid.apple.com |
 | Microsoft Copilot | `https://copilot.microsoft.com/` | copilot.microsoft.com, microsoft.com, bing.com | login.microsoftonline.com, login.live.com, account.live.com, accounts.google.com, appleid.apple.com |
+| Local (Ollama / Open WebUI), off by default | `http://localhost:3000/` | localhost, 127.0.0.1, [::1] | none |
+
+GitHub Copilot starts at the sign-in page because signed-out visitors to
+`/copilot` are redirected to a landing page; after sign-in GitHub returns to
+`/copilot`.
 
 A host matches when it equals a listed host or ends with `.` plus that host,
 case-insensitively, so `evilclaude.ai` never matches `claude.ai`.
+
+Custom addresses (`chatCustomUrls`, JSON `{siteId: url}`, written only by the
+settings page):
+
+- Only known site ids with a valid, non-empty address are kept, in catalog
+  order; unreadable JSON, unknown ids, or invalid entries fall back to the
+  built-in address. Every use re-validates the address.
+- An address must be at most 2048 characters, contain no whitespace or user
+  info (`@` in the host part), and use `https:`. Local may also use `http:`,
+  but only with the host `localhost`, `127.0.0.1`, or `[::1]`. No other site
+  may point at this computer.
+- A custom address adds exactly its own host to the site (no subdomains); the
+  built-in site and sign-in hosts still apply.
 
 Navigation in a site view (subframes are left to the page):
 
 - Only `https:` main-frame pages load, plus `about:blank`. `http:`, `file:`,
   `data:`, `javascript:`, `view-source:`, `chrome:`, `qrc:`, other schemes, and
   malformed URLs (including user info in the host) are blocked.
+- Exception for Local only: `http:` loads when the host is a loopback name
+  (`localhost`, `127.0.0.1`, `[::1]`) and host plus port (80 when absent)
+  equal those of Local's address exactly. Any other port, loopback spelling or
+  host is blocked; with an `https:` custom address Local allows no `http:`.
+- Every site except Local is blocked from this computer under any scheme:
+  `localhost`, `*.localhost`, `[::1]`, `0.0.0.0`, and any `127.x.x.x` address in any
+  numeric spelling.
 - A clicked link to a host outside the site and sign-in hosts is cancelled and
   opened in the system browser.
 - Other `https:` navigations, such as sign-in redirects and form posts, stay
@@ -188,7 +213,12 @@ New windows requested by a page:
 - Any other `https:` window, or a sign-in window opened from the overlay,
   opens in the system browser only when you clicked to open it; windows a
   page opens by itself are dropped.
-- Everything else is blocked.
+- Everything else is blocked, including every `http:` window (Local too) and
+  windows to this computer from any site except Local.
+
+**Open in browser** is offered only for a page of the current site: an
+`https:` page (not on this computer, except for Local), or Local's own `http:`
+loopback address.
 
 Gemini sign-in may be refused by Google inside embedded browsers. The
 Microsoft Copilot host lists are a best guess; a wrong entry only changes

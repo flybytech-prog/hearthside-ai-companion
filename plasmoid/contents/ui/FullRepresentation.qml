@@ -206,6 +206,7 @@ PlasmaExtras.Representation {
             id: chatView
             siteIds: root.chatSiteIds
             siteId: root.chatSiteId
+            customUrls: root.chatCustomUrls
             current: full.onChat
         }
 

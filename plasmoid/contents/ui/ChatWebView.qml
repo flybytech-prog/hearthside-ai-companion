@@ -16,6 +16,9 @@ Item {
     // Enabled site ids (catalog order) and the one being shown.
     property var siteIds: []
     property string siteId: ""
+    // Validated {siteId: url} custom addresses; set before siteId so the
+    // first load already uses them.
+    property var customUrls: ({})
 
     readonly property bool offTheRecord: chatProfile.offTheRecord
     property var currentView: null
@@ -28,7 +31,9 @@ Item {
     readonly property bool pageFailed: !!chatWeb.activeView && chatWeb.activeView.failed
     readonly property bool pageCrashed: !!chatWeb.activeView && chatWeb.activeView.crashed
     readonly property bool canOpenExternally: !!chatWeb.activeView
-        && ChatSites.isHttpsUrl(chatWeb.activeView.url)
+        && ChatSites.isPageUrl(
+            ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls),
+            chatWeb.activeView.url.toString())
 
     property bool dialogOpen: false
     property bool passkeyNotice: false
@@ -51,9 +56,9 @@ Item {
 
     function home() {
         chatWeb.closeOverlay()
-        var site = ChatSites.byId(chatWeb.siteId)
-        if (chatWeb.currentView && site)
-            chatWeb.currentView.url = site.url
+        var url = ChatSites.homeUrl(chatWeb.siteId, chatWeb.customUrls)
+        if (chatWeb.currentView && url !== "")
+            chatWeb.currentView.url = url
     }
 
     function openExternally() {
@@ -178,7 +183,26 @@ Item {
         chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId)
     }
 
+    // A changed address moves only the views whose home actually changed.
+    function applyCustomUrls() {
+        for (var index = 0; index < pages.count; index++) {
+            var view = pages.itemAt(index)
+            if (!view || view.isOverlay)
+                continue
+            var url = ChatSites.homeUrl(view.site, chatWeb.customUrls)
+            if (url === "" || url === view.homeUrl)
+                continue
+            if (chatWeb.overlayView && chatWeb.overlayView.site === view.site)
+                chatWeb.closeOverlay()
+            view.homeUrl = url
+            view.failed = false
+            view.crashed = false
+            view.url = url
+        }
+    }
+
     onSiteIdsChanged: chatWeb.syncViews()
+    onCustomUrlsChanged: chatWeb.applyCustomUrls()
     onSiteIdChanged: {
         chatWeb.closeOverlay()
         chatWeb.passkeyNotice = false
@@ -234,6 +258,8 @@ Item {
 
             required property string site
             property bool isOverlay: false
+            // The address this view was opened with (custom or built-in).
+            property string homeUrl: ""
             property bool failed: false
             property bool crashed: false
 
@@ -295,7 +321,8 @@ Item {
                     isMainFrame: request.isMainFrame,
                     linkClicked: request.navigationType
                         === WebEngineNavigationRequest.LinkClickedNavigation,
-                    siteId: page.site
+                    siteId: page.site,
+                    customUrls: chatWeb.customUrls
                 })
                 if (verdict === "allow")
                     return
@@ -309,7 +336,8 @@ Item {
                 var verdict = ChatSites.classifyNewWindow({
                     url: url,
                     isDialog: request.destination === WebEngineNewWindowRequest.InNewDialog,
-                    siteId: page.site
+                    siteId: page.site,
+                    customUrls: chatWeb.customUrls
                 })
                 // A sign-in window cannot open another overlay on top of itself.
                 if (verdict === "overlay" && !page.isOverlay)
@@ -341,9 +369,11 @@ Item {
             }
 
             Component.onCompleted: {
-                var descriptor = ChatSites.byId(page.site)
-                if (!page.isOverlay && descriptor)
-                    page.url = descriptor.url
+                if (page.isOverlay)
+                    return
+                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)
+                if (page.homeUrl !== "")
+                    page.url = page.homeUrl
             }
         }
     }

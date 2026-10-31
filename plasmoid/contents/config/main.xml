@@ -32,5 +32,8 @@
         <entry name="chatDefaultSite" type="String">
             <default>claude</default>
         </entry>
+        <entry name="chatCustomUrls" type="String">
+            <default>{}</default>
+        </entry>
     </group>
 </kcfg>

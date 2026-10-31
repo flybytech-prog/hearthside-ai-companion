@@ -34,6 +34,8 @@ KCM.ScrollViewKCM {
         "[\"claude\",\"chatgpt\",\"grok\",\"gemini\",\"copilot\",\"mscopilot\"]"
     property string cfg_chatDefaultSite: "claude"
     property string cfg_chatDefaultSiteDefault: "claude"
+    property string cfg_chatCustomUrls: "{}"
+    property string cfg_chatCustomUrlsDefault: "{}"
 
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []

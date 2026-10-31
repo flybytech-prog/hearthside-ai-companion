@@ -5,33 +5,48 @@ import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
 TestCase {
     name: "ChatSites"
 
-    function nav(url, siteId, linkClicked, isMainFrame) {
+    function nav(url, siteId, linkClicked, isMainFrame, customUrls) {
         return ChatSites.classifyNavigation({
             url: url,
             siteId: siteId === undefined ? "claude" : siteId,
             linkClicked: !!linkClicked,
-            isMainFrame: isMainFrame === undefined ? true : isMainFrame
+            isMainFrame: isMainFrame === undefined ? true : isMainFrame,
+            customUrls: customUrls
         })
     }
 
-    function popup(url, siteId, isDialog) {
+    function popup(url, siteId, isDialog, customUrls) {
         return ChatSites.classifyNewWindow({
             url: url,
             siteId: siteId === undefined ? "claude" : siteId,
-            isDialog: !!isDialog
+            isDialog: !!isDialog,
+            customUrls: customUrls
         })
+    }
+
+    function ids(list) {
+        return list.map(function (s) { return s.id })
+    }
+
+    function checkUrl(siteId, text) {
+        return ChatSites.validateCustomUrl(siteId, text)
     }
 
     function test_catalogOrderAndFields() {
         compare(ChatSites.siteIds(),
-                ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot"])
+                ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"])
         for (var index = 0; index < ChatSites.sites.length; index++) {
             var site = ChatSites.sites[index]
             verify(site.name.length > 0)
-            verify(site.url.indexOf("https://") === 0)
+            if (site.id === "local")
+                verify(site.url.indexOf("http://localhost") === 0)
+            else
+                verify(site.url.indexOf("https://") === 0, site.id)
             verify(/^provider-[a-z]+\.svg$/.test(site.icon))
             verify(site.site_hosts.length > 0)
-            verify(site.auth_hosts.length > 0)
+            // Only Local has no sign-in providers.
+            compare(site.auth_hosts.length === 0, site.id === "local", site.id)
+            compare(site.local === true, site.id === "local", site.id)
             // Every home page must be allowed by its own navigation policy.
             compare(nav(site.url, site.id, false), "allow")
             compare(nav(site.url, site.id, true), "allow")
@@ -46,19 +61,40 @@ TestCase {
         compare(ChatSites.byId(undefined), null)
     }
 
+    function test_defaultSiteIds() {
+        compare(ChatSites.defaultSiteIds(),
+                ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot"])
+        compare(ChatSites.byId("local").default_on, false)
+    }
+
     function test_enabledSites() {
-        var ids = function (list) { return list.map(function (s) { return s.id }) }
+        var defaults = ChatSites.defaultSiteIds()
         compare(ids(ChatSites.enabledSites(
             "[\"claude\",\"chatgpt\",\"grok\",\"gemini\",\"copilot\",\"mscopilot\"]")),
-            ChatSites.siteIds())
+            defaults)
+        compare(ids(ChatSites.enabledSites(JSON.stringify(ChatSites.siteIds()))),
+                ChatSites.siteIds())
         // Catalog order wins over config order; unknown ids are dropped.
         compare(ids(ChatSites.enabledSites("[\"mscopilot\",\"cursor\",\"claude\",42]")),
                 ["claude", "mscopilot"])
+        compare(ids(ChatSites.enabledSites("[\"local\"]")), ["local"])
         compare(ids(ChatSites.enabledSites("[]")), [])
-        compare(ids(ChatSites.enabledSites("not json")), ChatSites.siteIds())
-        compare(ids(ChatSites.enabledSites("{\"claude\":true}")), ChatSites.siteIds())
-        compare(ids(ChatSites.enabledSites("")), ChatSites.siteIds())
-        compare(ids(ChatSites.enabledSites(undefined)), ChatSites.siteIds())
+        // Unreadable config falls back to the default-on sites, never Local.
+        compare(ids(ChatSites.enabledSites("not json")), defaults)
+        compare(ids(ChatSites.enabledSites("{\"claude\":true}")), defaults)
+        compare(ids(ChatSites.enabledSites("")), defaults)
+        compare(ids(ChatSites.enabledSites(undefined)), defaults)
+        compare(ids(ChatSites.enabledSites(null)), defaults)
+    }
+
+    function test_copilotSignInUrl() {
+        var copilot = ChatSites.byId("copilot")
+        compare(copilot.url, "https://github.com/login?return_to=%2Fcopilot")
+        compare(copilot.auth_hosts, ["github.com", "accounts.google.com", "appleid.apple.com"])
+        compare(nav(copilot.url, "copilot", false), "allow")
+        compare(nav("https://github.com/copilot", "copilot", true), "allow")
+        compare(popup("https://accounts.google.com/o/oauth2", "copilot"), "overlay")
+        compare(popup("https://appleid.apple.com/auth", "copilot"), "overlay")
     }
 
     function test_initialSite() {
@@ -137,7 +173,10 @@ TestCase {
             "https://.claude.ai/",
             "https://claude..ai/",
             "https://claude.ai:99999999/",
-            "https://[::1]/"
+            "https://claude.ai:0/",
+            "https://claude.ai:65536/",
+            "https://[::2]/",
+            "https://[::1/"
         ]
         for (var index = 0; index < malformed.length; index++)
             compare(nav(malformed[index], "claude", true), "block", malformed[index])
@@ -179,6 +218,290 @@ TestCase {
         compare(popup("https://user@accounts.google.com/", "claude", true), "block")
         compare(popup("https://accounts.google.com/", "devin", true), "block")
         compare(ChatSites.classifyNewWindow(null), "block")
+    }
+
+    function test_parseUrl() {
+        compare(ChatSites.parseUrl("https://claude.ai/new"),
+                {scheme: "https", host: "claude.ai", port: ""})
+        compare(ChatSites.parseUrl("HTTP://LocalHost:3000/c/1"),
+                {scheme: "http", host: "localhost", port: "3000"})
+        compare(ChatSites.parseUrl("https://[::1]/"), {scheme: "https", host: "[::1]", port: ""})
+        compare(ChatSites.parseUrl("http://[::1]:8080/x"),
+                {scheme: "http", host: "[::1]", port: "8080"})
+        compare(ChatSites.parseUrl("https://claude.ai:1/").port, "1")
+        compare(ChatSites.parseUrl("https://claude.ai:65535/").port, "65535")
+        compare(ChatSites.parseUrl("https://claude.ai:0443/").port, "443")
+        compare(ChatSites.parseUrl("javascript:alert(1)"), {scheme: "javascript", host: "", port: ""})
+        var invalid = [
+            "https://[::2]/",
+            "https://[fe80::1]/",
+            "https://[::1/",
+            "https://[::1]x/",
+            "https://[::1]:/",
+            "https://claude.ai:0/",
+            "https://claude.ai:00000/",
+            "https://claude.ai:65536/",
+            "https://claude.ai:/",
+            "https://user@claude.ai/",
+            "https://a\\b.ai/",
+            "https://cl%61ude.ai/",
+            "https://cl aude.ai/",
+            ""
+        ]
+        for (var index = 0; index < invalid.length; index++)
+            compare(ChatSites.parseUrl(invalid[index]), null, invalid[index])
+    }
+
+    function test_isLoopbackHost() {
+        verify(ChatSites.isLoopbackHost("localhost"))
+        verify(ChatSites.isLoopbackHost("LOCALHOST"))
+        verify(ChatSites.isLoopbackHost("localhost."))
+        verify(ChatSites.isLoopbackHost("127.0.0.1"))
+        verify(ChatSites.isLoopbackHost("[::1]"))
+        verify(!ChatSites.isLoopbackHost("127.0.0.2"))
+        verify(!ChatSites.isLoopbackHost("foo.localhost"))
+        verify(!ChatSites.isLoopbackHost("localhost.example.com"))
+        verify(!ChatSites.isLoopbackHost("::1"))
+        verify(!ChatSites.isLoopbackHost(""))
+        verify(!ChatSites.isLoopbackHost(null))
+        verify(!ChatSites.isLoopbackHost(undefined))
+    }
+
+    function test_isLocalAddress() {
+        var local = ["localhost", "127.0.0.1", "[::1]", "127.0.0.2", "127.1", "0.0.0.0", "0",
+                     "2130706433", "0x7f000001", "0x7f.1", "017700000001", "foo.localhost",
+                     "1.2.3.4.5", "08.1.1.1", "999.1.1.1"]
+        for (var index = 0; index < local.length; index++)
+            verify(ChatSites.isLocalAddress(local[index]), local[index])
+        var remote = ["claude.ai", "192.168.1.5", "10.0.0.1", "8.8.8.8", "localhost.example.com",
+                      "127.example.com", "", null]
+        for (var other = 0; other < remote.length; other++)
+            verify(!ChatSites.isLocalAddress(remote[other]), String(remote[other]))
+    }
+
+    function test_validateCustomUrl() {
+        var cases = [
+            ["local", "http://localhost:3000", true, ""],
+            ["local", "http://127.0.0.1:8080/", true, ""],
+            ["local", "http://[::1]:3000/", true, ""],
+            ["local", "https://ai.home.example/", true, ""],
+            ["local", "https://localhost/", true, ""],
+            ["local", "http://192.168.1.5:3000", false, "http-not-loopback"],
+            ["local", "http://ai.home.example/", false, "http-not-loopback"],
+            ["claude", "https://chat.example.org/x", true, ""],
+            ["claude", "http://localhost:3000", false, "scheme"],
+            ["claude", "http://chat.example.org/", false, "scheme"],
+            ["claude", "https://localhost/", false, "loopback-not-allowed"],
+            ["claude", "https://127.0.0.1:8443/", false, "loopback-not-allowed"],
+            ["claude", "https://[::1]/", false, "loopback-not-allowed"],
+            ["chatgpt", "https://2130706433/", false, "loopback-not-allowed"],
+            ["claude", "https://user:pw@claude.ai/", false, "userinfo"],
+            ["claude", "javascript:https://user@x/", false, "scheme"],
+            ["local", "http://user@localhost:3000/", false, "userinfo"],
+            ["claude", "javascript:alert(1)", false, "scheme"],
+            ["claude", "data:text/html,x", false, "scheme"],
+            ["claude", "file:///etc/passwd", false, "scheme"],
+            ["local", "file:///etc/passwd", false, "scheme"],
+            ["claude", "https://chat example.org/", false, "whitespace"],
+            ["claude", "https://chat.example.org/a\tb", false, "whitespace"],
+            ["claude", "https://chat.example.org/\n", false, "whitespace"],
+            ["claude", "chat.example.org", false, "malformed"],
+            ["claude", "https://", false, "malformed"],
+            ["claude", "https://chat..example.org/", false, "malformed"],
+            ["claude", "https://[fe80::1]/", false, "malformed"],
+            ["claude", "https://chat.example.org:70000/", false, "malformed"],
+            ["devin", "https://chat.example.org/", false, "unknown-site"],
+            ["", "https://chat.example.org/", false, "unknown-site"]
+        ]
+        for (var index = 0; index < cases.length; index++) {
+            var row = cases[index]
+            var result = checkUrl(row[0], row[1])
+            compare(result.ok, row[2], row[0] + " " + row[1])
+            compare(result.error, row[3], row[0] + " " + row[1])
+            compare(result.url, row[2] ? row[1] : "", row[0] + " " + row[1])
+        }
+        compare(checkUrl("claude", ""), {ok: true, url: "", error: ""})
+        compare(checkUrl("claude", undefined), {ok: true, url: "", error: ""})
+        var longUrl = "https://chat.example.org/"
+        while (longUrl.length < 2049)
+            longUrl += "a"
+        compare(longUrl.length, 2049)
+        compare(checkUrl("claude", longUrl).error, "too-long")
+        verify(checkUrl("claude", longUrl.slice(0, 2048)).ok)
+    }
+
+    function test_customUrlsParseAndSerialize() {
+        var map = {local: "http://localhost:8080/", claude: "https://chat.example.org/x"}
+        var json = ChatSites.serializeCustomUrls(map)
+        // Catalog order, not insertion order.
+        compare(json, "{\"claude\":\"https://chat.example.org/x\",\"local\":\"http://localhost:8080/\"}")
+        compare(ChatSites.parseCustomUrls(json), map)
+        compare(ChatSites.serializeCustomUrls(ChatSites.parseCustomUrls(json)), json)
+        // Unknown ids, invalid, empty and non-string values are dropped.
+        var dirty = {
+            devin: "https://devin.example/",
+            chatgpt: "http://chatgpt.example/",
+            grok: "",
+            gemini: 42,
+            copilot: "https://localhost/",
+            mscopilot: "https://copilot.example.net/",
+            __proto__: "https://evil.example/"
+        }
+        compare(ChatSites.parseCustomUrls(JSON.stringify(dirty)),
+                {mscopilot: "https://copilot.example.net/"})
+        compare(ChatSites.serializeCustomUrls(dirty),
+                "{\"mscopilot\":\"https://copilot.example.net/\"}")
+        compare(ChatSites.serializeCustomUrls({}), "{}")
+        compare(ChatSites.serializeCustomUrls(null), "{}")
+        compare(ChatSites.serializeCustomUrls(["https://chat.example.org/"]), "{}")
+        compare(ChatSites.serializeCustomUrls({claude: "not a url"}), "{}")
+        var bad = ["", "not json", "[]", "[\"https://x.example/\"]", "null", "42",
+                   "\"https://x.example/\"", "{\"claude\":[\"https://x.example/\"]}"]
+        for (var index = 0; index < bad.length; index++)
+            compare(ChatSites.parseCustomUrls(bad[index]), {}, bad[index])
+        compare(ChatSites.parseCustomUrls(undefined), {})
+        compare(ChatSites.parseCustomUrls(null), {})
+    }
+
+    function test_effectiveSite() {
+        compare(ChatSites.effectiveSite("devin", {}), null)
+        var builtIn = ChatSites.effectiveSite("claude")
+        compare(builtIn.url, "https://claude.ai/new")
+        compare(builtIn.exact_hosts, [])
+        compare(builtIn.http_origin, "")
+        var custom = ChatSites.effectiveSite("claude", {claude: "https://Chat.Example.org/x"})
+        compare(custom.url, "https://Chat.Example.org/x")
+        compare(custom.exact_hosts, ["chat.example.org"])
+        compare(custom.site_hosts, ChatSites.byId("claude").site_hosts)
+        // Stale or invalid custom values fall back to the built-in address.
+        compare(ChatSites.effectiveSite("claude", {claude: "http://chat.example.org/"}).url,
+                "https://claude.ai/new")
+        compare(ChatSites.effectiveSite("claude", {claude: 7}).url, "https://claude.ai/new")
+        compare(ChatSites.effectiveSite("claude", "nonsense").url, "https://claude.ai/new")
+        compare(ChatSites.effectiveSite("local").http_origin, "localhost:3000")
+        compare(ChatSites.effectiveSite("local", {local: "http://[::1]/"}).http_origin, "[::1]:80")
+        compare(ChatSites.effectiveSite("local", {local: "https://ai.home.example/"}).http_origin, "")
+        // Never mutates the catalog.
+        custom.site_hosts.push("evil.example")
+        compare(ChatSites.byId("claude").site_hosts.indexOf("evil.example"), -1)
+    }
+
+    function test_homeUrl() {
+        compare(ChatSites.homeUrl("claude"), "https://claude.ai/new")
+        compare(ChatSites.homeUrl("claude", {}), "https://claude.ai/new")
+        compare(ChatSites.homeUrl("claude", {claude: "https://chat.example.org/x"}),
+                "https://chat.example.org/x")
+        compare(ChatSites.homeUrl("claude", {claude: "https://localhost/"}), "https://claude.ai/new")
+        compare(ChatSites.homeUrl("local"), "http://localhost:3000/")
+        compare(ChatSites.homeUrl("local", {local: "http://127.0.0.1:8080/"}), "http://127.0.0.1:8080/")
+        compare(ChatSites.homeUrl("copilot"), "https://github.com/login?return_to=%2Fcopilot")
+        compare(ChatSites.homeUrl("devin"), "")
+    }
+
+    function test_customHostIsExact() {
+        var custom = {claude: "https://chat.example.org/x"}
+        compare(nav("https://chat.example.org/x", "claude", false, true, custom), "allow")
+        compare(nav("https://chat.example.org/other", "claude", true, true, custom), "allow")
+        compare(nav("https://CHAT.example.org./other", "claude", true, true, custom), "allow")
+        compare(nav("https://sub.chat.example.org/", "claude", true, true, custom), "external")
+        compare(nav("https://example.org/", "claude", true, true, custom), "external")
+        compare(nav("https://claude.ai/new", "claude", true, true, custom), "allow")
+        // The custom host belongs to its own site only.
+        compare(nav("https://chat.example.org/", "chatgpt", true, true, custom), "external")
+        // Without customUrls: today's behaviour.
+        compare(nav("https://chat.example.org/", "claude", true), "external")
+        compare(nav("https://chat.example.org/", "claude", true, true, {}), "external")
+        compare(nav("https://chat.example.org/", "claude", true, true, null), "external")
+    }
+
+    function test_localHttpRule() {
+        compare(nav("http://localhost:3000/", "local", true), "allow")
+        compare(nav("http://localhost:3000/c/1", "local", true), "allow")
+        compare(nav("http://LOCALHOST:3000/c/1", "local", false), "allow")
+        compare(nav("http://localhost:8080/", "local", false), "block")
+        compare(nav("http://localhost/", "local", false), "block")
+        compare(nav("http://127.0.0.1:3000/", "local", false), "block")
+        compare(nav("http://[::1]:3000/", "local", false), "block")
+        compare(nav("http://192.168.1.2:3000/", "local", false), "block")
+        compare(nav("http://example.com/", "local", false), "block")
+        var ipv4 = {local: "http://127.0.0.1:8080/"}
+        compare(nav("http://127.0.0.1:8080/x", "local", true, true, ipv4), "allow")
+        compare(nav("http://localhost:8080/x", "local", true, true, ipv4), "block")
+        compare(nav("http://localhost:3000/x", "local", true, true, ipv4), "block")
+        var ipv6 = {local: "http://[::1]/"}
+        compare(nav("http://[::1]/", "local", false, true, ipv6), "allow")
+        compare(nav("http://[::1]:80/", "local", false, true, ipv6), "allow")
+        compare(nav("http://[::1]:3000/", "local", false, true, ipv6), "block")
+        // A custom https address for Local turns http off entirely.
+        var secure = {local: "https://ai.home.example/"}
+        compare(nav("https://ai.home.example/c/1", "local", true, true, secure), "allow")
+        compare(nav("https://other.example/", "local", true, true, secure), "external")
+        compare(nav("http://localhost:3000/", "local", false, true, secure), "block")
+        compare(nav("http://ai.home.example/", "local", false, true, secure), "block")
+        compare(nav("https://localhost/", "local", false), "allow")
+        compare(nav("file:///etc/passwd", "local", false), "block")
+        compare(nav("javascript:alert(1)", "local", true), "block")
+    }
+
+    function test_loopbackBlockedForOtherSites() {
+        var urls = [
+            "http://localhost:3000",
+            "http://localhost:3000/",
+            "https://localhost/",
+            "https://127.0.0.1/",
+            "https://127.0.0.2/",
+            "https://[::1]/",
+            "https://[::1]:8443/",
+            "https://2130706433/",
+            "https://foo.localhost/",
+            "https://0.0.0.0/"
+        ]
+        for (var index = 0; index < urls.length; index++) {
+            compare(nav(urls[index], "claude", false), "block", urls[index])
+            compare(nav(urls[index], "claude", true), "block", urls[index])
+            compare(nav(urls[index], "mscopilot", true), "block", urls[index])
+            compare(popup(urls[index], "claude"), "block", urls[index])
+            compare(popup(urls[index], "claude", true), "block", urls[index])
+        }
+        // Even with a (rejected) loopback custom address.
+        compare(nav("https://localhost/", "claude", true, true, {claude: "https://localhost/"}),
+                "block")
+    }
+
+    function test_newWindowForLocal() {
+        compare(popup("http://localhost:3000/", "local"), "block")
+        compare(popup("http://localhost:3000/", "local", true), "block")
+        compare(popup("http://127.0.0.1:3000/x", "local", true), "block")
+        compare(popup("about:blank", "local", true), "overlay")
+        compare(popup("", "local", true), "overlay")
+        compare(popup("https://example.com/docs", "local"), "external")
+        compare(popup("https://localhost/", "local"), "external")
+        var secure = {local: "https://ai.home.example/"}
+        compare(popup("http://ai.home.example/", "local", true, secure), "block")
+        compare(popup("https://ai.home.example/x", "local", false, secure), "external")
+    }
+
+    function test_isPageUrl() {
+        var claude = ChatSites.effectiveSite("claude")
+        verify(ChatSites.isPageUrl(claude, "https://claude.ai/chat/1"))
+        verify(ChatSites.isPageUrl(claude, "https://example.com/"))
+        verify(!ChatSites.isPageUrl(claude, "http://claude.ai/"))
+        verify(!ChatSites.isPageUrl(claude, "https://localhost/"))
+        verify(!ChatSites.isPageUrl(claude, "https://[::1]/"))
+        verify(!ChatSites.isPageUrl(claude, "about:blank"))
+        verify(!ChatSites.isPageUrl(claude, "file:///etc/passwd"))
+        verify(!ChatSites.isPageUrl(claude, ""))
+        var local = ChatSites.effectiveSite("local")
+        verify(ChatSites.isPageUrl(local, "http://localhost:3000/c/1"))
+        verify(ChatSites.isPageUrl(local, "https://localhost/"))
+        verify(ChatSites.isPageUrl(local, "https://ai.home.example/"))
+        verify(!ChatSites.isPageUrl(local, "http://localhost:8080/"))
+        verify(!ChatSites.isPageUrl(local, "http://127.0.0.1:3000/"))
+        verify(!ChatSites.isPageUrl(local, "http://192.168.1.2:3000/"))
+        var secure = ChatSites.effectiveSite("local", {local: "https://ai.home.example/"})
+        verify(ChatSites.isPageUrl(secure, "https://ai.home.example/c/1"))
+        verify(!ChatSites.isPageUrl(secure, "http://localhost:3000/"))
+        verify(!ChatSites.isPageUrl(null, "https://claude.ai/"))
     }
 
     function test_isHttpsUrl() {

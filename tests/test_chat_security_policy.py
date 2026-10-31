@@ -23,13 +23,24 @@ UI = CONTENTS / "ui"
 MAIN_XML = CONTENTS / "config" / "main.xml"
 CHAT_SITES_JS = UI / "ChatSites.js"
 CHAT_WEB_VIEW = UI / "ChatWebView.qml"
-CHAT_LOG_FREE_FILES = ("ChatSites.js", "ChatView.qml", "ChatWebView.qml", "configChat.qml")
+CHAT_LOG_FREE_FILES = ("ChatSites.js", "ChatView.qml", "ChatWebView.qml", "configChat.qml", "main.qml")
+# Chat files that may read the plasmoid config but never write it. Only the
+# settings pages persist chat values.
+CHAT_CONFIG_READ_ONLY_FILES = ("ChatSites.js", "ChatView.qml", "ChatWebView.qml")
 KCFG_NS = "{http://www.kde.org/standards/kcfg/1.0}"
 
-EXPECTED_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot"]
-CHAT_CONFIG_KEYS = {"chatSites", "chatDefaultSite"}
+EXPECTED_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
+# Sites enabled for a fresh widget. Local is off until the user turns it on.
+EXPECTED_DEFAULT_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot"]
+LOCAL_SITE_ID = "local"
+# Name, type and exact default of every persisted chat key.
+CHAT_CONFIG_KEYS = {
+    "chatSites": ("String", None),
+    "chatDefaultSite": ("String", None),
+    "chatCustomUrls": ("String", "{}"),
+}
 # Keys that existed before the Chat tab. Anything else in main.xml would be a
-# new persisted value; the Chat tab may only persist the two keys above.
+# new persisted value; the Chat tab may only persist the keys above.
 PRE_CHAT_CONFIG_KEYS = {
     "trackedProviders", "panelProviders", "providerMetrics", "usageMode",
     "refreshInterval", "configSchemaVersion", "initialSetupComplete",
@@ -201,6 +212,45 @@ def _chat_site_ids():
     literal = _sites_literal(_read_code(CHAT_SITES_JS))
     # Only top-level site objects: the id key directly follows "{" or ",".
     return re.findall(r"""[{,]\s*["']?id["']?\s*:\s*["']([^"']+)["']""", literal)
+
+
+def _site_objects(literal):
+    """Return the source text of each top-level ``{ ... }`` in the sites array."""
+    blanked = _strip_comments(literal, blank_strings=True)
+    objects = []
+    depth = 0
+    start = -1
+    for index, char in enumerate(blanked):
+        if char in "[{":
+            depth += 1
+            if char == "{" and depth == 2:
+                start = index
+        elif char in "]}":
+            if char == "}" and depth == 2:
+                objects.append(literal[start:index + 1])
+            depth -= 1
+    return objects
+
+
+def _site_key(site, key):
+    """The string literal value of a top-level ``key`` in one site object, or None."""
+    match = re.search(rf"""[{{,]\s*["']?{key}["']?\s*:\s*["']([^"']*)["']""", site)
+    return match.group(1) if match else None
+
+
+def _chat_sites():
+    literal = _sites_literal(_read_code(CHAT_SITES_JS))
+    sites = {}
+    for site in _site_objects(literal):
+        site_id = _site_key(site, "id")
+        assert site_id, f"{_rel(CHAT_SITES_JS)}: every site object needs a literal id"
+        sites[site_id] = site
+    return sites
+
+
+def _key_hits(site, key, allowed):
+    """Snippets where ``key`` is set to anything other than the ``allowed`` literal."""
+    return re.findall(rf"""[{{,]\s*["']?{key}["']?\s*:(?!\s*{allowed}\b)\s*[^,\n}}]*""", site)
 
 
 def _main_xml_entries():
@@ -417,20 +467,52 @@ def test_chat_files_never_log(filename):
 # --- persisted configuration ------------------------------------------------------
 
 
-def test_main_xml_adds_only_the_two_chat_keys():
+def test_main_xml_adds_only_the_chat_keys():
     entries = _main_xml_entries()
     chat_keys = {name for name in entries if name.lower().startswith("chat")}
-    assert chat_keys == CHAT_CONFIG_KEYS, (
+    assert chat_keys == set(CHAT_CONFIG_KEYS), (
         f"{_rel(MAIN_XML)} chat entries must be exactly {sorted(CHAT_CONFIG_KEYS)}, got {sorted(chat_keys)}"
     )
-    unexpected = set(entries) - CHAT_CONFIG_KEYS - PRE_CHAT_CONFIG_KEYS
+    unexpected = set(entries) - set(CHAT_CONFIG_KEYS) - PRE_CHAT_CONFIG_KEYS
     assert not unexpected, f"{_rel(MAIN_XML)} has new persisted keys besides the chat ones: {sorted(unexpected)}"
-    for key in sorted(CHAT_CONFIG_KEYS):
+    for key, (kind, default) in sorted(CHAT_CONFIG_KEYS.items()):
         assert entries[key]["group"] == "General", f"{_rel(MAIN_XML)}: {key} must be in group General"
-        assert entries[key]["type"] == "String", f"{_rel(MAIN_XML)}: {key} must have type String"
+        assert entries[key]["type"] == kind, f"{_rel(MAIN_XML)}: {key} must have type {kind}"
+        if default is not None:
+            assert entries[key]["default"] == default, (
+                f"{_rel(MAIN_XML)}: {key} default must be exactly {default!r}, got {entries[key]['default']!r}"
+            )
 
 
-def test_chat_sites_default_matches_chat_sites_js_in_order():
+@pytest.mark.parametrize("filename", CHAT_CONFIG_READ_ONLY_FILES)
+def test_chat_files_never_write_the_plasmoid_config(filename):
+    path = UI / filename
+    code = _read_code(path)
+    config = r"\b[Pp]lasmoid\s*\.\s*configuration"
+    member = r"(?:\s*\.\s*\w+|\s*\[[^\]]*\])"
+    lines = (
+        # Plain or compound assignment: x = v, x += v, x ??= v (not ==).
+        _hits(rf"{config}{member}+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)", code)
+        # Increment and decrement on either side.
+        + _hits(rf"{config}{member}+\s*(?:\+\+|--)", code)
+        + _hits(rf"(?:\+\+|--)\s*{config}", code)
+        # The config object itself handed around, e.g. `var c = Plasmoid.configuration`.
+        + _hits(rf"{config}(?!\s*[.\[])", code)
+    )
+    assert not lines, f"{_rel(path)} must never write Plasmoid.configuration; lines {sorted(set(lines))}"
+
+
+def test_chat_sites_js_declares_the_expected_sites_in_order():
+    site_ids = _chat_site_ids()
+    assert site_ids == EXPECTED_SITE_IDS, (
+        f"{_rel(CHAT_SITES_JS)} site ids must be {EXPECTED_SITE_IDS} in that order, got {site_ids}"
+    )
+    assert list(_chat_sites()) == EXPECTED_SITE_IDS, (
+        f"{_rel(CHAT_SITES_JS)}: every top-level site object must have a literal id"
+    )
+
+
+def test_chat_sites_default_is_the_default_on_sites_in_order():
     entries = _main_xml_entries()
     assert "chatSites" in entries, f"{_rel(MAIN_XML)} has no chatSites entry"
     raw_default = entries["chatSites"]["default"]
@@ -438,12 +520,56 @@ def test_chat_sites_default_matches_chat_sites_js_in_order():
         configured = json.loads(raw_default or "")
     except json.JSONDecodeError as error:
         raise AssertionError(f"{_rel(MAIN_XML)}: chatSites default is not JSON: {error}") from None
-    site_ids = _chat_site_ids()
-    assert site_ids == EXPECTED_SITE_IDS, (
-        f"{_rel(CHAT_SITES_JS)} site ids must be {EXPECTED_SITE_IDS} in that order, got {site_ids}"
+    assert configured == EXPECTED_DEFAULT_SITE_IDS, (
+        f"{_rel(MAIN_XML)} chatSites default {configured} must be {EXPECTED_DEFAULT_SITE_IDS} (no {LOCAL_SITE_ID})"
     )
-    assert configured == site_ids, (
-        f"{_rel(MAIN_XML)} chatSites default {configured} must equal ChatSites.js ids {site_ids} in order"
+    default_on = [
+        site_id for site_id, site in _chat_sites().items()
+        if not re.search(r"""[{,]\s*["']?default_on["']?\s*:\s*false\b""", site)
+    ]
+    assert default_on == EXPECTED_DEFAULT_SITE_IDS, (
+        f"{_rel(CHAT_SITES_JS)}: sites without default_on: false must be {EXPECTED_DEFAULT_SITE_IDS}, got {default_on}"
+    )
+
+
+def test_local_site_is_off_by_default_and_the_only_local_site():
+    sites = _chat_sites()
+    assert LOCAL_SITE_ID in sites, f"{_rel(CHAT_SITES_JS)} has no {LOCAL_SITE_ID} site"
+    local = sites[LOCAL_SITE_ID]
+    assert re.search(r"""[{,]\s*["']?default_on["']?\s*:\s*false\s*[,}\n]""", local), (
+        f"{_rel(CHAT_SITES_JS)}: the {LOCAL_SITE_ID} site must say literally `default_on: false`"
+    )
+    assert re.search(r"""[{,]\s*["']?local["']?\s*:\s*true\s*[,}\n]""", local), (
+        f"{_rel(CHAT_SITES_JS)}: the {LOCAL_SITE_ID} site must say literally `local: true`"
+    )
+    others = {
+        site_id: _key_hits(site, "local", "false") + _key_hits(site, "default_on", "true")
+        for site_id, site in sites.items() if site_id != LOCAL_SITE_ID
+    }
+    offenders = {site_id: hits for site_id, hits in others.items() if hits}
+    assert not offenders, (
+        f"{_rel(CHAT_SITES_JS)}: only {LOCAL_SITE_ID} may set `local` (other than false) "
+        f"or `default_on` (other than true): {offenders}"
+    )
+
+
+_LOCAL_HTTP_URL = re.compile(r"http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:/|$)")
+
+
+def test_site_urls_are_https_except_the_local_loopback_site():
+    wrong = {}
+    for site_id, site in _chat_sites().items():
+        url = _site_key(site, "url")
+        if url is None:
+            wrong[site_id] = "no literal url"
+        elif site_id == LOCAL_SITE_ID:
+            if not _LOCAL_HTTP_URL.match(url):
+                wrong[site_id] = url
+        elif not url.startswith("https://"):
+            wrong[site_id] = url
+    assert not wrong, (
+        f"{_rel(CHAT_SITES_JS)}: site urls must be https:// (only {LOCAL_SITE_ID} may use "
+        f"http://localhost or http://127.0.0.1): {wrong}"
     )
 
 

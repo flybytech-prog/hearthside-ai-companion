@@ -37,6 +37,9 @@ PlasmoidItem {
     property bool chatDialogOpen: false
     readonly property var chatSites: ChatSites.enabledSites(Plasmoid.configuration.chatSites)
     readonly property var chatSiteIds: root.chatSites.map(function (site) { return site.id })
+    // {siteId: url}; only valid addresses survive, anything odd → built-in.
+    readonly property var chatCustomUrls:
+        ChatSites.parseCustomUrls(Plasmoid.configuration.chatCustomUrls)
 
     readonly property int refreshInterval: normalizedRefresh(
         Plasmoid.configuration.refreshInterval || 300

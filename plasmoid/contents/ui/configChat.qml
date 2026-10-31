@@ -33,6 +33,11 @@ KCM.SimpleKCM {
         "[\"claude\",\"chatgpt\",\"grok\",\"gemini\",\"copilot\",\"mscopilot\"]"
     property string cfg_chatDefaultSite: "claude"
     property string cfg_chatDefaultSiteDefault: "claude"
+    property string cfg_chatCustomUrls: "{}"
+    property string cfg_chatCustomUrlsDefault: "{}"
+
+    // Page-local only; the advanced section always starts collapsed.
+    property bool showAdvanced: false
 
     readonly property var enabledSites: ChatSites.enabledSites(page.cfg_chatSites)
     readonly property var enabledIds: page.enabledSites.map(function (site) { return site.id })
@@ -44,6 +49,45 @@ KCM.SimpleKCM {
         page.cfg_chatSites = JSON.stringify(ids)
         if (ids.indexOf(page.cfg_chatDefaultSite) < 0 && ids.length > 0)
             page.cfg_chatDefaultSite = ids[0]
+    }
+
+    // Saved custom address of one site, "" when it uses the built-in one.
+    function savedCustomUrl(siteId) {
+        var map = ChatSites.parseCustomUrls(page.cfg_chatCustomUrls)
+        return Object.prototype.hasOwnProperty.call(map, siteId) ? map[siteId] : ""
+    }
+
+    // Only valid or empty addresses are ever written; "" removes the entry.
+    function setCustomUrl(siteId, url) {
+        var map = ChatSites.parseCustomUrls(page.cfg_chatCustomUrls)
+        if (url === "")
+            delete map[siteId]
+        else
+            map[siteId] = url
+        page.cfg_chatCustomUrls = ChatSites.serializeCustomUrls(map)
+    }
+
+    function customUrlError(siteId, code) {
+        switch (code) {
+        case "":
+            return ""
+        case "too-long":
+            return i18n("This address is too long.")
+        case "whitespace":
+            return i18n("Addresses can't contain spaces or line breaks.")
+        case "userinfo":
+            return i18n("Addresses with a user name or password aren't allowed.")
+        case "scheme":
+            return ChatSites.byId(siteId) && ChatSites.byId(siteId).local === true
+                ? i18n("Use an address that starts with https:// or http://.")
+                : i18n("Use an address that starts with https://.")
+        case "http-not-loopback":
+            return i18n("http is allowed only for this computer. Use https or an SSH tunnel.")
+        case "loopback-not-allowed":
+            return i18n("Addresses on this computer are allowed only for Local.")
+        default:
+            return i18n("This isn't a valid web address.")
+        }
     }
 
     ColumnLayout {
@@ -142,6 +186,132 @@ KCM.SimpleKCM {
             text: i18n(
                 "Text you copy may be kept by your clipboard manager if it saves history. Each open site uses roughly 200–500 MB of memory."
             )
+        }
+
+        Kirigami.Separator {
+            Layout.fillWidth: true
+        }
+
+        QQC2.CheckBox {
+            text: i18n("Show advanced settings")
+            checked: page.showAdvanced
+            onToggled: page.showAdvanced = checked
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: page.showAdvanced
+            spacing: Kirigami.Units.largeSpacing
+
+            Kirigami.Heading {
+                level: 2
+                text: i18n("Custom addresses")
+            }
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                opacity: 0.72
+                text: i18n(
+                    "Addresses are saved in your Plasma configuration file. Don't put passwords, tokens or other secrets in them. Leave empty to use the built-in address."
+                )
+            }
+
+            Repeater {
+                model: ChatSites.sites
+
+                delegate: ColumnLayout {
+                    id: urlRow
+                    required property var modelData
+                    // Validation code of the text in the field; "" when valid.
+                    property string errorCode: ""
+                    // Saved value this row last saw or wrote.
+                    property string savedUrl: ""
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+
+                    function syncFromConfig() {
+                        var saved = page.savedCustomUrl(urlRow.modelData.id)
+                        // Invalid text stays in the field until the user fixes
+                        // it, unless the saved value changed elsewhere (Defaults).
+                        if (urlRow.errorCode !== "" && saved === urlRow.savedUrl)
+                            return
+                        urlRow.savedUrl = saved
+                        urlRow.errorCode = ""
+                        if (urlField.text.trim() !== saved)
+                            urlField.text = saved
+                    }
+
+                    function edit(text) {
+                        var checked = ChatSites.validateCustomUrl(urlRow.modelData.id, text.trim())
+                        urlRow.errorCode = checked.ok ? "" : checked.error
+                        if (!checked.ok)
+                            return
+                        urlRow.savedUrl = checked.url
+                        page.setCustomUrl(urlRow.modelData.id, checked.url)
+                    }
+
+                    Component.onCompleted: urlRow.syncFromConfig()
+
+                    Connections {
+                        target: page
+                        function onCfg_chatCustomUrlsChanged() {
+                            urlRow.syncFromConfig()
+                        }
+                    }
+
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        text: urlRow.modelData.name
+                        elide: Text.ElideRight
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        QQC2.TextField {
+                            id: urlField
+                            Layout.fillWidth: true
+                            placeholderText: urlRow.modelData.url
+                            inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoPredictiveText
+                                | Qt.ImhNoAutoUppercase
+                            Accessible.name: i18n("Address for %1", urlRow.modelData.name)
+                            onTextEdited: urlRow.edit(urlField.text)
+                        }
+                        QQC2.ToolButton {
+                            icon.name: "edit-undo"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18n("Use the built-in address")
+                            enabled: urlField.text !== ""
+                            onClicked: {
+                                urlField.text = ""
+                                urlRow.edit("")
+                            }
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                        }
+                    }
+
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        visible: urlRow.errorCode !== ""
+                        wrapMode: Text.WordWrap
+                        color: Kirigami.Theme.negativeTextColor
+                        text: page.customUrlError(urlRow.modelData.id, urlRow.errorCode)
+                    }
+
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        visible: urlRow.modelData.local === true
+                        wrapMode: Text.WordWrap
+                        opacity: 0.72
+                        text: i18n(
+                            "http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server on another machine use https or an SSH tunnel."
+                        )
+                    }
+                }
+            }
         }
     }
 }

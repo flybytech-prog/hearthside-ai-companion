@@ -46,11 +46,38 @@ panel support **Left** and **Used** display modes.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
   remains on a panel.
 - **Chat** tab, the first tab in the popup (the usage view is second): pick Claude, ChatGPT, Grok,
-  Gemini (best effort), GitHub Copilot, or Microsoft Copilot from a dropdown
-  and use the provider's own website right in the popup. It runs in a private,
-  in-memory browser profile: you sign in on each site normally, nothing is
-  saved to disk, and you are signed out when Plasma restarts or you choose
-  **Clear chat data**. Choose the sites under **Settings → Chat**.
+  Gemini (best effort), GitHub Copilot, Microsoft Copilot, or Local
+  (Ollama / Open WebUI) from a dropdown and use the site right in the popup.
+  It runs in a private, in-memory browser profile: you sign in on each site
+  normally, nothing is saved to disk, and you are signed out when Plasma
+  restarts or you choose **Clear chat data**. Choose the sites under
+  **Settings → Chat**; Local is off until you turn it on.
+
+### Chat sites
+
+- **GitHub Copilot** opens GitHub's sign-in page and goes on to
+  `github.com/copilot` once you are signed in (signed-out visitors to
+  `/copilot` only get a landing page). Google and Apple sign-in may be
+  refused inside the widget; GitHub's own sign-in and two-factor prompts work.
+- **Local (Ollama / Open WebUI)** shows a chat web interface running on this
+  computer, by default `http://localhost:3000/`. Ollama alone has no web
+  interface; run [Open WebUI](https://github.com/open-webui/open-webui) on top
+  of it, for example
+  `docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui ghcr.io/open-webui/open-webui:main`
+  (or `open-webui serve`, which listens on port 8080; set that address below).
+- **Custom addresses**: under **Settings → Chat → Show advanced settings**
+  each site can open a different address, for example a self-hosted
+  instance. Leave a field empty to use the built-in address. Addresses must
+  use `https://`; only Local may also use plain `http://`, and only for this
+  computer (`localhost`, `127.0.0.1`, `[::1]`). A custom address adds only its
+  exact host to the site, never its subdomains. Don't put passwords or tokens
+  in an address; it is stored in your Plasma configuration file.
+- **A chat server on another machine** (for example Open WebUI on your home
+  server): give it an `https://` address with a certificate your system
+  trusts (self-signed certificates are refused), or forward it to this
+  computer with an SSH tunnel such as `ssh -N -L 3000:localhost:3000 server`
+  (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
+  and keep Local at `http://localhost:3000/`.
 
 Fresh installs track all providers, show Claude Code and Codex in the panel,
 select Weekly for each, display usage left, and refresh every five minutes.
@@ -147,7 +174,8 @@ every site permission (microphone, camera, screen sharing, notifications,
 location, clipboard reading), asks before each download, opens outside links
 in your browser (which may keep them in its history), and never reads or
 scripts the pages. Page console messages
-are discarded. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
+are discarded. Custom chat addresses are stored in plain text in your Plasma
+configuration file. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
 list what it does not protect against.
 
 See [Privacy](docs/privacy.md) and

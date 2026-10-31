@@ -45,8 +45,9 @@ analytics or telemetry are collected.
 ## Chat tab
 
 The Chat tab shows a provider's own website (Claude, ChatGPT, Grok, Gemini,
-GitHub Copilot, or Microsoft Copilot) in Qt WebEngine inside the Plasma
-process. You sign in on each site as you would in a browser. The design goal
+GitHub Copilot, or Microsoft Copilot), or a chat server on your own computer
+(Local, for example Open WebUI on top of Ollama), in Qt WebEngine inside the
+Plasma process. You sign in on each site as you would in a browser. The design goal
 is that anything you enter there (accounts, passwords, prompts, uploaded files,
 cookies) stays in Plasma's memory, visible only to your session, and is gone
 when Plasma restarts or you choose **Clear chat data**.
@@ -73,7 +74,7 @@ just because the widget is on the panel.
 | Cookies, sessions, site storage, HTTP cache | Memory only; dropped on Clear chat data or Plasma restart |
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved |
-| Widget settings | Only the enabled sites (`chatSites`) and the first site (`chatDefaultSite`); no addresses or last page |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), and any custom addresses you enter (`chatCustomUrls`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited |
 | Downloads | Only files you approve, saved to your Downloads folder |
 | Uploads | Read-only, from files you pick in the file dialog |
 | Page console messages | Discarded; never written to the journal |
@@ -84,6 +85,34 @@ pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
 chat data to the Python helper, process arguments, or the environment. Load
 errors show generic text and are not logged. The system file dialog may
 remember recently used folders, as it does for any application.
+
+### Custom addresses
+
+Under **Settings → Chat → Show advanced settings** you can change the address
+each site opens. Custom addresses are saved in plain text in your Plasma
+configuration file (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`), which
+other programs running as your user and your backups can read. Don't put
+passwords, tokens, or other secrets in them. Addresses with a user name or
+password (`https://user:pass@host/`) are refused, and text that isn't a valid
+address is never saved. A custom address adds only its exact host to the site.
+
+### Local chat server
+
+Local is off by default. It is the only site allowed to use plain `http:`,
+and only for the exact address and port you configured on this computer
+(`localhost`, `127.0.0.1`, or `[::1]`); traffic over loopback never leaves the
+computer, but it is not encrypted. Every other site is blocked from reaching
+this computer at all. Keep in mind:
+
+- Open WebUI (or whatever server you run) keeps its own accounts and chat
+  history on its side. Clear chat data signs you out of it in the widget but
+  does not delete anything stored by the server.
+- On a shared computer, another user could start their own server on the same
+  port before yours does, and the widget would show their page. Only use Local
+  on a computer you trust, and stop using it if the page looks unfamiliar.
+- A server on another machine needs `https:` with a certificate your system
+  trusts; pages with self-signed or otherwise invalid certificates are not
+  loaded. Alternatively, reach it through an SSH tunnel to a local port.
 
 ### Permissions and prompts
 

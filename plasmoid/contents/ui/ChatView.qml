@@ -12,6 +12,8 @@ ColumnLayout {
 
     property var siteIds: []
     property string siteId: ""
+    // Validated {siteId: url} custom addresses; runtime only.
+    property var customUrls: ({})
     // True while the Chat tab is the visible one.
     property bool current: false
 
@@ -24,6 +26,7 @@ ColumnLayout {
     readonly property bool dialogOpen: !!chatView.web && chatView.web.dialogOpen
     readonly property bool canGoBack: !!chatView.web && chatView.web.canGoBack
     readonly property bool canOpenExternally: !!chatView.web && chatView.web.canOpenExternally
+    readonly property bool localSite: chatView.siteId === "local"
 
     spacing: 0
 
@@ -171,7 +174,10 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: !!chatView.web && chatView.web.pageFailed && !chatView.web.pageCrashed
         type: Kirigami.MessageType.Warning
-        text: i18n("Couldn't load this page.")
+        // The local address itself is never shown here.
+        text: chatView.localSite
+            ? i18n("Couldn't load. Is your local chat server running? You can change its address in Settings → Chat → Advanced.")
+            : i18n("Couldn't load this page.")
         actions: [
             Kirigami.Action {
                 text: i18n("Retry")
@@ -191,6 +197,8 @@ ColumnLayout {
             active: chatView.started && !chatView.clearing
             source: "ChatWebView.qml"
             onLoaded: {
+                // customUrls first: the first page load must already use them.
+                webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })
                 chatView.focusLater()
