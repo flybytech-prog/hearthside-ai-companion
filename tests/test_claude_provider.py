@@ -7,16 +7,16 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from conftest import fixture
-from ai_usage_kde.core.auth import (
+from hearthside.core.auth import (
     CLAUDE_REFRESH_SCOPES,
     CLAUDE_REFRESH_URL,
     ClaudeAuthStore,
 )
-from ai_usage_kde.core.environment import LoginShellEnvironment
-from ai_usage_kde.core.http import HttpResponse
-from ai_usage_kde.core.locking import credential_lock, lock_directory
-from ai_usage_kde.core.model import FailureKind, ProviderStatus
-from ai_usage_kde.providers.claude import ClaudeProvider, USAGE_URL
+from hearthside.core.environment import LoginShellEnvironment
+from hearthside.core.http import HttpResponse
+from hearthside.core.locking import credential_lock, lock_directory
+from hearthside.core.model import FailureKind, ProviderStatus
+from hearthside.providers.claude import ClaudeProvider, USAGE_URL
 
 
 NOW = datetime(2027, 1, 15, tzinfo=timezone.utc)

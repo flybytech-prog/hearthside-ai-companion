@@ -8,10 +8,10 @@ from datetime import timedelta
 
 import pytest
 
-from ai_usage_kde.core.auth import SecretToolStore
-from ai_usage_kde.core.locking import credential_lock, lock_directory
-from ai_usage_kde.core.model import FailureKind, ProviderStatus
-from ai_usage_kde.providers.cursor import (
+from hearthside.core.auth import SecretToolStore
+from hearthside.core.locking import credential_lock, lock_directory
+from hearthside.core.model import FailureKind, ProviderStatus
+from hearthside.providers.cursor import (
     ACCESS_KEY,
     MEMBERSHIP_KEY,
     PLAN_URL,
@@ -21,7 +21,7 @@ from ai_usage_kde.providers.cursor import (
     CursorAuthStore,
     CursorProvider,
 )
-from ai_usage_kde.providers.grok import GrokProvider
+from hearthside.providers.grok import GrokProvider
 
 from test_additional_providers import (
     GROK_EXPIRED,

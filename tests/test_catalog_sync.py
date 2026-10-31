@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from ai_usage_kde.core.catalog import catalog_json
+from hearthside.core.catalog import catalog_json
 
 
 CATALOG_JS = (

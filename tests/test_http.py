@@ -1,7 +1,7 @@
 import urllib.request
 from urllib.parse import urlencode
 
-from ai_usage_kde.core import http
+from hearthside.core import http
 
 
 class _FakeResp:

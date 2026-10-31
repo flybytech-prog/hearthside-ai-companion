@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from ai_usage_kde.core.model import (
+from hearthside.core.model import (
     BillingUsage, ProviderStatus, ProviderUsage, UsageWindow, threshold_color,
 )
 

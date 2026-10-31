@@ -24,6 +24,6 @@ function decide(inFlight, startedAtMs, nowMs) {
 function usageCommand(runId, providerIds) {
     var run = Math.max(0, Math.floor(Number(runId) || 0))
     var ids = Array.isArray(providerIds) ? providerIds : []
-    return "env AI_USAGE_KDE_RUN=" + run
-        + " python3 -m ai_usage_kde --json --providers=" + ids.join(",")
+    return "env HEARTHSIDE_RUN=" + run
+        + " python3 -m hearthside --json --providers=" + ids.join(",")
 }

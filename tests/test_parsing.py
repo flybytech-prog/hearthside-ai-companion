@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from ai_usage_kde.core.parsing import (
+from hearthside.core.parsing import (
     decode_json_with_hex_fallback,
     jwt_expiration,
     number,

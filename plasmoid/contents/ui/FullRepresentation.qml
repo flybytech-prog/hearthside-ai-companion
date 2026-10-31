@@ -46,7 +46,7 @@ PlasmaExtras.Representation {
                     Layout.fillWidth: true
                     visible: !full.chatAvailable
                     level: 2
-                    text: i18n("AI Usage")
+                    text: i18n("Hearthside")
                     elide: Text.ElideRight
                 }
                 PlasmaComponents.TabBar {

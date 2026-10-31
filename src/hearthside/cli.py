@@ -11,7 +11,7 @@ from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        prog="ai-usage-kde",
+        prog="hearthside",
         description="Read local AI CLI sessions and print subscription usage as JSON.",
     )
     result.add_argument("--json", action="store_true", help="Print JSON (the default).")

@@ -5,8 +5,8 @@ from datetime import timedelta
 
 import pytest
 
-from ai_usage_kde.core.model import FailureKind, ProviderStatus
-from ai_usage_kde.providers.grok import SETTINGS_URL, USAGE_URL, GrokProvider
+from hearthside.core.model import FailureKind, ProviderStatus
+from hearthside.providers.grok import SETTINGS_URL, USAGE_URL, GrokProvider
 
 from test_additional_providers import (
     GROK_EXPIRED,
@@ -129,3 +129,18 @@ def test_auth_file_corrupted_before_retry_after_rejection_is_storage(
     usage = _provider(path, monkeypatch, getter=getter).fetch()
     assert usage.failure_kind == FailureKind.STORAGE
     assert json.dumps(usage.error_message).count("not json") == 0
+
+
+def test_grok_identifies_as_hearthside(tmp_path, monkeypatch):
+    from hearthside import __version__
+
+    path = tmp_path / "auth.json"
+    _write_grok_file(path, "old-access", "old-refresh", GROK_FRESH)
+    agents = []
+
+    def getter(url, headers, timeout=15.0):
+        agents.append(headers["User-Agent"])
+        return response({}, status=429, headers={"Retry-After": "120"})
+
+    _provider(path, monkeypatch, getter=getter).fetch()
+    assert agents == [f"Hearthside/{__version__}"]

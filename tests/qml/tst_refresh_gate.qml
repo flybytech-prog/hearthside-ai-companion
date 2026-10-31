@@ -32,9 +32,9 @@ TestCase {
 
     function test_usageCommandFormat() {
         compare(RefreshGate.usageCommand(3, ["claude", "codex"]),
-                "env AI_USAGE_KDE_RUN=3 python3 -m ai_usage_kde --json --providers=claude,codex")
+                "env HEARTHSIDE_RUN=3 python3 -m hearthside --json --providers=claude,codex")
         compare(RefreshGate.usageCommand(1, []),
-                "env AI_USAGE_KDE_RUN=1 python3 -m ai_usage_kde --json --providers=")
+                "env HEARTHSIDE_RUN=1 python3 -m hearthside --json --providers=")
     }
 
     function test_usageCommandUniquePerRun() {
@@ -44,10 +44,10 @@ TestCase {
 
     function test_usageCommandSanitizesRunId() {
         compare(RefreshGate.usageCommand("1; rm -rf ~", ["grok"]),
-                "env AI_USAGE_KDE_RUN=0 python3 -m ai_usage_kde --json --providers=grok")
+                "env HEARTHSIDE_RUN=0 python3 -m hearthside --json --providers=grok")
         compare(RefreshGate.usageCommand(-4, ["grok"]),
-                "env AI_USAGE_KDE_RUN=0 python3 -m ai_usage_kde --json --providers=grok")
+                "env HEARTHSIDE_RUN=0 python3 -m hearthside --json --providers=grok")
         compare(RefreshGate.usageCommand(2.7, null),
-                "env AI_USAGE_KDE_RUN=2 python3 -m ai_usage_kde --json --providers=")
+                "env HEARTHSIDE_RUN=2 python3 -m hearthside --json --providers=")
     }
 }

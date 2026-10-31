@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 
-from ai_usage_kde.core.auth import SecretToolStore
-from ai_usage_kde.core.model import FailureKind, ProviderStatus
-from ai_usage_kde.providers.antigravity import (
+from hearthside.core.auth import SecretToolStore
+from hearthside.core.model import FailureKind, ProviderStatus
+from hearthside.providers.antigravity import (
     CLOUD_BASES,
     MODELS_PATH,
     PLAN_PATH,

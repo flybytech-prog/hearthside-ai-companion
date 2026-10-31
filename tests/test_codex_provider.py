@@ -7,12 +7,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from conftest import fixture
-from ai_usage_kde.core.auth import CodexAuthStore, SecretToolStore
-from ai_usage_kde.core.environment import LoginShellEnvironment
-from ai_usage_kde.core.http import HttpResponse
-from ai_usage_kde.core.locking import credential_lock, lock_directory
-from ai_usage_kde.core.model import FailureKind, ProviderStatus
-from ai_usage_kde.providers.codex import (
+from hearthside.core.auth import CodexAuthStore, SecretToolStore
+from hearthside.core.environment import LoginShellEnvironment
+from hearthside.core.http import HttpResponse
+from hearthside.core.locking import credential_lock, lock_directory
+from hearthside.core.model import FailureKind, ProviderStatus
+from hearthside.providers.codex import (
     CLIENT_ID,
     REFRESH_URL,
     USAGE_URL,
@@ -503,3 +503,22 @@ def test_codex_keyring_lookup_failure_at_reread_is_storage_error(tmp_path):
     assert usage.status == ProviderStatus.ERROR
     assert usage.failure_kind == FailureKind.STORAGE
     assert posts == []
+
+
+def test_codex_identifies_as_hearthside():
+    from hearthside import __version__
+
+    credentials, store = _credentials()
+    captured = {}
+
+    def getter(url, headers, timeout=15.0):
+        captured["headers"] = headers
+        return _response()
+
+    CodexProvider(
+        creds=credentials,
+        auth_store=store,
+        getter=getter,
+        now=lambda: NOW,
+    ).fetch()
+    assert captured["headers"]["User-Agent"] == f"Hearthside/{__version__}"

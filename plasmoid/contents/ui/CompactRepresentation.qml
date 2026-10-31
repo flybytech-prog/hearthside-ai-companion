@@ -41,7 +41,8 @@ MouseArea {
             spacing: 2
 
             Kirigami.Icon {
-                source: "speedometer"
+                source: Qt.resolvedUrl("../images/hearthside.svg")
+                isMask: true
                 Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
                 Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
             }

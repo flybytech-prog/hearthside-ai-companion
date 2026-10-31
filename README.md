@@ -1,8 +1,8 @@
 <div align="center">
 
-# AI Usage — KDE Plasma widget
+# Hearthside — your AI companion
 
-**AI coding subscription usage, native in your Plasma panel.**
+**Usage meters and AI chats, right in your Plasma panel.**
 
 [![KDE Plasma 6](https://img.shields.io/badge/KDE%20Plasma-6-1d99f3?logo=kde&logoColor=white)](https://kde.org/plasma-desktop/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
@@ -11,12 +11,14 @@
 
 <br>
 
-<img src="docs/preview.png" alt="AI Usage popup opening upward from its compact quota item in the bottom KDE Plasma panel" width="1100">
+<img src="docs/preview.png" alt="Hearthside popup opening upward from its compact quota item in the bottom KDE Plasma panel" width="1100">
 
 </div>
 
-AI Usage is a Plasma 6 panel widget for the same seven providers supported by
-the macOS AI Usage menubar app:
+Hearthside is a KDE Plasma 6 companion for your AI coding subscriptions. It
+sits in the panel, shows how much of each plan you have left, and opens quick
+chats with AI websites in its popup. Usage meters cover the same seven
+providers supported by the macOS AI Usage menubar app:
 
 - Claude Code
 - Codex
@@ -58,7 +60,7 @@ select Weekly for each, display usage left, and refresh every five minutes.
 Track only the tools you use, choose which providers appear in the Plasma
 panel, and select one or more metrics per provider.
 
-<img src="docs/settings.png" alt="AI Usage settings on KDE Plasma showing controls for Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, Devin, and Grok" width="1100">
+<img src="docs/settings.png" alt="Hearthside settings on KDE Plasma showing controls for Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, Devin, and Grok" width="1100">
 
 ## Install
 
@@ -66,12 +68,12 @@ panel, and select one or more metrics per provider.
 ./scripts/install.sh --restart-plasma
 ```
 
-The script installs the dependency-free Python helper into the user Python
-site, installs or upgrades the plasmoid, removes the obsolete v1 retry cache,
-and optionally reloads Plasma.
+The script removes the old AI Usage widget, helper, and cache if they are
+present, installs the dependency-free Python helper into the user Python site,
+installs or upgrades the plasmoid, and optionally reloads Plasma.
 
-Then right-click the panel, choose **Add Widgets…**, search for **AI Usage**,
-and add it. The first 2.0 launch opens Settings once.
+Then right-click the panel, choose **Add Widgets…**, search for **Hearthside**,
+and add it. The first launch opens Settings once.
 
 Manual installation remains available:
 
@@ -81,14 +83,36 @@ kpackagetool6 -t Plasma/Applet -i plasmoid
 ```
 
 Use `-u plasmoid` instead of `-i` when the package is already installed.
+When upgrading from AI Usage 2.x by hand, remove the old helper and widget
+first, so the two never refresh the same sign-ins at once:
+
+```bash
+python3 -m pip uninstall --break-system-packages ai-usage-kde
+kpackagetool6 -t Plasma/Applet -r com.bgn.aiusage
+```
+
+## Upgrading from AI Usage 2.x
+
+Hearthside 1.0.0 is the renamed AI Usage 2.x. Run the installer once:
+
+```bash
+./scripts/install.sh --restart-plasma
+```
+
+It removes the old `com.bgn.aiusage` widget, the old `ai-usage-kde` Python
+helper, and the old cache files in `$XDG_CACHE_HOME/ai-usage-kde`. After Plasma
+reloads, remove the old widget's placeholder from your panel if it is still
+there, then add **Hearthside** once through **Add Widgets…**. Settings start
+fresh because the widget has a new ID. Nothing needs to be re-authenticated:
+Hearthside reads the same provider sign-ins as before.
 
 ## Helper CLI
 
 ```bash
-ai-usage-kde --json
-ai-usage-kde --providers=claude,codex
-ai-usage-kde --catalog
-ai-usage-kde --detect
+hearthside --json
+hearthside --providers=claude,codex
+hearthside --catalog
+hearthside --detect
 ```
 
 The JSON v2 response includes the provider catalog, detected provider IDs,
@@ -114,8 +138,8 @@ usage, reset/retry times, and no credential data.
 
 No tokens, credential fingerprints, raw API responses, local transcripts, or
 usage history are printed or cached. Antigravity's derived access-token cache
-is the only authentication cache created by AI Usage; it is stored with mode
-`0600` under `$XDG_CACHE_HOME/ai-usage-kde` and keyed to a one-way refresh-token
+is the only authentication cache created by Hearthside; it is stored with mode
+`0600` under `$XDG_CACHE_HOME/hearthside` and keyed to a one-way refresh-token
 fingerprint.
 
 The Chat tab keeps cookies, sessions, and site data in memory only, denies

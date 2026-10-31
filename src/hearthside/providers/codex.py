@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
+from .. import __version__
 from ..core.auth import (
     CodexAuthStore,
     CodexCredentials,
@@ -377,7 +378,7 @@ class CodexProvider:
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "User-Agent": "AIUsage/0.1",
+            "User-Agent": f"Hearthside/{__version__}",
         }
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id

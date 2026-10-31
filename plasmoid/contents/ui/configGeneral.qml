@@ -41,7 +41,7 @@ KCM.ScrollViewKCM {
     property string statusMessage: ""
     property bool checkingProviders: false
     property bool detecting: false
-    readonly property string detectCommand: "python3 -m ai_usage_kde --detect"
+    readonly property string detectCommand: "python3 -m hearthside --detect"
     readonly property var refreshChoices: [
         { value: 60, text: i18n("1 minute") },
         { value: 300, text: i18n("5 minutes") },
@@ -197,7 +197,7 @@ KCM.ScrollViewKCM {
             return Catalog.byId(providerId) !== null
         })
         providerSource.connectSource(
-            "python3 -m ai_usage_kde --json --providers=" + safe.join(",")
+            "python3 -m hearthside --json --providers=" + safe.join(",")
         )
     }
 
@@ -437,7 +437,7 @@ KCM.ScrollViewKCM {
             }
             QQC2.Label {
                 Layout.fillWidth: true
-                text: i18n("AI Usage 2.0.0")
+                text: i18n("Hearthside %1", Plasmoid.metaData.version)
                 font.bold: true
             }
             QQC2.Label {
@@ -483,7 +483,7 @@ KCM.ScrollViewKCM {
             parent: page
             anchors.centerIn: parent
             modal: true
-            title: i18n("Remove AI Usage?")
+            title: i18n("Remove Hearthside?")
             standardButtons: QQC2.Dialog.Cancel | QQC2.Dialog.Ok
             onAccepted: Plasmoid.internalAction("remove").trigger()
             onClosed: destroy()

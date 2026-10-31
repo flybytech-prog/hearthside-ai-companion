@@ -357,9 +357,9 @@ PlasmoidItem {
 
     hideOnWindowDeactivate: !root.chatPinned && !root.chatDialogOpen
 
-    Plasmoid.icon: "speedometer"
+    Plasmoid.icon: Qt.resolvedUrl("../images/hearthside.svg")
     Plasmoid.busy: !root.hasData && root.lastError === ""
-    toolTipMainText: i18n("AI Usage")
+    toolTipMainText: i18n("Hearthside")
     toolTipSubText: {
         if (root.lastError !== "" && !root.hasData)
             return i18n("Error: %1", root.lastError)

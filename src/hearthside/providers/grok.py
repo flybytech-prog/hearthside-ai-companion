@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from .. import __version__
 from ..core.environment import LoginShellEnvironment
 from ..core.http import HttpResponse, http_get, http_post_form
 from ..core.locking import CredentialLockTimeout, credential_lock
@@ -261,7 +262,7 @@ class GrokProvider:
                 "Authorization": f"Bearer {token}",
                 "X-XAI-Token-Auth": "xai-grok-cli",
                 "Accept": "application/json",
-                "User-Agent": "AIUsage/0.1",
+                "User-Agent": f"Hearthside/{__version__}",
             })
         except Exception:
             return None

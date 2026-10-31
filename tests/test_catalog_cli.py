@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-from ai_usage_kde import cli
-from ai_usage_kde.core.catalog import PROVIDER_IDS, catalog_json
-from ai_usage_kde.core.snapshot import collect_snapshot
+from hearthside import cli
+from hearthside.core.catalog import PROVIDER_IDS, catalog_json
+from hearthside.core.snapshot import collect_snapshot
 
 
 def test_catalog_has_reference_order_defaults_and_metrics():
@@ -45,7 +45,7 @@ def test_cli_catalog_does_not_collect_provider_usage(monkeypatch, capsys):
 
 
 def test_cli_detect_reports_installed_ids_without_providers(monkeypatch, capsys):
-    import ai_usage_kde.core.snapshot as snapshot
+    import hearthside.core.snapshot as snapshot
 
     monkeypatch.setattr(
         cli,
@@ -71,7 +71,7 @@ def test_cli_detect_reports_installed_ids_without_providers(monkeypatch, capsys)
 
 
 def test_cli_catalog_wins_over_detect(monkeypatch, capsys):
-    import ai_usage_kde.core.snapshot as snapshot
+    import hearthside.core.snapshot as snapshot
 
     monkeypatch.setattr(
         snapshot,
@@ -83,7 +83,7 @@ def test_cli_catalog_wins_over_detect(monkeypatch, capsys):
 
 
 def test_untracked_installed_provider_is_not_instantiated(monkeypatch):
-    import ai_usage_kde.core.snapshot as snapshot
+    import hearthside.core.snapshot as snapshot
 
     monkeypatch.setattr(
         snapshot,
