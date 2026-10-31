@@ -55,18 +55,18 @@ PlasmaExtras.Representation {
                     visible: full.chatAvailable
 
                     Binding on currentIndex {
-                        value: full.onChat ? 1 : 0
+                        value: full.onChat ? 0 : 1
                     }
 
-                    PlasmaComponents.TabButton {
-                        text: i18n("Usage")
-                        icon.name: "speedometer"
-                        onClicked: root.popupTab = "usage"
-                    }
                     PlasmaComponents.TabButton {
                         text: i18n("Chat")
                         icon.name: "dialog-messages"
                         onClicked: root.popupTab = "chat"
+                    }
+                    PlasmaComponents.TabButton {
+                        text: i18n("Usage")
+                        icon.name: "speedometer"
+                        onClicked: root.popupTab = "usage"
                     }
                 }
                 PlasmaComponents.ToolButton {
@@ -200,9 +200,7 @@ PlasmaExtras.Representation {
     }
 
     contentItem: StackLayout {
-        currentIndex: full.onChat ? 1 : 0
-
-        UsageView {}
+        currentIndex: full.onChat ? 0 : 1
 
         ChatView {
             id: chatView
@@ -210,6 +208,8 @@ PlasmaExtras.Representation {
             siteId: root.chatSiteId
             current: full.onChat
         }
+
+        UsageView {}
     }
 
     Binding {

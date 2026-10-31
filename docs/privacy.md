@@ -62,7 +62,9 @@ restart; persistent sign-in is not offered.
 
 **Clear chat data** (in the Chat tab, after a confirmation) destroys every
 chat page together with the profile, which signs you out of all chat sites at
-once. Qt WebEngine is not started until you first open the Chat tab.
+once. Chat is the first tab, so Qt WebEngine starts the first time you open
+the popup, unless no chat sites are enabled in settings; it is never started
+just because the widget is on the panel.
 
 ### What is stored where
 

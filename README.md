@@ -45,7 +45,7 @@ panel support **Left** and **Used** display modes.
   process arguments.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
   remains on a panel.
-- Optional **Chat** tab next to the usage view: pick Claude, ChatGPT, Grok,
+- **Chat** tab, the first tab in the popup (the usage view is second): pick Claude, ChatGPT, Grok,
   Gemini (best effort), GitHub Copilot, or Microsoft Copilot from a dropdown
   and use the provider's own website right in the popup. It runs in a private,
   in-memory browser profile: you sign in on each site normally, nothing is

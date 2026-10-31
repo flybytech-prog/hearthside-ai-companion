@@ -3,8 +3,8 @@ import org.kde.plasma.configuration
 
 ConfigModel {
     ConfigCategory {
-        name: i18n("Settings")
-        icon: "configure"
+        name: i18n("AI Usage")
+        icon: "speedometer"
         source: "configGeneral.qml"
     }
     ConfigCategory {

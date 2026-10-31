@@ -31,7 +31,7 @@ PlasmoidItem {
     property int refreshRun: 0
 
     // Chat tab runtime state; never written to the configuration.
-    property string popupTab: "usage"
+    property string popupTab: "chat"
     property string chatSiteId: ""
     property bool chatPinned: false
     property bool chatDialogOpen: false
