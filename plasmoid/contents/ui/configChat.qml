@@ -227,31 +227,37 @@ KCM.SimpleKCM {
                     property string errorCode: ""
                     // Saved value this row last saw or wrote.
                     property string savedUrl: ""
+                    // Saved value when the page opened or when it last changed
+                    // elsewhere (Defaults); written back while the text is invalid.
+                    property string baseline: ""
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
-                    function syncFromConfig() {
-                        var saved = page.savedCustomUrl(urlRow.modelData.id)
-                        // Invalid text stays in the field until the user fixes
-                        // it, unless the saved value changed elsewhere (Defaults).
-                        if (urlRow.errorCode !== "" && saved === urlRow.savedUrl)
-                            return
+                    function load(saved) {
+                        urlRow.baseline = saved
                         urlRow.savedUrl = saved
                         urlRow.errorCode = ""
                         if (urlField.text.trim() !== saved)
                             urlField.text = saved
                     }
 
-                    function edit(text) {
-                        var checked = ChatSites.validateCustomUrl(urlRow.modelData.id, text.trim())
-                        urlRow.errorCode = checked.ok ? "" : checked.error
-                        if (!checked.ok)
-                            return
-                        urlRow.savedUrl = checked.url
-                        page.setCustomUrl(urlRow.modelData.id, checked.url)
+                    function syncFromConfig() {
+                        // Our own writes and other rows' writes leave this
+                        // row's saved value as last seen; keep the field as is.
+                        var saved = page.savedCustomUrl(urlRow.modelData.id)
+                        if (saved !== urlRow.savedUrl)
+                            urlRow.load(saved)
                     }
 
-                    Component.onCompleted: urlRow.syncFromConfig()
+                    function edit(text) {
+                        var persist = ChatSites.customUrlToPersist(
+                            urlRow.modelData.id, text, urlRow.baseline)
+                        urlRow.errorCode = persist.error
+                        urlRow.savedUrl = persist.url
+                        page.setCustomUrl(urlRow.modelData.id, persist.url)
+                    }
+
+                    Component.onCompleted: urlRow.load(page.savedCustomUrl(urlRow.modelData.id))
 
                     Connections {
                         target: page

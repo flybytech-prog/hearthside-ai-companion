@@ -71,7 +71,11 @@ panel support **Left** and **Used** display modes.
   use `https://`; only Local may also use plain `http://`, and only for this
   computer (`localhost`, `127.0.0.1`, `[::1]`). A custom address adds only its
   exact host to the site, never its subdomains. Don't put passwords or tokens
-  in an address; it is stored in your Plasma configuration file.
+  in an address; it is stored in your Plasma configuration file. The widget
+  never opens a page, window or embedded frame on this computer for any site
+  but Local, and for Local allows plain `http://` only at the configured
+  address; background requests a page makes itself (fetch, WebSocket, images)
+  aren't filtered, as in any browser. See [docs/privacy.md](docs/privacy.md).
 - **A chat server on another machine** (for example Open WebUI on your home
   server): give it an `https://` address with a certificate your system
   trusts (self-signed certificates are refused), or forward it to this

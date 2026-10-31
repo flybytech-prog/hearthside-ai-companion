@@ -184,11 +184,12 @@ settings page):
 - An address must be at most 2048 characters, contain no whitespace or user
   info (`@` in the host part), and use `https:`. Local may also use `http:`,
   but only with the host `localhost`, `127.0.0.1`, or `[::1]`. No other site
-  may point at this computer.
+  may point at this computer. Control characters (U+0000–U+001F, U+007F) are
+  rejected like whitespace.
 - A custom address adds exactly its own host to the site (no subdomains); the
   built-in site and sign-in hosts still apply.
 
-Navigation in a site view (subframes are left to the page):
+Navigation in a site view (main frame unless noted):
 
 - Only `https:` main-frame pages load, plus `about:blank`. `http:`, `file:`,
   `data:`, `javascript:`, `view-source:`, `chrome:`, `qrc:`, other schemes, and
@@ -200,6 +201,17 @@ Navigation in a site view (subframes are left to the page):
 - Every site except Local is blocked from this computer under any scheme:
   `localhost`, `*.localhost`, `[::1]`, `0.0.0.0`, and any `127.x.x.x` address in any
   numeric spelling.
+- Embedded frames (subframes) may load `https:` from any host and `about:`,
+  `blob:`, `data:` or srcdoc content, with two exceptions: an `http:` or
+  `https:` frame on this computer (same test as above) is blocked for every
+  site except Local, and Local's `http:` frames load only for the exact origin
+  of its address. Malformed `http:`/`https:` frame URLs are blocked.
+- Scope: these rules cover what the widget can intercept, which is main-frame
+  and frame navigations and new windows. Background requests made by a page
+  (fetch, XHR, WebSocket, images, scripts, styles) are not filtered, so a page
+  can still reach this computer that way, directly or through names that
+  resolve to it (such as `*.nip.io`), as in any browser. The same applies to
+  the Local page's own subresources over `http:`.
 - A clicked link to a host outside the site and sign-in hosts is cancelled and
   opened in the system browser.
 - Other `https:` navigations, such as sign-in redirects and form posts, stay

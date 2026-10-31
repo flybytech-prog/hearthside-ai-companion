@@ -194,6 +194,11 @@ TestCase {
     function test_navigationSubframesAndUnknownSite() {
         compare(nav("file:///etc/passwd", "claude", false, false), "allow")
         compare(nav("https://ads.example.com/", "claude", true, false), "allow")
+        compare(nav("about:blank", "claude", false, false), "allow")
+        compare(nav("about:srcdoc", "claude", false, false), "allow")
+        compare(nav("", "claude", false, false), "allow")
+        compare(nav("blob:https://claude.ai/0b1c", "claude", false, false), "allow")
+        compare(nav("data:text/html,x", "claude", false, false), "allow")
         compare(nav("https://claude.ai/", "devin", false), "block")
         compare(nav("https://claude.ai/", "", false), "block")
     }
@@ -305,6 +310,11 @@ TestCase {
             ["claude", "https://chat example.org/", false, "whitespace"],
             ["claude", "https://chat.example.org/a\tb", false, "whitespace"],
             ["claude", "https://chat.example.org/\n", false, "whitespace"],
+            ["claude", "https://claude.ai/\u0001", false, "whitespace"],
+            ["claude", "https://claude.ai/\u0000x", false, "whitespace"],
+            ["claude", "https://claude.ai/\u001f", false, "whitespace"],
+            ["claude", "https://claude.ai/\u007f", false, "whitespace"],
+            ["local", "http://local\u0001host:3000/", false, "whitespace"],
             ["claude", "chat.example.org", false, "malformed"],
             ["claude", "https://", false, "malformed"],
             ["claude", "https://chat..example.org/", false, "malformed"],
@@ -328,6 +338,92 @@ TestCase {
         compare(longUrl.length, 2049)
         compare(checkUrl("claude", longUrl).error, "too-long")
         verify(checkUrl("claude", longUrl.slice(0, 2048)).ok)
+    }
+
+    function test_subframesNeverReachThisComputer() {
+        var blocked = [
+            "http://localhost:3000",
+            "http://localhost:3000/",
+            "https://localhost/",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://2130706433/",
+            "https://foo.localhost/",
+            "https://0.0.0.0/",
+            "http://user@localhost/"
+        ]
+        for (var index = 0; index < blocked.length; index++) {
+            compare(nav(blocked[index], "claude", false, false), "block", blocked[index])
+            compare(nav(blocked[index], "mscopilot", true, false), "block", blocked[index])
+            compare(nav(blocked[index], "devin", false, false), "block", blocked[index])
+        }
+        compare(nav("https://example.com", "claude", false, false), "allow")
+        compare(nav("https://example.com/frame", "claude", true, false), "allow")
+        compare(nav("http://example.com/", "claude", false, false), "allow")
+        compare(nav("https://chat.example.org/", "claude", false, false,
+            {claude: "https://chat.example.org/"}), "allow")
+    }
+
+    function test_localSubframes() {
+        compare(nav("http://192.168.1.5/", "local", false, false), "block")
+        compare(nav("http://example.com/", "local", false, false), "block")
+        compare(nav("http://localhost:8080/", "local", false, false), "block")
+        compare(nav("http://127.0.0.1:3000/", "local", false, false), "block")
+        compare(nav("http://localhost:3000/x", "local", false, false), "allow")
+        compare(nav("http://localhost:3000/x", "local", true, false), "allow")
+        compare(nav("https://cdn.example", "local", false, false), "allow")
+        compare(nav("https://localhost/", "local", false, false), "allow")
+        compare(nav("about:blank", "local", false, false), "allow")
+        compare(nav("blob:http://localhost:3000/0b1c", "local", false, false), "allow")
+        compare(nav("data:text/html,x", "local", false, false), "allow")
+        var ipv4 = {local: "http://127.0.0.1:8080/"}
+        compare(nav("http://127.0.0.1:8080/f", "local", false, false, ipv4), "allow")
+        compare(nav("http://localhost:3000/f", "local", false, false, ipv4), "block")
+        var secure = {local: "https://ai.home.example/"}
+        compare(nav("http://localhost:3000/", "local", false, false, secure), "block")
+        compare(nav("https://ai.home.example/f", "local", false, false, secure), "allow")
+    }
+
+    function test_customUrlToPersistTypingSecret() {
+        var target = "https://admin:1234@host.example/"
+        var baselines = ["", "https://chat.example.org/"]
+        for (var b = 0; b < baselines.length; b++) {
+            var baseline = baselines[b]
+            var at = target.indexOf("@")
+            for (var length = 0; length <= target.length; length++) {
+                var text = target.slice(0, length)
+                var result = ChatSites.customUrlToPersist("claude", text, baseline)
+                var checked = ChatSites.validateCustomUrl("claude", text)
+                // Always either the valid text itself or the baseline.
+                compare(result.url, checked.ok ? text : baseline, text)
+                compare(result.error, checked.ok ? "" : checked.error, text)
+                if (length > at) {
+                    compare(result.url, baseline, text)
+                    compare(result.error, "userinfo", text)
+                }
+                verify(result.url.indexOf("1234") < 0 || length <= at, text)
+            }
+        }
+    }
+
+    function test_customUrlToPersist() {
+        compare(ChatSites.customUrlToPersist("claude", "", "https://chat.example.org/"),
+                {url: "", error: ""})
+        compare(ChatSites.customUrlToPersist("claude", "  https://a.example/  ", ""),
+                {url: "https://a.example/", error: ""})
+        compare(ChatSites.customUrlToPersist("claude", "https://a.example/\u0001", "https://b.example/"),
+                {url: "https://b.example/", error: "whitespace"})
+        compare(ChatSites.customUrlToPersist("claude", "http://a.example/", "https://b.example/"),
+                {url: "https://b.example/", error: "scheme"})
+        // A baseline that is itself invalid is never written back.
+        compare(ChatSites.customUrlToPersist("claude", "https://x@y/", "https://localhost/"),
+                {url: "", error: "userinfo"})
+        compare(ChatSites.customUrlToPersist("claude", "https://x@y/", undefined),
+                {url: "", error: "userinfo"})
+        compare(ChatSites.customUrlToPersist("local", null, "http://localhost:8080/"),
+                {url: "", error: ""})
+        compare(ChatSites.customUrlToPersist("devin", "https://a.example/", ""),
+                {url: "", error: "unknown-site"})
     }
 
     function test_customUrlsParseAndSerialize() {

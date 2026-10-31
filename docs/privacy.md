@@ -98,11 +98,18 @@ address is never saved. A custom address adds only its exact host to the site.
 
 ### Local chat server
 
-Local is off by default. It is the only site allowed to use plain `http:`,
-and only for the exact address and port you configured on this computer
-(`localhost`, `127.0.0.1`, or `[::1]`); traffic over loopback never leaves the
-computer, but it is not encrypted. Every other site is blocked from reaching
-this computer at all. Keep in mind:
+Local is off by default. It is the only site whose pages may use plain
+`http:`, and only for the exact address and port you configured on this
+computer (`localhost`, `127.0.0.1`, or `[::1]`); traffic over loopback never
+leaves the computer, but it is not encrypted. That rule covers the pages and
+embedded frames the widget controls; the Local page's own background requests
+(fetch, WebSocket, images, scripts) are not filtered by the widget.
+
+For every other site, the widget never opens or navigates to this computer:
+not as the page, not in a new window, and not in an embedded frame. Like in
+any browser, though, a page can still make background requests (fetch,
+WebSocket, images and similar) to this computer or to names that resolve to it
+(for example `*.nip.io`); the widget can't filter those. Keep in mind:
 
 - Open WebUI (or whatever server you run) keeps its own accounts and chat
   history on its side. Clear chat data signs you out of it in the widget but

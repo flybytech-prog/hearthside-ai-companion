@@ -284,7 +284,7 @@ function validateCustomUrl(siteId, text) {
         return { ok: true, url: "", error: "" }
     if (value.length > MAX_CUSTOM_URL_LENGTH)
         return fail("too-long")
-    if (/\s/.test(value))
+    if (/[\s\u0000-\u001f\u007f]/.test(value))
         return fail("whitespace")
     var authorityMatch = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^\/?#]*)/.exec(value)
     if (authorityMatch && authorityMatch[1].indexOf("@") >= 0)
@@ -303,6 +303,19 @@ function validateCustomUrl(siteId, text) {
     if (site.local !== true && isLocalAddress(parsed.host))
         return fail("loopback-not-allowed")
     return { ok: true, url: value, error: "" }
+}
+
+// {url, error} for one settings row: url is what to save for the text the
+// user has typed so far. Valid text (trimmed) or empty is saved as is;
+// invalid text saves baseline, the value saved when the page opened, so a
+// half-typed secret such as "https://admin:1234" never outlives the "@".
+function customUrlToPersist(siteId, text, baseline) {
+    var value = text === undefined || text === null ? "" : String(text).trim()
+    var checked = validateCustomUrl(siteId, value)
+    if (checked.ok)
+        return { url: checked.url, error: "" }
+    var fallback = validateCustomUrl(siteId, baseline)
+    return { url: fallback.ok ? fallback.url : "", error: checked.error }
 }
 
 // Only known ids with a valid non-empty address, in catalog order.
@@ -400,9 +413,10 @@ function isPageUrl(site, url) {
 // request.customUrls is optional; without it the built-in addresses apply.
 function classifyNavigation(request) {
     var info = request || {}
-    // Only an explicit subframe is let through; missing info is blocked.
+    // Only an explicit subframe gets the looser rules; missing info is
+    // treated as the main frame.
     if (info.isMainFrame === false)
-        return "allow"
+        return classifySubframe(info)
     var site = effectiveSite(info.siteId, info.customUrls)
     if (!site)
         return "block"
@@ -421,6 +435,25 @@ function classifyNavigation(request) {
     if (parsed.scheme === "http")
         return httpAllowed(site, parsed) ? "allow" : "block"
     return "block"
+}
+
+// "allow" | "block" for an embedded frame. Frames may load https from any
+// host and about:, blob:, data: or srcdoc content, but never this computer
+// unless the site is Local, and Local frames get plain http only for the
+// exact origin of its address. Unreadable http(s) addresses are blocked.
+function classifySubframe(info) {
+    var url = info.url === undefined || info.url === null ? "" : String(info.url)
+    var parsed = parseUrl(url)
+    if (parsed === null)
+        return /^https?:/i.test(url) ? "block" : "allow"
+    if (parsed.scheme !== "http" && parsed.scheme !== "https")
+        return "allow"
+    var site = effectiveSite(info.siteId, info.customUrls)
+    if (site === null || site.local !== true)
+        return isLocalAddress(parsed.host) ? "block" : "allow"
+    if (parsed.scheme === "http")
+        return httpAllowed(site, parsed) ? "allow" : "block"
+    return "allow"
 }
 
 // "overlay" | "external" | "block" for a new-window request. Plain http is
