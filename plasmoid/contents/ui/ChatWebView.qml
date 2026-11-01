@@ -6,12 +6,23 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import "ChatSites.js" as ChatSites
 
-// The only file that touches Qt WebEngine. Everything lives in one
-// off-the-record profile: cookies, cache and site storage stay in memory and
-// vanish when this item is destroyed (Clear chat data) or Plasma restarts.
+// The only file that touches Qt WebEngine. Everything lives in one profile.
+// By default it is off the record: cookies, cache and site storage stay in
+// memory and vanish when this item is destroyed (Clear chat data) or Plasma
+// restarts. Only with "Stay signed in" and a verified, unlocked encrypted
+// folder does ChatView create this item with staySignedIn set; then cookies
+// and site storage live in storagePath inside that folder (HTTP cache stays in
+// memory). Both are fixed for the item's lifetime: ChatView recreates it
+// instead of changing them (a live switch crashes Qt WebEngine).
 // Pages are never read or scripted, and their console output is dropped.
 Item {
     id: chatWeb
+
+    // Set once through the Loader's initial properties, before the profile
+    // exists. Defaults are the private in-memory profile.
+    property bool staySignedIn: false
+    property string storagePath: ""
+    property string profileName: ""
 
     // Enabled site ids (catalog order) and the one being shown.
     property var siteIds: []
@@ -20,7 +31,6 @@ Item {
     // first load already uses them.
     property var customUrls: ({})
 
-    readonly property bool offTheRecord: chatProfile.offTheRecord
     property var currentView: null
     readonly property bool overlayOpen: chatWeb.overlayView !== null
     readonly property var activeView: chatWeb.overlayView || chatWeb.currentView
@@ -220,13 +230,20 @@ Item {
             chatWeb.finishUpload(false)
     }
 
+    // Order matters: the paths come before storageName and offTheRecord is
+    // last, or Qt creates a stray profile folder under Plasma's own data
+    // directory before it sees the paths.
     WebEngineProfile {
         id: chatProfile
-        offTheRecord: true
+        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : ""
+        cachePath: chatWeb.staySignedIn ? chatWeb.storagePath : ""
+        storageName: chatWeb.staySignedIn ? chatWeb.profileName : ""
         httpCacheType: WebEngineProfile.MemoryHttpCache
-        persistentCookiesPolicy: WebEngineProfile.NoPersistentCookies
+        persistentCookiesPolicy: chatWeb.staySignedIn
+            ? WebEngineProfile.AllowPersistentCookies : WebEngineProfile.NoPersistentCookies
         persistentPermissionsPolicy: WebEngineProfile.PersistentPermissionsPolicy.AskEveryTime
         spellCheckEnabled: false
+        offTheRecord: !chatWeb.staySignedIn
 
         onDownloadRequested: (download) => {
             if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {

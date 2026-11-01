@@ -22,11 +22,17 @@ CONTENTS = PLASMOID / "contents"
 UI = CONTENTS / "ui"
 MAIN_XML = CONTENTS / "config" / "main.xml"
 CHAT_SITES_JS = UI / "ChatSites.js"
+CHAT_STORAGE_JS = UI / "ChatStorage.js"
 CHAT_WEB_VIEW = UI / "ChatWebView.qml"
-CHAT_LOG_FREE_FILES = ("ChatSites.js", "ChatView.qml", "ChatWebView.qml", "configChat.qml", "main.qml")
+CHAT_VIEW = UI / "ChatView.qml"
+FULL_REPRESENTATION = UI / "FullRepresentation.qml"
+MAIN_QML = UI / "main.qml"
+CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configChat.qml")
 # Chat files that may read the plasmoid config but never write it. Only the
-# settings pages persist chat values.
-CHAT_CONFIG_READ_ONLY_FILES = ("ChatSites.js", "ChatView.qml", "ChatWebView.qml")
+# settings pages persist chat values (and main.qml the profile generation).
+CHAT_CONFIG_READ_ONLY_FILES = (
+    "ChatSites.js", "ChatStorage.js", "ChatView.qml", "ChatWebView.qml", "FullRepresentation.qml",
+)
 KCFG_NS = "{http://www.kde.org/standards/kcfg/1.0}"
 
 EXPECTED_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
@@ -38,6 +44,8 @@ CHAT_CONFIG_KEYS = {
     "chatSites": ("String", None),
     "chatDefaultSite": ("String", None),
     "chatCustomUrls": ("String", "{}"),
+    "chatSignInStorage": ("String", "memory"),
+    "chatProfileGeneration": ("Int", "0"),
 }
 # Keys that existed before the Chat tab. Anything else in main.xml would be a
 # new persisted value; the Chat tab may only persist the keys above.
@@ -313,55 +321,205 @@ def test_chat_sites_js_has_no_imports():
     assert not lines, f"{_rel(CHAT_SITES_JS)} must stay a pure library without imports; lines {lines}"
 
 
-# --- off-the-record profile ---------------------------------------------------
+# --- the one profile: private by default, saved sign-ins only behind the gate ---------
+#
+# Rule checkers take source text so the "proof" tests below can feed them a
+# violating copy of the real file and show that each rule really fails.
 
-
-def test_chat_web_view_declares_exactly_one_off_the_record_profile():
-    code = _read_code(CHAT_WEB_VIEW)
-    profiles = list(_blocks(code, r"\bWebEngineProfile\s*\{"))
-    assert len(profiles) == 1, (
-        f"{_rel(CHAT_WEB_VIEW)} must declare exactly one WebEngineProfile, found {len(profiles)}"
-    )
-    _, body = profiles[0]
-    required = {
-        "offTheRecord: true": r"\boffTheRecord\s*:\s*true\b",
-        "httpCacheType: WebEngineProfile.MemoryHttpCache":
-            r"\bhttpCacheType\s*:\s*WebEngineProfile\.MemoryHttpCache\b",
-        "persistentCookiesPolicy: WebEngineProfile.NoPersistentCookies":
-            r"\bpersistentCookiesPolicy\s*:\s*WebEngineProfile\.NoPersistentCookies\b",
-        "spellCheckEnabled: false": r"\bspellCheckEnabled\s*:\s*false\b",
-    }
-    missing = [name for name, pattern in required.items() if not re.search(pattern, body)]
-    assert not missing, f"{_rel(CHAT_WEB_VIEW)} WebEngineProfile is missing {missing}"
-
+# Bindings of the profile, exactly, in this order (spike result 7: the paths
+# before storageName and offTheRecord last, else Qt creates a stray folder
+# under plasmashell's own data directory).
+PROFILE_BINDINGS = (
+    ("persistentStoragePath", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.storagePath\s*:\s*""'),
+    ("cachePath", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.storagePath\s*:\s*""'),
+    ("storageName", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.profileName\s*:\s*""'),
+    ("httpCacheType", r"WebEngineProfile\.MemoryHttpCache"),
+    ("persistentCookiesPolicy",
+     r"chatWeb\.staySignedIn\s*\?\s*WebEngineProfile\.AllowPersistentCookies"
+     r"\s*:\s*WebEngineProfile\.NoPersistentCookies"),
+    ("persistentPermissionsPolicy", r"WebEngineProfile\.PersistentPermissionsPolicy\.AskEveryTime"),
+    ("spellCheckEnabled", r"false"),
+    ("offTheRecord", r"!\s*chatWeb\.staySignedIn"),
+)
+# Names that may appear only once each, inside the profile block.
+PROFILE_ONLY_NAMES = ("storageName", "persistentStoragePath", "cachePath", "offTheRecord",
+                      "AllowPersistentCookies")
 
 FORBIDDEN_STORAGE = {
-    "storageName": r"\bstorageName\b",
-    "persistentStoragePath": r"\bpersistentStoragePath\b",
-    "cachePath": r"\bcachePath\b",
     "offTheRecord: false": r"\boffTheRecord\s*:\s*false\b",
     "defaultProfile": r"\bdefaultProfile\b",
     "ForcePersistentCookies": r"\bForcePersistentCookies\b",
-    "AllowPersistentCookies": r"\bAllowPersistentCookies\b",
     "DiskHttpCache": r"\bDiskHttpCache\b",
+    "WebEngineProfilePrototype": r"\bWebEngineProfilePrototype\b",
+    # A live switch of a profile crashes Qt WebEngine (spike result 6).
+    "live profile assignment": r"\.\s*(?:offTheRecord|storageName|persistentStoragePath|cachePath"
+                               r"|persistentCookiesPolicy|httpCacheType)\s*=(?!=)",
 }
 
 
-@pytest.mark.parametrize("name", sorted(FORBIDDEN_STORAGE))
-def test_chat_web_view_never_uses_persistent_storage(name):
-    code = _read_code(CHAT_WEB_VIEW)
-    lines = _hits(FORBIDDEN_STORAGE[name], code)
-    assert not lines, f"{_rel(CHAT_WEB_VIEW)} must not use {name} (persists data); lines {lines}"
+def _profile_problems(code):
+    profiles = list(_blocks(code, r"\bWebEngineProfile\s*\{"))
+    if len(profiles) != 1:
+        return [f"exactly one WebEngineProfile expected, found {len(profiles)}"]
+    _, body = profiles[0]
+    inner = _strip_comments(body[1:-1], blank_strings=True)
+    # Top-level property bindings only (depth 0 inside the block), handlers skipped.
+    names = []
+    depth = 0
+    for line_start in [0] + [m.end() for m in re.finditer(r"\n", inner)]:
+        line = inner[line_start:inner.find("\n", line_start) if "\n" in inner[line_start:] else len(inner)]
+        if depth == 0:
+            match = re.match(r"\s*(\w+)\s*:", line)
+            if match and not match.group(1).startswith("on") and match.group(1) != "id":
+                names.append(match.group(1))
+        depth += line.count("{") - line.count("}")
+    problems = []
+    expected = [name for name, _ in PROFILE_BINDINGS]
+    if names != expected:
+        problems.append(f"profile bindings must be exactly {expected} in that order, got {names}")
+    for name, value in PROFILE_BINDINGS:
+        found = re.findall(rf"(?m)^\s*{name}\s*:\s*((?:[^\n]|\n\s*[?:])+)", body)
+        if len(found) != 1 or not re.fullmatch(rf"\s*{value}\s*", found[0]):
+            problems.append(f"{name} must be exactly `{value}`, got {found}")
+    for name in PROFILE_ONLY_NAMES:
+        total = len(_hits(rf"\b{name}\b", code))
+        inside = len(_hits(rf"\b{name}\b", body))
+        if total != inside or inside != 1:
+            problems.append(f"{name} must appear once, inside the profile block ({inside} inside, {total} total)")
+    return problems
 
 
-def test_no_plasmoid_file_uses_persistent_webengine_storage():
-    offenders = [
-        f"{_rel(path)}:{line} {name}"
-        for path in _code_files()
-        for name, pattern in FORBIDDEN_STORAGE.items()
-        for line in _hits(pattern, _read_code(path))
+def test_chat_web_view_declares_one_profile_in_the_safe_order():
+    problems = _profile_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+def _storage_offenders(sources):
+    return [
+        f"{name}:{line} {rule}"
+        for name, code in sources.items()
+        for rule, pattern in FORBIDDEN_STORAGE.items()
+        for line in _hits(pattern, code)
+    ] + [
+        f"{name}:{line} {word}"
+        for name, code in sources.items() if not name.endswith("ChatWebView.qml")
+        for word in PROFILE_ONLY_NAMES
+        for line in _hits(rf"\b{word}\b", code)
     ]
-    assert not offenders, f"persistent WebEngine storage used outside ChatWebView.qml: {offenders}"
+
+
+def _all_code():
+    return {_rel(path): _read_code(path) for path in _code_files()}
+
+
+def test_no_plasmoid_file_uses_forbidden_webengine_storage():
+    offenders = _storage_offenders(_all_code())
+    assert not offenders, f"forbidden or out-of-place WebEngine storage: {offenders}"
+
+
+def _web_view_inputs_problems(code):
+    problems = []
+    for name, kind, default in (("staySignedIn", "bool", "false"),
+                                ("storagePath", "string", '""'),
+                                ("profileName", "string", '""')):
+        declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+?)\s*$", code)
+        if declared != [(kind, default)]:
+            problems.append(f"`property {kind} {name}: {default}` expected once, got {declared}")
+        assigned = _hits(rf"(?<![\w.]){name}\s*=(?!=)|\.\s*{name}\s*=(?!=)", code)
+        if assigned:
+            problems.append(f"{name} must never be assigned inside ChatWebView (lines {assigned})")
+    return problems
+
+
+def test_chat_web_view_profile_inputs_default_to_private():
+    problems = _web_view_inputs_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+# ChatView is the only place that hands the profile inputs to ChatWebView,
+# and only through the Loader's initial properties.
+CHAT_VIEW_GATE = (
+    r'readonly\s+property\s+bool\s+encrypted\s*:\s*'
+    r'ChatStorage\.normalizeMode\(\s*chatView\.storageMode\s*\)\s*===\s*"encrypted"',
+    r'readonly\s+property\s+bool\s+persistentReady\s*:\s*chatView\.encrypted\s*&&\s*'
+    r'chatView\.storageReady\s*&&\s*chatView\.storagePath\s*!==\s*""\s*&&\s*'
+    r'chatView\.profileName\s*!==\s*""',
+    r"staySignedIn\s*:\s*chatView\.persistentReady\s*,",
+    r'storagePath\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.storagePath\s*:\s*""',
+    r'profileName\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.profileName\s*:\s*""',
+    r'property\s+url\s+webSource\s*:\s*Qt\.resolvedUrl\(\s*"ChatWebView\.qml"\s*\)',
+)
+
+
+def _chat_view_gate_problems(code):
+    problems = [f"missing `{pattern}`" for pattern in CHAT_VIEW_GATE if len(re.findall(pattern, code)) != 1]
+    if len(_hits(r"\bstaySignedIn\s*:", code)) != 1:
+        problems.append("staySignedIn may be set exactly once (in setSource)")
+    if len(_hits(r"\bwebLoader\.setSource\s*\(\s*chatView\.webSource\s*,", code)) != 1 \
+            or len(_hits(r"\bsetSource\s*\(", code)) != 1:
+        problems.append("the web view must be created by exactly one webLoader.setSource(chatView.webSource, ...)")
+    loaders = [body for _, body in _blocks(code, r"\bLoader\s*\{")]
+    if len(loaders) != 1 or not re.search(r"\bactive\s*:\s*false\b", loaders[0]) \
+            or re.search(r"\b(?:source|sourceComponent)\s*:", loaders[0]):
+        problems.append("the one Loader must start `active: false` with no source binding")
+    return problems
+
+
+def test_persistent_profile_only_behind_the_verified_gate():
+    problems = _chat_view_gate_problems(_read_code(CHAT_VIEW))
+    assert not problems, f"{_rel(CHAT_VIEW)}: {problems}"
+
+
+def _stay_signed_in_elsewhere(sources):
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items()
+        if not name.endswith(("ChatView.qml", "ChatWebView.qml"))
+        for line in _hits(r"\bstaySignedIn\s*[:=](?!=)", code)
+    ]
+
+
+def test_stay_signed_in_is_set_only_by_chat_view():
+    offenders = _stay_signed_in_elsewhere(_all_code())
+    assert not offenders, f"staySignedIn may only be set by ChatView.qml: {offenders}"
+
+
+# main.qml: ready only when the helper reported the folder unlocked and said
+# ok to prepare for this exact generation.
+MAIN_READY = (
+    r'readonly\s+property\s+bool\s+chatStorageReady\s*:\s*root\.chatStorageMode\s*===\s*"encrypted"\s*'
+    r'&&\s*root\.chatVaultState\s*===\s*"unlocked"\s*&&\s*!root\.chatVaultHold\s*'
+    r'&&\s*root\.chatPreparedGeneration\s*===\s*root\.chatGeneration\s*'
+    r'&&\s*root\.chatProfilePath\s*!==\s*""\s*&&\s*root\.chatProfileName\s*!==\s*""'
+)
+
+
+def _main_ready_problems(code, full_representation):
+    problems = []
+    if len(re.findall(MAIN_READY, code)) != 1:
+        problems.append("chatStorageReady must keep the exact verified-unlocked gate")
+    if not re.search(
+            r'readonly\s+property\s+string\s+chatStorageMode\s*:\s*'
+            r'ChatStorage\.normalizeMode\(\s*Plasmoid\.configuration\.chatSignInStorage\s*\)', code):
+        problems.append("chatStorageMode must be ChatStorage.normalizeMode(chatSignInStorage)")
+    granted = [match for match in re.finditer(r"\bchatPreparedGeneration\s*=(?!=)(?!\s*-1\b)", code)]
+    if len(granted) != 1:
+        problems.append(f"chatPreparedGeneration may be set to a generation exactly once, got {len(granted)}")
+    else:
+        before = code[max(0, granted[0].start() - 400):granted[0].start()]
+        if 'case "prepare"' not in before or not re.search(r"if\s*\(\s*reply\.ok\s*&&", before):
+            problems.append("chatPreparedGeneration may only be granted in the prepare reply after reply.ok")
+    if len(_hits(r"(?m)\bstorageReady\s*:\s*root\.chatStorageReady\s*$", full_representation)) != 1:
+        problems.append("FullRepresentation must pass storageReady: root.chatStorageReady")
+    if _hits(r"\bstorageReady\s*:", full_representation) != _hits(r"\bstorageReady\s*:\s*root\.chatStorageReady\b",
+                                                                   full_representation):
+        problems.append("storageReady may only be bound to root.chatStorageReady")
+    return problems
+
+
+def test_main_grants_saved_sign_ins_only_after_a_verified_prepare():
+    problems = _main_ready_problems(_read_code(MAIN_QML), _read_code(FULL_REPRESENTATION))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
 
 
 def test_every_web_view_uses_the_chat_profile():
@@ -375,6 +533,296 @@ def test_every_web_view_uses_the_chat_profile():
         f"{_rel(CHAT_WEB_VIEW)}: {len(views)} WebEngineView declarations (lines {views}) "
         f"but only {len(bindings)} `profile: chatProfile` bindings"
     )
+
+
+def test_chat_starts_only_in_the_open_popup():
+    # A web view built while Plasma preloads the closed popup stays blank, and
+    # no web engine should start before Chat is actually shown.
+    code = _read_code(FULL_REPRESENTATION)
+    assert len(_hits(r"(?m)^\s*current\s*:\s*full\.onChat\s*&&\s*root\.expanded\s*$", code)) == 1, (
+        f"{_rel(FULL_REPRESENTATION)}: ChatView must get `current: full.onChat && root.expanded`"
+    )
+
+
+# --- helper commands: built only in ChatStorage.js -------------------------------------
+
+HELPER_FLAGS = ("--vault", "--web-data", "--store", "--applet", "--generation", "--keep")
+
+
+def _helper_flag_offenders(sources):
+    return [
+        f"{name}:{line} {flag}"
+        for name, code in sources.items() if not name.endswith("ChatStorage.js")
+        for flag in HELPER_FLAGS
+        for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)
+    ]
+
+
+def test_helper_flags_appear_only_in_chat_storage_js():
+    offenders = _helper_flag_offenders(_all_code())
+    assert not offenders, f"helper commands must be built by ChatStorage.js only: {offenders}"
+
+
+def _chat_storage_problems(raw):
+    code = _strip_comments(raw)
+    problems = []
+    if not re.match(r"\s*\.pragma\s+library\b", code):
+        problems.append("must start with .pragma library")
+    if _hits(r"(?m)^\s*(?:\.import\b|import\b)", code) + _hits(r"\bQt\.include\s*\(", code):
+        problems.append("must not import anything")
+    # The only store is the encrypted one; no plaintext profile folder exists.
+    if _hits(r"""["']folder["']""", code):
+        problems.append('must not name the old "folder" store')
+    if re.findall(r"--store\s+(\w+)", code) != ["encrypted"]:
+        problems.append("--store must be the literal `--store encrypted`, once")
+    ops = re.search(r"VAULT_OPERATIONS\s*=\s*\[([^\]]*)\]", code)
+    allowed = '"status", "create", "unlock", "lock", "change-passphrase", "destroy"'
+    if not ops or re.sub(r"\s+", " ", ops.group(1)).strip() != allowed:
+        problems.append(f"VAULT_OPERATIONS must be exactly [{allowed}]")
+    # Every argv value is validated: no raw concatenation of op or numbers
+    # other than through the checked branches.
+    if _hits(r"\beval\s*\(|\bFunction\s*\(", code):
+        problems.append("no eval")
+    return problems
+
+
+def test_chat_storage_js_is_a_pure_strict_command_builder():
+    problems = _chat_storage_problems(CHAT_STORAGE_JS.read_text(encoding="utf-8"))
+    assert not problems, f"{_rel(CHAT_STORAGE_JS)}: {problems}"
+
+
+def _web_data_store_offenders(sources):
+    return [
+        f"{name}:{_line_of(code, match.start())}"
+        for name, code in sources.items()
+        for match in re.finditer(r"(?<!function )\bwebDataCommand\s*\(\s*([^,]*),\s*([^,]*),", code)
+        if match.group(2).strip() != '"encrypted"'
+    ]
+
+
+def test_web_data_commands_always_use_the_encrypted_store():
+    offenders = _web_data_store_offenders(_all_code())
+    assert not offenders, f'webDataCommand must be called with the literal store "encrypted": {offenders}'
+
+
+def _helper_stderr_offenders(sources):
+    offenders = []
+    for name, code in sources.items():
+        for start, body in _blocks(code, r"\bPlasma5Support\.DataSource\s*\{"):
+            if re.search(r"\bid\s*:\s*(?:storageSource|vaultSource)\b", body) and re.search(r"stderr", body):
+                offenders.append(f"{name}:{_line_of(code, start)}")
+    return offenders
+
+
+def test_storage_helper_replies_never_read_stderr():
+    offenders = _helper_stderr_offenders(_all_code())
+    assert not offenders, f"storage helper DataSources must only read stdout's known words: {offenders}"
+
+
+# --- secrets and dangerous gocryptfs options never appear in plasmoid/ ------------------
+
+# Anywhere, strings included: the plasmoid never handles key material or
+# gives gocryptfs options; purge exists only for install.sh.
+FORBIDDEN_WORDS = {
+    "purge": r"(?i)purge",
+    "extpass": r"(?i)extpass",
+    "passfile": r"(?i)passfile",
+    "masterkey": r"(?i)masterkey",
+    "allow_other": r"(?i)allow_other",
+    "allow_root": r"(?i)allow_root",
+    "plaintextnames": r"(?i)plaintextnames",
+    "echoMode": r"\bechoMode\b",
+    "PasswordField": r"\bPasswordField\b",
+    "TextInput.Password": r"\bTextInput\s*\.\s*Password\b",
+}
+
+
+def _all_text():
+    return {
+        _rel(path): (_read_code(path) if path.suffix in {".qml", ".js"} else path.read_text(encoding="utf-8"))
+        for path in sorted(PLASMOID.rglob("*")) if path.is_file() and path.suffix in {".qml", ".js", ".json", ".xml", ".desktop"}
+    }
+
+
+def _forbidden_word_offenders(sources):
+    return [
+        f"{name}:{line} {word}"
+        for name, code in sources.items()
+        for word, pattern in FORBIDDEN_WORDS.items()
+        for line in _hits(pattern, code)
+    ]
+
+
+def test_plasmoid_never_names_key_material_or_unsafe_options():
+    offenders = _forbidden_word_offenders(_all_text())
+    assert not offenders, f"forbidden in plasmoid/: {offenders}"
+
+
+def _secret_identifier_offenders(sources):
+    # Code with strings blanked: a passphrase never has a property, variable
+    # or field. (User-facing text like "Change passphrase…" is a string.)
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items() if name.endswith((".qml", ".js"))
+        for line in _hits(r"(?i)pass(?:phrase|word)", _strip_comments(code, blank_strings=True))
+    ]
+
+
+def test_no_code_identifier_holds_a_passphrase():
+    offenders = _secret_identifier_offenders(_all_text())
+    assert not offenders, f"no identifier may name a passphrase or password: {offenders}"
+
+
+def _shown_path_offenders(sources):
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items() if name.endswith(".qml")
+        for line in _hits(r"\b(?:text|placeholderText|ToolTip\.text)\s*:[^\n]*\b(?:storagePath|chatProfilePath|"
+                          r"profileName|chatProfileName|StandardPaths)\b", code)
+    ]
+
+
+def test_profile_path_is_never_shown():
+    offenders = _shown_path_offenders(_all_code())
+    assert not offenders, f"the profile path or name must never be shown: {offenders}"
+
+
+# --- proof: every rule above fails on a violating copy of the real file ----------------
+
+
+def _mutated(path, old, new):
+    raw = path.read_text(encoding="utf-8")
+    assert old in raw, f"proof fixture out of date: {old!r} not in {_rel(path)}"
+    return _strip_comments(raw.replace(old, new, 1))
+
+
+PROFILE_MUTATIONS = {
+    "offTheRecord first": (
+        "        persistentStoragePath: chatWeb.staySignedIn",
+        "        offTheRecord: !chatWeb.staySignedIn\n        persistentStoragePath: chatWeb.staySignedIn",
+    ),
+    "storageName before paths": (
+        "        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"\n",
+        "        storageName: \"x\"\n        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"\n",
+    ),
+    "always persistent": ("offTheRecord: !chatWeb.staySignedIn", "offTheRecord: false"),
+    "path without gate": ("cachePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"",
+                          "cachePath: chatWeb.storagePath"),
+    "disk cache": ("WebEngineProfile.MemoryHttpCache", "WebEngineProfile.DiskHttpCache"),
+    "forced cookies": ("WebEngineProfile.AllowPersistentCookies", "WebEngineProfile.ForcePersistentCookies"),
+    "second profile": ("    WebEngineProfile {\n", "    WebEngineProfile { id: other }\n    WebEngineProfile {\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROFILE_MUTATIONS))
+def test_proof_profile_rule_catches(name):
+    code = _mutated(CHAT_WEB_VIEW, *PROFILE_MUTATIONS[name])
+    assert _profile_problems(code) or _storage_offenders({"ChatWebView.qml": code})
+
+
+def test_proof_live_profile_switch_is_caught():
+    code = _mutated(CHAT_WEB_VIEW, "    function goBack() {", "    function flip() { chatProfile.offTheRecord = false }\n    function goBack() {")
+    assert _storage_offenders({"ChatWebView.qml": code})
+
+
+def test_proof_profile_names_outside_chat_web_view_are_caught():
+    code = _mutated(CHAT_VIEW, "    spacing: 0\n", "    spacing: 0\n    property string storageName: \"\"\n")
+    assert _storage_offenders({"ChatView.qml": code})
+
+
+@pytest.mark.parametrize("old,new", [
+    ("    property bool staySignedIn: false", "    property bool staySignedIn: true"),
+    ("    property string storagePath: \"\"", "    property string storagePath: \"/tmp/x\""),
+    ("    function goBack() {", "    function goBack() {\n        chatWeb.staySignedIn = true"),
+])
+def test_proof_web_view_inputs_rule_catches(old, new):
+    assert _web_view_inputs_problems(_mutated(CHAT_WEB_VIEW, old, new))
+
+
+@pytest.mark.parametrize("old,new", [
+    ("staySignedIn: chatView.persistentReady,", "staySignedIn: chatView.storageReady,"),
+    ("chatView.encrypted && chatView.storageReady", "chatView.storageReady"),
+    ("&& chatView.storagePath !== \"\" && chatView.profileName !== \"\"", ""),
+    ("            active: false\n", "            active: chatView.started\n            source: \"ChatWebView.qml\"\n"),
+    ("    function start() {", "    function hack() { webLoader.setSource(\"ChatWebView.qml\", {}) }\n    function start() {"),
+])
+def test_proof_chat_view_gate_rule_catches(old, new):
+    assert _chat_view_gate_problems(_mutated(CHAT_VIEW, old, new))
+
+
+def test_proof_stay_signed_in_elsewhere_is_caught():
+    code = _mutated(FULL_REPRESENTATION, "            storageReady: root.chatStorageReady",
+                    "            storageReady: root.chatStorageReady\n            Component.onCompleted: web.staySignedIn = true")
+    assert _stay_signed_in_elsewhere({"FullRepresentation.qml": code})
+
+
+@pytest.mark.parametrize("old,new", [
+    ("&& root.chatVaultState === \"unlocked\"\n", "\n"),
+    ("                root.chatPreparedGeneration = root.chatGeneration\n",
+     "                root.chatPreparedGeneration = root.chatGeneration\n"
+     "            root.chatPreparedGeneration = root.chatGeneration\n"),
+    ("if (reply.ok && root.chatOpGeneration", "if (root.chatOpGeneration"),
+])
+def test_proof_main_ready_rule_catches(old, new):
+    assert _main_ready_problems(_mutated(MAIN_QML, old, new), _read_code(FULL_REPRESENTATION))
+
+
+def test_proof_full_representation_ready_binding_is_caught():
+    code = _mutated(FULL_REPRESENTATION, "storageReady: root.chatStorageReady", "storageReady: true")
+    assert _main_ready_problems(_read_code(MAIN_QML), code)
+
+
+def test_proof_helper_flag_outside_chat_storage_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function x() { return \"python3 -m hearthside --vault status\" }\n    function chatNext() {")
+    assert _helper_flag_offenders({"main.qml": code})
+
+
+@pytest.mark.parametrize("old,new", [
+    (".pragma library", ""),
+    ("var MODES", "import QtQuick as Q\nvar MODES"),
+    ("store !== \"encrypted\"", "store !== \"encrypted\" && store !== \"folder\""),
+    ('"change-passphrase", "destroy"]', '"change-passphrase", "destroy", "purge"]'),
+])
+def test_proof_chat_storage_rule_catches(old, new):
+    raw = CHAT_STORAGE_JS.read_text(encoding="utf-8")
+    assert old in raw
+    assert _chat_storage_problems(raw.replace(old, new, 1))
+
+
+def test_proof_plaintext_store_call_is_caught():
+    code = _mutated(MAIN_QML, 'ChatStorage.webDataCommand("prepare", "encrypted",',
+                    'ChatStorage.webDataCommand("prepare", root.chatStorageMode,')
+    assert _web_data_store_offenders({"main.qml": code})
+
+
+def test_proof_stderr_in_storage_source_is_caught():
+    code = _mutated(MAIN_QML, "            storageSource.disconnectSource(source)\n",
+                    "            storageSource.disconnectSource(source)\n            var e = data[\"stderr\"]\n")
+    assert _helper_stderr_offenders({"main.qml": code})
+
+
+@pytest.mark.parametrize("snippet", [
+    "var a = \"--web-data purge\"",
+    "var a = \"-passfile\"",
+    "var a = \"-masterkey=1\"",
+    "var a = \"-allow_other\"",
+    "var a = \"-plaintextnames\"",
+    "var a = \"-extpass=kdialog\"",
+    "echoMode: TextInput.Password",
+    "Kirigami.PasswordField {}",
+])
+def test_proof_forbidden_word_is_caught(snippet):
+    assert _forbidden_word_offenders({"x.qml": snippet})
+
+
+@pytest.mark.parametrize("snippet", ["property string passphrase: \"\"", "var userPassword = 1"])
+def test_proof_secret_identifier_is_caught(snippet):
+    assert _secret_identifier_offenders({"x.qml": snippet})
+
+
+def test_proof_shown_path_is_caught():
+    assert _shown_path_offenders({"x.qml": "    text: chatView.storagePath\n"})
 
 
 # --- handlers and settings ------------------------------------------------------
@@ -456,12 +904,22 @@ def test_plasmoid_never_reads_or_injects_into_pages(name):
     assert not offenders, f"{name} is forbidden anywhere in plasmoid/; found at {offenders}"
 
 
-@pytest.mark.parametrize("filename", CHAT_LOG_FREE_FILES)
-def test_chat_files_never_log(filename):
-    path = UI / filename
-    code = _read_code(path)
-    lines = _hits(r"\bconsole\b", code) + _hits(r"(?<![\w.])print\s*\(", code)
-    assert not lines, f"{_rel(path)} must not log (console.* or print()); lines {sorted(lines)}"
+def _log_offenders(sources):
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items()
+        for line in _hits(r"\bconsole\b", code) + _hits(r"(?<![\w.])print\s*\(", code)
+    ]
+
+
+def test_plasmoid_never_logs():
+    offenders = _log_offenders(_all_code())
+    assert not offenders, f"plasmoid code must not log (console.* or print()): {offenders}"
+
+
+def test_proof_logging_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {", "    function chatNext() {\n        console.warn(1)")
+    assert _log_offenders({"main.qml": code})
 
 
 # --- persisted configuration ------------------------------------------------------
@@ -500,6 +958,51 @@ def test_chat_files_never_write_the_plasmoid_config(filename):
         + _hits(rf"{config}(?!\s*[.\[])", code)
     )
     assert not lines, f"{_rel(path)} must never write Plasmoid.configuration; lines {sorted(set(lines))}"
+
+
+def _main_config_write_offenders(code):
+    """main.qml may write chatProfileGeneration and no other chat key."""
+    return [
+        f"{_line_of(code, match.start())} {match.group(1)}"
+        for match in re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*(chat\w*)\s*(?:[-+*/%&|^]|\?\?)?=(?!=)", code)
+        if match.group(1) != "chatProfileGeneration"
+    ] + [
+        str(line) for line in _hits(r"\bPlasmoid\s*\.\s*configuration\s*\[", code)
+    ]
+
+
+def test_main_writes_only_the_profile_generation_chat_key():
+    offenders = _main_config_write_offenders(_read_code(MAIN_QML))
+    assert not offenders, f"{_rel(MAIN_QML)} may only write chatProfileGeneration among chat keys: {offenders}"
+
+
+def test_proof_main_chat_config_write_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function x() { Plasmoid.configuration.chatSignInStorage = \"encrypted\" }\n    function chatNext() {")
+    assert _main_config_write_offenders(code)
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+def test_config_pages_declare_every_chat_key_and_never_write_config(page):
+    code = _read_code(page)
+    for key, (kind, default) in CHAT_CONFIG_KEYS.items():
+        qml_type = {"String": "string", "Int": "int", "Bool": "bool"}[kind]
+        for name in (f"cfg_{key}", f"cfg_{key}Default"):
+            declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+)$", code)
+            assert len(declared) == 1 and declared[0][0] == qml_type, (
+                f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
+            )
+    for key in ("chatSignInStorage", "chatProfileGeneration"):
+        expected = '"memory"' if key == "chatSignInStorage" else "0"
+        for name in (f"cfg_{key}", f"cfg_{key}Default"):
+            value = re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:\s*(.+?)\s*$", code)
+            assert value == [expected], f"{_rel(page)}: {name} must default to {expected}, got {value}"
+    writes = _hits(r"\bPlasmoid\s*\.\s*configuration\s*(?:\.\s*\w+|\[[^\]]*\])\s*=(?!=)", code)
+    assert not writes, f"{_rel(page)} must write cfg_ properties, never Plasmoid.configuration; lines {writes}"
+    gen_writes = [
+        line for line in _hits(r"\bcfg_chatProfileGeneration\s*=(?!=)", code)
+    ]
+    assert len(gen_writes) <= 1, f"{_rel(page)}: cfg_chatProfileGeneration may only be synced from the config"
 
 
 def test_chat_sites_js_declares_the_expected_sites_in_order():

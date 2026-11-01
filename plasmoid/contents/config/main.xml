@@ -35,5 +35,11 @@
         <entry name="chatCustomUrls" type="String">
             <default>{}</default>
         </entry>
+        <entry name="chatSignInStorage" type="String">
+            <default>memory</default>
+        </entry>
+        <entry name="chatProfileGeneration" type="Int">
+            <default>0</default>
+        </entry>
     </group>
 </kcfg>

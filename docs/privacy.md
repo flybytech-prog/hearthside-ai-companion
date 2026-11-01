@@ -47,19 +47,28 @@ analytics or telemetry are collected.
 The Chat tab shows a provider's own website (Claude, ChatGPT, Grok, Gemini,
 GitHub Copilot, or Microsoft Copilot), or a chat server on your own computer
 (Local, for example Open WebUI on top of Ollama), in Qt WebEngine inside the
-Plasma process. You sign in on each site as you would in a browser. The design goal
-is that anything you enter there (accounts, passwords, prompts, uploaded files,
-cookies) stays in Plasma's memory, visible only to your session, and is gone
-when Plasma restarts or you choose **Clear chat data**.
+Plasma process. You sign in on each site as you would in a browser.
 
-### Off-the-record profile
+**Stay signed in** (Settings → Chat) has two choices:
+
+- **Off** (the default): everything you enter (accounts, passwords, prompts,
+  uploaded files, cookies) stays in Plasma's memory and is gone when Plasma
+  restarts or you choose **Clear chat data**. Nothing is written to disk.
+- **Encrypted**: sign-ins and site data are kept in a passphrase-protected
+  folder made with gocryptfs, so you stay signed in across Plasma restarts.
+
+There is no plain "save to disk" choice. Qt WebEngine never encrypts cookies
+or site storage itself (it does not use KDE Wallet for them), so a saved
+sign-in would sit on disk as readable text. Hearthside therefore saves
+sign-ins only inside the encrypted folder.
+
+### Off: private in-memory profile
 
 All chat pages, including sign-in windows, share one off-the-record Qt
 WebEngine profile with an in-memory HTTP cache and no persistent cookies.
 Qt WebEngine creates no profile directory for it. Cookies, sessions, local
 storage, IndexedDB, service workers, history, and favicons exist only in
-memory. Spell checking is off. You are therefore signed out on every Plasma
-restart; persistent sign-in is not offered.
+memory. Spell checking is off. You are signed out on every Plasma restart.
 
 **Clear chat data** (in the Chat tab, after a confirmation) destroys every
 chat page together with the profile, which signs you out of all chat sites at
@@ -67,24 +76,118 @@ once. Chat is the first tab, so Qt WebEngine starts the first time you open
 the popup, unless no chat sites are enabled in settings; it is never started
 just because the widget is on the panel.
 
+### Encrypted: saved sign-ins
+
+Turning on **Encrypted** installs nothing and asks for nothing by itself. The
+Chat tab shows a card instead: **Create encrypted folder…** the first time,
+**Unlock…** after that. Each card also offers **Use a private session this
+time**, which opens the sites in the Off profile above. If gocryptfs is not
+installed, the card shows the install command; until then you can use a
+private session.
+
+How it works:
+
+- The encrypted files are in `$XDG_DATA_HOME/hearthside/vault/` (usually
+  `~/.local/share/hearthside/vault/`). While unlocked, gocryptfs shows their
+  readable view at `$XDG_RUNTIME_DIR/hearthside/vault/` (usually
+  `/run/user/<uid>/hearthside/vault/`), which lives in memory. Each widget
+  keeps its profile in its own subfolder there.
+- What is encrypted: cookies, local storage, IndexedDB, session storage and
+  every other file the sites write, including the file names. The HTTP cache
+  stays in memory.
+- What is not encrypted: metadata such as the number of files, their
+  approximate sizes, timestamps, and the folder layout. gocryptfs detects a
+  changed file, but not an older copy of the whole folder put back in its
+  place (no rollback protection).
+- The folder is mounted only for you (no `allow_other`). Before using it, the
+  helper checks that it looks like your gocryptfs mount of your encrypted
+  folder; if not, the Chat tab falls back to the card and saves nothing. This
+  check guards against mistakes and against other users. It does not protect
+  against programs running as you: those can already read your files, and
+  could mount a look-alike FUSE folder that passes the same check.
+- One encrypted folder with one passphrase is shared by all Hearthside widgets
+  on your account. Unlocking it in one widget unlocks it for all of them.
+
+Your passphrase:
+
+- You type it only into a KDE dialog (kdialog) that gocryptfs itself starts;
+  kdialog hands it straight to gocryptfs. It never passes through Hearthside
+  and is never in process arguments, environment variables, logs, or the
+  widget's configuration.
+- Creating the folder asks twice: once to choose the passphrase, then once
+  more to unlock it. Hearthside cannot enforce a strong passphrase; the
+  dialog shows a strength meter.
+- There is no recovery key. If you forget the passphrase, the saved sign-ins
+  are lost: delete the folder and start again.
+- **Change passphrase…** and **Delete encrypted folder…** are under Settings →
+  Chat → Show advanced settings, and work only while the folder is locked.
+
+The folder stays unlocked until you press the lock button (**Lock saved
+sign-ins**) in the Chat tab, choose **Clear chat data**, turn Stay signed in
+Off, Plasma restarts, you log out, or the computer restarts. Lock closes the chat pages first, then
+locks the folder; if another Hearthside widget is still using it, the folder
+is not locked and the Chat tab says so. It is never forced.
+
+**Clear chat data** in Encrypted mode signs you out of all chat sites,
+deletes this widget's saved sign-ins inside the folder, and locks the folder.
+
+Turning Stay signed in **Off** (after a confirmation in settings) deletes the
+whole encrypted folder, with every sign-in saved in it, for all Hearthside
+widgets. If another widget still has it open, it is not deleted and the Chat
+tab tells you; delete it later under Settings → Chat → Show advanced settings.
+
+Small files in `$XDG_RUNTIME_DIR/hearthside/` (in memory, mode `0600`):
+`vault.lock`, an empty lock file, and briefly `passwd.status`, which holds only
+the exit status of the first passphrase dialog while you change the
+passphrase.
+
+What Encrypted mode does not protect against:
+
+- While the folder is unlocked, any program running as you, and root, can
+  read your saved sign-ins, just like the Plasma memory in Off mode.
+  Keyloggers can capture the passphrase as you type it.
+- A program running as you could show a fake passphrase window. Only type the
+  passphrase right after you clicked Create, Unlock, or Change passphrase.
+- Hibernation can write the folder's key, which is in memory while unlocked,
+  to disk. Lock the folder before hibernating, or use encrypted swap.
+- If gocryptfs is killed while a site is writing (for example when Plasma
+  crashes), saved sign-ins can be damaged. This fails safe: you are signed
+  out and sign in again. The helper cleans up the dead mount the next time the
+  Chat tab checks the folder.
+- Deleting the folder (Clear, turning Off, Delete encrypted folder, or
+  `scripts/install.sh --uninstall-web-data`) removes the files normally. On
+  btrfs or other copy-on-write file systems, and on SSDs (TRIM), old blocks
+  may stay on the disk for a while; this is not a secure erase. They hold only
+  encrypted data, so the risk is low.
+
 ### What is stored where
 
-| Data | Where it lives |
-| --- | --- |
-| Cookies, sessions, site storage, HTTP cache | Memory only; dropped on Clear chat data or Plasma restart |
-| Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them |
-| Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), and any custom addresses you enter (`chatCustomUrls`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited |
-| Downloads | Only files you approve, saved to your Downloads folder |
-| Uploads | Read-only, from files you pick in the file dialog |
-| Page console messages | Discarded; never written to the journal |
-| Links opened in your browser | Handed to your default browser, which may keep them in its history; the address briefly appears in that browser's process arguments |
+| Data | Off | Encrypted |
+| --- | --- | --- |
+| Cookies, sessions, site storage | Memory only; dropped on Clear chat data or Plasma restart | Encrypted folder; deleted on Clear chat data (this widget) or when you turn it Off (all widgets) |
+| HTTP cache | Memory only | Memory only |
+| Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
+| Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
+| Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), and a profile counter (`chatProfileGeneration`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, or a path | Same |
+| Downloads | Only files you approve, saved to your Downloads folder | Same |
+| Uploads | Read-only, from files you pick in the file dialog | Same |
+| Page console messages | Discarded; never written to the journal | Same |
+| Links opened in your browser | Handed to your default browser, which may keep them in its history; the address briefly appears in that browser's process arguments | Same |
+
+Apart from your settings and approved downloads, Hearthside writes to disk
+only in two places: the Antigravity token cache described above, and, only if
+you choose Encrypted, the encrypted folder (written by Qt WebEngine through
+gocryptfs).
 
 The widget never runs scripts in, reads from, or injects anything into the
 pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
-chat data to the Python helper, process arguments, or the environment. Load
-errors show generic text and are not logged. The system file dialog may
-remember recently used folders, as it does for any application.
+chat data to the Python helper, process arguments, or the environment. For
+Stay signed in the widget runs the helper with fixed words and numbers only
+(see [Provider contracts](provider-contracts.md#stay-signed-in-helper)); its
+replies are short codes, never paths. Load errors show generic text and are
+not logged. The system file dialog may remember recently used folders, as it
+does for any application.
 
 ### Custom addresses
 
@@ -140,29 +243,36 @@ widget hands the address to that browser, which may keep it in its history,
 and the address briefly appears in the browser's process arguments. Only
 links you click are handed over; windows a page opens by itself are dropped.
 Sign-in popups stay inside the widget, in a sign-in overlay that uses the same
-private profile. See [Provider contracts](provider-contracts.md#chat-tab) for the exact
+profile as the chat page (private in Off, the saved one in Encrypted). See [Provider contracts](provider-contracts.md#chat-tab) for the exact
 navigation rules.
 
 ### Threat model
 
 The Chat tab protects against:
 
-- other local users, who cannot read Plasma's memory;
+- other local users, who cannot read Plasma's memory or the unlocked
+  encrypted folder;
 - the developer: there is no telemetry, the widget makes no requests of its
   own, and it never reads or changes the pages;
-- leftovers on disk after a Plasma restart or Clear chat data;
+- with Off: leftovers on disk after a Plasma restart or Clear chat data;
+- with Encrypted: someone who reads your disk while the folder is locked
+  (for example a stolen, powered-off laptop), apart from the metadata listed
+  above;
 - chat content in logs.
 
 It does not protect against:
 
-- root, or malware running as your user, which can read Plasma's memory;
+- root, or malware running as your user, which can read Plasma's memory and,
+  while it is unlocked, the encrypted folder, log your keystrokes, or show a
+  fake passphrase window;
 - the chat providers themselves, and the third parties their pages load;
-- swap, core dumps, or clipboard managers, unless configured as below.
+- swap, hibernation, core dumps, or clipboard managers, unless configured as
+  below.
 
 ### Recommended system settings
 
 - Use full-disk encryption, or at least encrypted swap, so memory paged out
-  to disk is not readable later.
+  to disk (or a hibernation image) is not readable later.
 - Disable stored core dumps (for systemd-coredump, set `Storage=none` in
   `/etc/systemd/coredump.conf`); a Plasma crash dump would contain chat pages.
 - Text you copy is handled by your clipboard manager. If Klipper (or another

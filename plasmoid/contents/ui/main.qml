@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
@@ -8,6 +9,7 @@ import "ProviderCatalog.js" as Catalog
 import "RefreshGate.js" as RefreshGate
 import "SnapshotLogic.js" as SnapshotLogic
 import "ChatSites.js" as ChatSites
+import "ChatStorage.js" as ChatStorage
 
 PlasmoidItem {
     id: root
@@ -40,6 +42,58 @@ PlasmoidItem {
     // {siteId: url}; only valid addresses survive, anything odd → built-in.
     readonly property var chatCustomUrls:
         ChatSites.parseCustomUrls(Plasmoid.configuration.chatCustomUrls)
+
+    // Stay signed in. Runtime state only; nothing here reaches the config
+    // except chatProfileGeneration. The helper reports short codes and the
+    // profile path is derived here, never received or shown.
+    readonly property string chatStorageMode:
+        ChatStorage.normalizeMode(Plasmoid.configuration.chatSignInStorage)
+    readonly property int chatConfiguredGeneration:
+        ChatStorage.normalizeGeneration(Plasmoid.configuration.chatProfileGeneration)
+    // -1 until Component.onCompleted has read the configuration.
+    property int chatGeneration: -1
+    property string chatModeSeen: "memory"
+    readonly property int chatAppletId: ChatStorage.validInt(Plasmoid.id)
+    readonly property string chatProfileName:
+        ChatStorage.profileName(root.chatAppletId, root.chatGeneration)
+    // Same rule as the helper: $XDG_RUNTIME_DIR, else nothing (memory only).
+    readonly property string chatProfilePath: ChatStorage.profilePath(
+        StandardPaths.writableLocation(StandardPaths.RuntimeLocation),
+        root.chatAppletId, root.chatGeneration)
+    // "", absent, locked, unlocked, unavailable, error
+    property string chatVaultState: ""
+    property var chatVaultMissing: []
+    // Generation the helper prepared inside the verified mount; -1 = none.
+    property int chatPreparedGeneration: -1
+    // The user locked or cleared: don't reopen saved sign-ins by itself.
+    property bool chatVaultHold: false
+    property bool chatPrivateSession: false
+    property string chatVaultError: ""
+    property string chatStorageNotice: ""
+    // Helper steps still to run and the one running.
+    property var chatQueue: []
+    property string chatOp: ""
+    property string chatOpSource: ""
+    property int chatOpGeneration: -1
+    // Seeded in Component.onCompleted; see ChatStorage.firstRun.
+    property int chatOpRun: 0
+    readonly property bool chatVaultPrompting: root.chatOp === "create" || root.chatOp === "unlock"
+    readonly property bool chatStorageReady: root.chatStorageMode === "encrypted"
+        && root.chatVaultState === "unlocked"
+        && !root.chatVaultHold
+        && root.chatPreparedGeneration === root.chatGeneration
+        && root.chatProfilePath !== ""
+        && root.chatProfileName !== ""
+    readonly property var chatCard: ChatStorage.cardFor({
+        mode: root.chatStorageMode,
+        state: root.chatVaultState,
+        // Quiet re-checks while the saved profile is open don't show a card.
+        op: root.chatOp === "keep" ? "" : ChatStorage.stepOperation(root.chatOp),
+        error: root.chatVaultError,
+        hold: root.chatVaultHold,
+        privateSession: root.chatPrivateSession,
+        ready: root.chatStorageReady
+    })
 
     readonly property int refreshInterval: normalizedRefresh(
         Plasmoid.configuration.refreshInterval || 300
@@ -284,6 +338,243 @@ PlasmoidItem {
             root.popupTab = "usage"
     }
 
+    // --- Stay signed in: helper steps, run one at a time --------------------
+
+    // fresh: queue a status even while one started earlier is running.
+    function chatEnqueue(steps, fresh) {
+        root.chatQueue = ChatStorage.enqueueSteps(root.chatQueue, steps, root.chatOp, fresh === true)
+        if (root.chatOp === "")
+            Qt.callLater(root.chatNext)
+    }
+
+    function chatCommand(step, run) {
+        switch (step) {
+        case "prepare":
+            return ChatStorage.webDataCommand("prepare", "encrypted",
+                root.chatAppletId, root.chatGeneration, null, run)
+        case "keep":
+            return ChatStorage.webDataCommand("remove", "encrypted",
+                root.chatAppletId, null, root.chatGeneration, run)
+        case "remove":
+        case "leave-remove":
+            return ChatStorage.webDataCommand("remove", "encrypted",
+                root.chatAppletId, null, null, run)
+        default:
+            return ChatStorage.vaultCommand(ChatStorage.stepOperation(step), run, root.chatAppletId)
+        }
+    }
+
+    function chatNext() {
+        if (root.chatOp !== "" || root.chatQueue.length === 0)
+            return
+        // Leave steps are dropped once Stay signed in is back on.
+        var next = ChatStorage.nextStep(root.chatQueue, {
+            mode: root.chatStorageMode,
+            state: root.chatVaultState,
+            wantsSaved: root.chatWantsSaved()
+        })
+        root.chatQueue = next.queue
+        var step = next.step
+        if (step === "")
+            return
+        if (step === "wait" || step === "leave-wait") {
+            // Gives Qt WebEngine a moment to close the profile's files.
+            root.chatOp = step
+            chatWaitTimer.start()
+            return
+        }
+        root.chatOpRun = ChatStorage.nextRun(root.chatOpRun)
+        var command = root.chatCommand(step, root.chatOpRun)
+        if (command === "") {
+            root.chatFinish(step, {ok: false, error: "failed"})
+            return
+        }
+        root.chatOp = step
+        root.chatOpGeneration = root.chatGeneration
+        root.chatOpSource = command
+        storageSource.connectSource(command)
+    }
+
+    function chatWantsSaved() {
+        return root.chatStorageMode === "encrypted" && !root.chatVaultHold
+            && !root.chatPrivateSession && root.chatVaultState === "unlocked"
+            && root.chatProfilePath !== ""
+    }
+
+    function chatFinish(step, reply) {
+        root.chatOp = ""
+        root.chatOpSource = ""
+        switch (step) {
+        case "status":
+        case "leave-status":
+            // Another widget holds the folder's lock (e.g. its passphrase
+            // window is open): keep what we knew.
+            if (!reply.ok && reply.error === "busy" && root.chatVaultState !== "")
+                break
+            if (reply.ok && reply.state) {
+                root.chatVaultState = reply.state
+                root.chatVaultMissing = reply.missing || []
+            } else {
+                root.chatVaultState = "error"
+                root.chatVaultError = reply.error || "failed"
+            }
+            if (root.chatVaultState !== "unlocked")
+                root.chatPreparedGeneration = -1
+            else if (root.chatWantsSaved()
+                     && root.chatPreparedGeneration !== root.chatGeneration)
+                root.chatEnqueue(["prepare"])
+            break
+        case "prepare":
+            if (reply.ok && root.chatOpGeneration === root.chatGeneration && root.chatWantsSaved()) {
+                root.chatVaultError = ""
+                root.chatPreparedGeneration = root.chatGeneration
+                // Old generations of this widget (e.g. after Clear) go away.
+                root.chatEnqueue(["keep"])
+                // Another widget may lock the folder while the view opens it.
+                chatRecheckTimer.restart()
+            } else if (!reply.ok) {
+                root.chatPreparedGeneration = -1
+                root.chatVaultError = reply.error === "not-verified" || reply.error === "stale-mount"
+                    ? reply.error : "prepare-failed"
+                root.chatEnqueue(["status"])
+            }
+            break
+        case "keep":
+            break
+        case "remove":
+            if (!reply.ok && root.chatStorageMode === "encrypted")
+                root.chatVaultError = "remove-failed"
+            break
+        case "create":
+        case "unlock":
+        case "lock":
+            if (!reply.ok)
+                root.chatVaultError = step === "lock" && reply.error === "busy"
+                    ? "lock-busy" : reply.error || "failed"
+            root.chatEnqueue(["status"])
+            break
+        case "destroy":
+            // Damaged folder, confirmed in the Chat tab; then Create.
+            if (!reply.ok)
+                root.chatVaultError = reply.error || "failed"
+            var destroyed = ChatStorage.afterDestroy(reply)
+            if (destroyed.state !== "") {
+                root.chatVaultState = destroyed.state
+                root.chatVaultMissing = []
+                root.chatPreparedGeneration = -1
+            }
+            root.chatEnqueue(["status"])
+            break
+        case "leave-remove":
+        case "leave-lock":
+            // leave-status reports how the folder ended up.
+            break
+        case "leave-destroy":
+            if (!reply.ok && root.chatStorageMode === "memory")
+                root.chatStorageNotice = "delete-failed"
+            var outcome = ChatStorage.afterDestroy(reply)
+            if (outcome.state !== "") {
+                root.chatVaultState = outcome.state
+                root.chatVaultMissing = []
+                root.chatPreparedGeneration = -1
+            }
+            root.chatEnqueue(outcome.steps)
+            break
+        }
+        Qt.callLater(root.chatNext)
+    }
+
+    // ChatView's requests (buttons and lifecycle).
+    function chatStorageRequest(action) {
+        switch (action) {
+        case "open":
+            // The Chat view starts: never trust an earlier answer.
+            root.chatPreparedGeneration = -1
+            root.chatEnqueue(["status"])
+            break
+        case "recheck":
+            root.chatEnqueue(["status"])
+            break
+        case "retry":
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatPreparedGeneration = -1
+            root.chatEnqueue(["status"])
+            break
+        case "create":
+        case "unlock":
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatEnqueue([action])
+            break
+        case "private":
+            root.chatPrivateSession = true
+            root.chatVaultError = ""
+            break
+        case "saved-session":
+            root.chatPrivateSession = false
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatEnqueue(["status"])
+            break
+        case "lock":
+            // Destroy the profile first (ready turns false), then unmount.
+            // A busy folder is reported, never forced.
+            root.chatVaultHold = true
+            root.chatVaultError = ""
+            root.chatPreparedGeneration = -1
+            root.chatEnqueue(["wait", "lock"])
+            break
+        case "clear-saved":
+            root.chatVaultHold = true
+            root.chatPreparedGeneration = -1
+            root.chatSetGeneration(ChatStorage.nextGeneration(root.chatGeneration))
+            root.chatVaultError = "cleared"
+            root.chatEnqueue(["wait", "remove", "lock"])
+            break
+        case "delete-damaged":
+            if (root.chatVaultState !== "damaged")
+                break
+            root.chatVaultError = ""
+            root.chatEnqueue(["destroy"])
+            break
+        case "dismiss-notice":
+            root.chatStorageNotice = ""
+            break
+        }
+    }
+
+    function chatSetGeneration(generation) {
+        root.chatGeneration = generation
+        if (Plasmoid.configuration.chatProfileGeneration !== generation)
+            Plasmoid.configuration.chatProfileGeneration = generation
+    }
+
+    function chatModeChanged() {
+        if (root.chatGeneration < 0)
+            return
+        var previous = root.chatModeSeen
+        root.chatModeSeen = root.chatStorageMode
+        if (previous === root.chatStorageMode)
+            return
+        root.chatVaultHold = false
+        root.chatPrivateSession = false
+        root.chatVaultError = ""
+        root.chatPreparedGeneration = -1
+        chatRecheckTimer.stop()
+        root.chatQueue = ChatStorage.queueForMode(root.chatQueue, root.chatStorageMode)
+        if (root.chatStorageMode === "encrypted") {
+            // Never trust a state read while leave steps may have run.
+            root.chatStorageNotice = ""
+            root.chatVaultState = ""
+            root.chatEnqueue(["status"], true)
+        } else {
+            // Leaving Stay signed in deletes the encrypted folder (confirmed
+            // in the settings). The view is back to private already.
+            root.chatEnqueue(["leave-wait", "leave-remove", "leave-lock", "leave-status", "leave-destroy"])
+        }
+    }
+
     function setUsageMode(mode) {
         Plasmoid.configuration.usageMode = mode === "used" ? "used" : "remaining"
     }
@@ -319,6 +610,41 @@ PlasmoidItem {
         }
     }
 
+    Plasma5Support.DataSource {
+        id: storageSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            storageSource.disconnectSource(source)
+            if (source !== root.chatOpSource)
+                return
+            // Only stdout's known words are used; stderr is never read.
+            root.chatFinish(root.chatOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
+        }
+    }
+
+    Timer {
+        id: chatWaitTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            root.chatOp = ""
+            root.chatNext()
+        }
+    }
+
+    // Rechecks the folder shortly after the saved profile is built; a busy
+    // reply keeps things as they are.
+    Timer {
+        id: chatRecheckTimer
+        interval: 2000
+        repeat: false
+        onTriggered: {
+            if (root.chatStorageReady)
+                root.chatEnqueue(["status"])
+        }
+    }
+
     Timer {
         interval: root.refreshInterval * 1000
         running: true
@@ -344,6 +670,16 @@ PlasmoidItem {
             firstRunSettingsTimer.start()
         }
         root.syncChatSite()
+        root.chatGeneration = root.chatConfiguredGeneration
+        root.chatModeSeen = root.chatStorageMode
+        root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
+    }
+
+    onChatStorageModeChanged: root.chatModeChanged()
+    // A settings dialog opened earlier may write back an old generation.
+    onChatConfiguredGenerationChanged: {
+        if (root.chatGeneration >= 0 && root.chatConfiguredGeneration !== root.chatGeneration)
+            Plasmoid.configuration.chatProfileGeneration = root.chatGeneration
     }
 
     onTrackedProvidersChanged: {
@@ -351,9 +687,11 @@ PlasmoidItem {
         root.refresh()
     }
     onExpandedChanged: {
-        if (root.expanded)
+        if (root.expanded) {
             root.refresh()
-        else
+            if (root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
+                root.chatEnqueue(["status"])
+        } else
             root.chatPinned = false
     }
     onChatSiteIdsChanged: root.syncChatSite()

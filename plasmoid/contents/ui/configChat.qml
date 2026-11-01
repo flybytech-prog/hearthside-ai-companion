@@ -3,7 +3,10 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
+import org.kde.plasma.plasmoid
+import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatSites.js" as ChatSites
+import "ChatStorage.js" as ChatStorage
 
 KCM.SimpleKCM {
     id: page
@@ -35,9 +38,150 @@ KCM.SimpleKCM {
     property string cfg_chatDefaultSiteDefault: "claude"
     property string cfg_chatCustomUrls: "{}"
     property string cfg_chatCustomUrlsDefault: "{}"
+    property string cfg_chatSignInStorage: "memory"
+    property string cfg_chatSignInStorageDefault: "memory"
+    // Written only by main.qml; kept in step so Apply never writes back an
+    // old value.
+    property int cfg_chatProfileGeneration: 0
+    property int cfg_chatProfileGenerationDefault: 0
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
+
+    // Stay signed in. The mode the page opened with decides whether turning
+    // it off needs a confirmation (applying it deletes the encrypted folder).
+    property string savedSignInMode: "memory"
+    readonly property string signInMode: ChatStorage.normalizeMode(page.cfg_chatSignInStorage)
+    property bool confirmingOff: false
+    property bool confirmingDelete: false
+    // Encrypted folder, as the helper reports it: "", absent, locked,
+    // unlocked, unavailable, error. Never a path.
+    property string vaultState: ""
+    property var vaultMissing: []
+    property string vaultOp: ""
+    property string vaultSourceName: ""
+    // Seeded in Component.onCompleted; see ChatStorage.firstRun.
+    property int vaultRun: 0
+    // Only makes the helper's source name unique; 0 if the id is odd.
+    readonly property int vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
+    property string vaultMessage: ""
+
+    function syncSignInChoice() {
+        offChoice.checked = page.signInMode === "memory"
+        encryptedChoice.checked = page.signInMode === "encrypted"
+    }
+
+    function chooseSignIn(mode) {
+        page.confirmingOff = false
+        if (mode === "memory" && page.signInMode === "encrypted"
+                && page.savedSignInMode === "encrypted") {
+            page.confirmingOff = true
+            page.syncSignInChoice()
+            return
+        }
+        page.cfg_chatSignInStorage = mode
+    }
+
+    function runVault(op) {
+        if (page.vaultOp !== "")
+            return
+        page.vaultRun = ChatStorage.nextRun(page.vaultRun)
+        var command = ChatStorage.vaultCommand(op, page.vaultRun, page.vaultApplet)
+        if (command === "")
+            return
+        page.vaultOp = op
+        page.vaultSourceName = command
+        page.confirmingDelete = false
+        if (op !== "status")
+            page.vaultMessage = ""
+        vaultSource.connectSource(command)
+    }
+
+    function finishVault(op, reply) {
+        page.vaultOp = ""
+        page.vaultSourceName = ""
+        if (op === "status") {
+            page.vaultState = reply.ok && reply.state ? reply.state : "error"
+            page.vaultMissing = reply.missing || []
+            return
+        }
+        if (reply.ok)
+            page.vaultMessage = op === "destroy" ? "deleted" : "changed"
+        else
+            page.vaultMessage = reply.error === "cancelled" || reply.error === "empty-passphrase"
+                ? "" : reply.error
+        page.runVault("status")
+    }
+
+    function vaultText(code) {
+        switch (code) {
+        case "":
+            return ""
+        case "changed":
+            return i18n("Passphrase changed.")
+        case "deleted":
+            return i18n("Encrypted folder deleted.")
+        case "wrong-passphrase":
+            return i18n("Wrong passphrase. Nothing was changed.")
+        case "not-locked":
+            return i18n("Lock the encrypted folder from the Chat tab first.")
+        case "busy":
+            return i18n("The encrypted folder is busy. Try again in a moment.")
+        case "damaged":
+            return i18n("The encrypted folder is damaged and can't be opened. Nothing was changed.")
+        default:
+            return i18n("That didn't work. Nothing was changed.")
+        }
+    }
+
+    function vaultStateText() {
+        switch (page.vaultState) {
+        case "absent":
+            return i18n("No encrypted folder has been created.")
+        case "locked":
+            return i18n("The encrypted folder is locked.")
+        case "unlocked":
+            return i18n("The encrypted folder is unlocked. Lock it from the Chat tab to change its passphrase or delete it.")
+        case "unavailable":
+            return i18n("gocryptfs isn't installed.")
+        case "damaged":
+            return i18n("The encrypted folder is damaged and can't be opened. Delete it to start again with a new one.")
+        case "":
+            return i18n("Checking…")
+        default:
+            return i18n("Couldn't check the encrypted folder.")
+        }
+    }
+
+    onCfg_chatSignInStorageChanged: page.syncSignInChoice()
+
+    Component.onCompleted: {
+        page.savedSignInMode = page.signInMode
+        page.syncSignInChoice()
+        page.vaultRun = ChatStorage.firstRun(Date.now(), Math.random())
+        page.runVault("status")
+    }
+
+    // main.qml may move to a new generation while this page is open.
+    Connections {
+        target: Plasmoid.configuration
+        function onValueChanged(key, value) {
+            if (key === "chatProfileGeneration")
+                page.cfg_chatProfileGeneration = value
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: vaultSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            vaultSource.disconnectSource(source)
+            if (source !== page.vaultSourceName)
+                return
+            page.finishVault(page.vaultOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
+        }
+    }
 
     readonly property var enabledSites: ChatSites.enabledSites(page.cfg_chatSites)
     readonly property var enabledIds: page.enabledSites.map(function (site) { return site.id })
@@ -168,8 +312,73 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             text: i18n(
-                "Chat sites open in a private, in-memory browser profile. You are signed out on every Plasma restart; nothing is saved to disk. Clear chat data signs you out immediately."
+                "By default chat sites open in a private, in-memory browser profile. You are signed out on every Plasma restart; nothing is saved to disk. Clear chat data signs you out immediately."
             )
+        }
+
+        Kirigami.Heading {
+            level: 3
+            text: i18n("Stay signed in")
+        }
+
+        QQC2.RadioButton {
+            id: offChoice
+            text: i18n("Off: sign in again after every Plasma restart")
+            onToggled: if (checked) page.chooseSignIn("memory")
+        }
+        QQC2.RadioButton {
+            id: encryptedChoice
+            text: i18n("Encrypted: keep sign-ins in a passphrase-protected folder")
+            onToggled: if (checked) page.chooseSignIn("encrypted")
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            opacity: 0.72
+            text: i18n(
+                "Sign-ins and site data, such as cached conversations, are kept in an encrypted folder made with gocryptfs. You enter its passphrase once per Plasma session in the Chat tab; until then you can use a private session. If you forget the passphrase, the saved data is lost: there is no recovery. While the folder is unlocked, programs running as you can read it. Clear chat data deletes the saved sign-ins and locks the folder."
+            )
+        }
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: page.vaultState === "unavailable"
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: i18n("This needs gocryptfs, which isn't installed. Install it with:")
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                readOnly: true
+                selectByMouse: true
+                text: ChatStorage.installCommand(page.vaultMissing)
+            }
+        }
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.confirmingOff
+            type: Kirigami.MessageType.Warning
+            text: i18n("Turn off Stay signed in? When you apply this, the encrypted folder and every sign-in saved in it are deleted, for all Hearthside widgets. This can't be undone.")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Turn off and delete")
+                    icon.name: "edit-delete"
+                    onTriggered: {
+                        page.confirmingOff = false
+                        page.cfg_chatSignInStorage = "memory"
+                    }
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: {
+                        page.confirmingOff = false
+                        page.syncSignInChoice()
+                    }
+                }
+            ]
         }
         QQC2.Label {
             Layout.fillWidth: true
@@ -202,6 +411,73 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: page.showAdvanced
             spacing: Kirigami.Units.largeSpacing
+
+            Kirigami.Heading {
+                level: 2
+                text: i18n("Encrypted folder")
+            }
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: page.vaultStateText()
+            }
+
+            RowLayout {
+                spacing: Kirigami.Units.smallSpacing
+
+                QQC2.Button {
+                    text: i18n("Change passphrase…")
+                    icon.name: "document-edit"
+                    enabled: page.vaultState === "locked" && page.vaultOp === ""
+                    onClicked: page.runVault("change-passphrase")
+                }
+                QQC2.Button {
+                    text: i18n("Delete encrypted folder…")
+                    icon.name: "edit-delete"
+                    enabled: (page.vaultState === "locked" || page.vaultState === "damaged")
+                        && page.vaultOp === ""
+                    onClicked: page.confirmingDelete = true
+                }
+                QQC2.BusyIndicator {
+                    visible: page.vaultOp !== ""
+                    running: visible
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                }
+            }
+
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                visible: page.confirmingDelete
+                type: Kirigami.MessageType.Warning
+                text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthside widgets. This can't be undone.")
+                actions: [
+                    Kirigami.Action {
+                        text: i18n("Delete")
+                        icon.name: "edit-delete"
+                        onTriggered: page.runVault("destroy")
+                    },
+                    Kirigami.Action {
+                        text: i18n("Cancel")
+                        icon.name: "dialog-cancel"
+                        onTriggered: page.confirmingDelete = false
+                    }
+                ]
+            }
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                visible: page.vaultMessage !== ""
+                wrapMode: Text.WordWrap
+                color: page.vaultMessage === "changed" || page.vaultMessage === "deleted"
+                    ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
+                text: page.vaultText(page.vaultMessage)
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
 
             Kirigami.Heading {
                 level: 2

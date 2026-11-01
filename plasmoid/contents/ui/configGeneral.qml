@@ -36,6 +36,12 @@ KCM.ScrollViewKCM {
     property string cfg_chatDefaultSiteDefault: "claude"
     property string cfg_chatCustomUrls: "{}"
     property string cfg_chatCustomUrlsDefault: "{}"
+    property string cfg_chatSignInStorage: "memory"
+    property string cfg_chatSignInStorageDefault: "memory"
+    // Written only by main.qml; kept in step so Apply never writes back an
+    // old value.
+    property int cfg_chatProfileGeneration: 0
+    property int cfg_chatProfileGenerationDefault: 0
 
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []
@@ -214,6 +220,14 @@ KCM.ScrollViewKCM {
         page.cfg_configSchemaVersion = 2
         page.cfg_initialSetupComplete = true
         Qt.callLater(page.detectProviders)
+    }
+
+    Connections {
+        target: Plasmoid.configuration
+        function onValueChanged(key, value) {
+            if (key === "chatProfileGeneration")
+                page.cfg_chatProfileGeneration = value
+        }
     }
 
     Plasma5Support.DataSource {

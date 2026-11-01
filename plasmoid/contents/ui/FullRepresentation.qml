@@ -188,6 +188,14 @@ PlasmaExtras.Representation {
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {
+                    icon.name: "object-locked"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: chatView.persistentActive
+                    onClicked: chatView.lockSaved()
+                    QQC2.ToolTip.text: i18n("Lock saved sign-ins")
+                    QQC2.ToolTip.visible: hovered
+                }
+                PlasmaComponents.ToolButton {
                     icon.name: "edit-clear-history"
                     display: QQC2.AbstractButton.IconOnly
                     enabled: chatView.available
@@ -207,7 +215,16 @@ PlasmaExtras.Representation {
             siteIds: root.chatSiteIds
             siteId: root.chatSiteId
             customUrls: root.chatCustomUrls
-            current: full.onChat
+            // Only while the popup is open, so no web engine starts early.
+            current: full.onChat && root.expanded
+            storageMode: root.chatStorageMode
+            storageReady: root.chatStorageReady
+            storagePath: root.chatProfilePath
+            profileName: root.chatProfileName
+            card: root.chatCard
+            missingTools: root.chatVaultMissing
+            storageNotice: root.chatStorageNotice
+            onStorageRequest: (action) => root.chatStorageRequest(action)
         }
 
         UsageView {}
@@ -216,7 +233,8 @@ PlasmaExtras.Representation {
     Binding {
         target: root
         property: "chatDialogOpen"
-        value: chatView.dialogOpen
+        // Also while a helper passphrase window is open, so the popup stays.
+        value: chatView.dialogOpen || root.chatVaultPrompting
     }
 
     footer: Item {

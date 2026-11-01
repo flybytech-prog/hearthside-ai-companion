@@ -52,6 +52,11 @@ panel support **Left** and **Used** display modes.
   normally, nothing is saved to disk, and you are signed out when Plasma
   restarts or you choose **Clear chat data**. Choose the sites under
   **Settings → Chat**; Local is off until you turn it on.
+- **Stay signed in** (optional, off by default): keep your chat sign-ins
+  across Plasma restarts in an encrypted folder protected by a passphrase you
+  choose (made with gocryptfs). You unlock it once per Plasma session from the
+  Chat tab, or use a private session instead. If you forget the passphrase,
+  the saved sign-ins are lost; there is no recovery.
 
 ### Chat sites
 
@@ -114,6 +119,16 @@ kpackagetool6 -t Plasma/Applet -i plasmoid
 ```
 
 Use `-u plasmoid` instead of `-i` when the package is already installed.
+
+To delete saved chat sign-ins when you stop using Hearthside, first lock the
+encrypted folder in the Chat tab (or turn Stay signed in off), then run:
+
+```bash
+./scripts/install.sh --uninstall-web-data
+```
+
+It deletes the encrypted folder and nothing else, and refuses while the
+folder is unlocked.
 When upgrading from AI Usage 2.x by hand, remove the old helper and widget
 first, so the two never refresh the same sign-ins at once:
 
@@ -164,6 +179,9 @@ usage, reset/retry times, and no credential data.
   install. Each open
   chat site uses roughly 200–500 MB of memory until Plasma restarts or you
   clear chat data.
+- For Stay signed in only: gocryptfs 2 (`sudo pacman -S --needed gocryptfs`
+  on Arch), plus kdialog and fuse3, which are usually already installed with
+  KDE. The Chat tab shows the install command if something is missing.
 
 ## Privacy
 
@@ -179,7 +197,9 @@ location, clipboard reading), asks before each download, opens outside links
 in your browser (which may keep them in its history), and never reads or
 scripts the pages. Page console messages
 are discarded. Custom chat addresses are stored in plain text in your Plasma
-configuration file. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
+configuration file. With Stay signed in, sign-ins and site data are saved
+only in your encrypted folder; while it is unlocked, programs running as you
+can read it. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
 list what it does not protect against.
 
 See [Privacy](docs/privacy.md) and

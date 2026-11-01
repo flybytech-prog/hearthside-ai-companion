@@ -4,12 +4,62 @@ set -eu
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_directory=$(CDPATH= cd -- "$script_directory/.." && pwd)
 restart_plasma=false
+uninstall_web_data=false
 
-if [ "${1:-}" = "--restart-plasma" ]; then
-    restart_plasma=true
-elif [ "$#" -gt 0 ]; then
-    echo "Usage: $0 [--restart-plasma]" >&2
-    exit 2
+# One option at most: --uninstall-web-data only deletes data, it never installs.
+case "$#:${1:-}" in
+    0:) ;;
+    1:--restart-plasma) restart_plasma=true ;;
+    1:--uninstall-web-data) uninstall_web_data=true ;;
+    *)
+        echo "Usage: $0 [--restart-plasma | --uninstall-web-data]" >&2
+        exit 2
+        ;;
+esac
+
+# Delete the Chat tab's encrypted folder, which holds every saved chat sign-in
+# (there is no unencrypted copy). The helper from this checkout does the work
+# (the installed one may be older or gone): it refuses symlinks, never follows
+# links, refuses while the encrypted folder is mounted, and replies with
+# category names only.
+if [ "$uninstall_web_data" = true ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Required command not found: python3" >&2
+        exit 1
+    fi
+    if ! reply=$(cd -- "$project_directory/src" && PYTHONDONTWRITEBYTECODE=1 python3 -m hearthside --web-data purge </dev/null); then
+        echo "Could not run the Hearthside helper. Nothing was deleted." >&2
+        exit 1
+    fi
+    case "$reply" in
+        '{"ok":true,"removed":[]}')
+            echo "No Hearthside chat sign-in data found."
+            ;;
+        '{"ok":true,"removed":["vault"]}')
+            echo "Deleted: encrypted chat folder (saved chat sign-ins)."
+            ;;
+        '{"ok":false,"error":"not-locked"}')
+            echo "Lock the encrypted folder in Hearthside first, then run this again. Nothing was deleted." >&2
+            exit 1
+            ;;
+        '{"ok":false,"error":"busy"}')
+            echo "Hearthside is using the encrypted folder right now. Try again in a moment. Nothing was deleted." >&2
+            exit 1
+            ;;
+        '{"ok":false,"error":"symlink"}')
+            echo "A Hearthside data folder is a symbolic link; refusing to delete through it. Nothing was deleted." >&2
+            exit 1
+            ;;
+        '{"ok":false,"error":"not-directory"}'|'{"ok":false,"error":"not-owned"}')
+            echo "A Hearthside data folder is not a folder you own; refusing to delete it. Nothing was deleted." >&2
+            exit 1
+            ;;
+        *)
+            echo "Could not delete Hearthside chat sign-in data. Some of it may remain." >&2
+            exit 1
+            ;;
+    esac
+    exit 0
 fi
 
 for executable in python3 kpackagetool6; do
