@@ -505,12 +505,12 @@ KCM.SimpleKCM {
                     property string savedUrl: ""
                     // Saved value when the page opened or when it last changed
                     // elsewhere (Defaults); written back while the text is invalid.
-                    property string baseline: ""
+                    property string savedBaseline: ""
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
                     function load(saved) {
-                        urlRow.baseline = saved
+                        urlRow.savedBaseline = saved
                         urlRow.savedUrl = saved
                         urlRow.errorCode = ""
                         if (urlField.text.trim() !== saved)
@@ -527,7 +527,7 @@ KCM.SimpleKCM {
 
                     function edit(text) {
                         var persist = ChatSites.customUrlToPersist(
-                            urlRow.modelData.id, text, urlRow.baseline)
+                            urlRow.modelData.id, text, urlRow.savedBaseline)
                         urlRow.errorCode = persist.error
                         urlRow.savedUrl = persist.url
                         page.setCustomUrl(urlRow.modelData.id, persist.url)
