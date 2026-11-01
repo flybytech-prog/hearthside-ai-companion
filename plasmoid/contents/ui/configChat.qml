@@ -7,6 +7,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
+import "OllamaChat.js" as OllamaChat
 
 KCM.SimpleKCM {
     id: page
@@ -44,6 +45,8 @@ KCM.SimpleKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
+    property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
@@ -183,11 +186,13 @@ KCM.SimpleKCM {
         }
     }
 
-    readonly property var enabledSites: ChatSites.enabledSites(page.cfg_chatSites)
+    // Web sites, then the built-in Ollama chat when it is on.
+    readonly property var enabledSites: OllamaChat.menuEntries(
+        ChatSites.enabledSites(page.cfg_chatSites), page.cfg_chatSites)
     readonly property var enabledIds: page.enabledSites.map(function (site) { return site.id })
 
     function setEnabled(siteId, enabled) {
-        var ids = ChatSites.siteIds().filter(function (id) {
+        var ids = OllamaChat.allSiteIds(ChatSites.siteIds()).filter(function (id) {
             return id === siteId ? enabled : page.enabledIds.indexOf(id) >= 0
         })
         page.cfg_chatSites = JSON.stringify(ids)
@@ -234,6 +239,31 @@ KCM.SimpleKCM {
         }
     }
 
+    function ollamaAddressError(code) {
+        switch (code) {
+        case "":
+            return ""
+        case "too-long":
+            return i18n("This address is too long.")
+        case "whitespace":
+            return i18n("Addresses can't contain spaces or line breaks.")
+        case "userinfo":
+            return i18n("Addresses with a user name or password aren't allowed.")
+        case "scheme":
+            return i18n("Use an address that starts with http://.")
+        case "not-loopback":
+            return i18n("Only this computer is allowed: 127.0.0.1, localhost or [::1].")
+        case "port-missing":
+            return i18n("Add the port, for example http://127.0.0.1:11434.")
+        case "port-range":
+            return i18n("The port must be between 1 and 65535.")
+        case "path":
+            return i18n("Use only the address and port, without a path.")
+        default:
+            return i18n("This isn't a valid address.")
+        }
+    }
+
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
 
@@ -243,7 +273,7 @@ KCM.SimpleKCM {
         }
 
         Repeater {
-            model: ChatSites.sites
+            model: ChatSites.sites.concat([OllamaChat.ENTRY])
 
             delegate: RowLayout {
                 id: siteRow
@@ -265,7 +295,9 @@ KCM.SimpleKCM {
                 }
                 QQC2.Label {
                     Layout.fillWidth: true
-                    text: siteRow.modelData.name
+                    text: siteRow.modelData.native === true
+                        ? i18n("%1 (built-in chat with Ollama on this computer)", siteRow.modelData.name)
+                        : siteRow.modelData.name
                     elide: Text.ElideRight
                     MouseArea {
                         anchors.fill: parent
@@ -394,6 +426,14 @@ KCM.SimpleKCM {
             opacity: 0.72
             text: i18n(
                 "Text you copy may be kept by your clipboard manager if it saves history. Each open site uses roughly 200–500 MB of memory."
+            )
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            opacity: 0.72
+            text: i18n(
+                "Ollama: the conversation is kept in memory only and goes to the Ollama server on this computer, nowhere else. Clear also unloads the models it used. Cloud models are hidden. Before sending, Hearthside checks that the Ollama port belongs to you or to the system, never to another user. Hearthside never starts Ollama."
             )
         }
 
@@ -592,6 +632,105 @@ KCM.SimpleKCM {
                             "http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server on another machine use https or an SSH tunnel."
                         )
                     }
+                }
+            }
+
+            ColumnLayout {
+                id: ollamaRow
+                // Validation code of the text in the field; "" when valid.
+                property string errorCode: ""
+                // Saved value this row last saw or wrote.
+                property string savedAddress: ""
+                // Saved value when the page opened or when it last changed
+                // elsewhere (Defaults); written back while the text is invalid.
+                property string savedBaseline: ""
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                function load(saved) {
+                    ollamaRow.savedBaseline = saved
+                    ollamaRow.savedAddress = saved
+                    var checked = OllamaChat.validateAddress(saved)
+                    ollamaRow.errorCode = checked.error
+                    // The default shows as the placeholder.
+                    var shown = saved === OllamaChat.DEFAULT_ADDRESS ? "" : saved
+                    if (ollamaField.text.trim() !== shown)
+                        ollamaField.text = shown
+                }
+
+                function syncFromConfig() {
+                    if (page.cfg_chatOllamaUrl !== ollamaRow.savedAddress)
+                        ollamaRow.load(page.cfg_chatOllamaUrl)
+                }
+
+                // Only a valid address (or the default) is ever written.
+                function edit(text) {
+                    var persist = OllamaChat.addressToPersist(text, ollamaRow.savedBaseline)
+                    ollamaRow.errorCode = persist.error
+                    ollamaRow.savedAddress = persist.address
+                    page.cfg_chatOllamaUrl = persist.address
+                }
+
+                Component.onCompleted: ollamaRow.load(page.cfg_chatOllamaUrl)
+
+                Connections {
+                    target: page
+                    function onCfg_chatOllamaUrlChanged() {
+                        ollamaRow.syncFromConfig()
+                    }
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    text: i18n("Ollama address")
+                    elide: Text.ElideRight
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.TextField {
+                        id: ollamaField
+                        objectName: "ollamaAddressField"
+                        Layout.fillWidth: true
+                        placeholderText: OllamaChat.DEFAULT_ADDRESS
+                        maximumLength: OllamaChat.MAX_ADDRESS_LENGTH * 2
+                        inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoPredictiveText
+                            | Qt.ImhNoAutoUppercase
+                        Accessible.name: i18n("Ollama address")
+                        onTextEdited: ollamaRow.edit(ollamaField.text)
+                    }
+                    QQC2.ToolButton {
+                        icon.name: "edit-undo"
+                        display: QQC2.AbstractButton.IconOnly
+                        text: i18n("Use the default address")
+                        enabled: ollamaField.text !== ""
+                        onClicked: {
+                            ollamaField.text = ""
+                            ollamaRow.edit("")
+                        }
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
+                    }
+                }
+
+                QQC2.Label {
+                    objectName: "ollamaAddressError"
+                    Layout.fillWidth: true
+                    visible: ollamaRow.errorCode !== ""
+                    wrapMode: Text.WordWrap
+                    color: Kirigami.Theme.negativeTextColor
+                    text: page.ollamaAddressError(ollamaRow.errorCode)
+                }
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    opacity: 0.72
+                    text: i18n(
+                        "Only this computer: http:// with 127.0.0.1, localhost or [::1] and a port. Leave empty for the default, http://127.0.0.1:11434."
+                    )
                 }
             }
         }

@@ -13,6 +13,8 @@ PlasmaExtras.Representation {
 
     readonly property bool chatAvailable: root.chatSiteIds.length > 0
     readonly property bool onChat: full.chatAvailable && root.popupTab === "chat"
+    // The built-in Ollama chat is shown instead of the web chat.
+    readonly property bool onOllama: full.onChat && root.chatSiteId === "ollama"
     readonly property var popupSize: ChatSites.popupSize(
         full.onChat ? "chat" : "usage",
         Kirigami.Units.gridUnit,
@@ -29,7 +31,9 @@ PlasmaExtras.Representation {
     Connections {
         target: root
         function onExpandedChanged() {
-            if (root.expanded && full.onChat)
+            if (root.expanded && full.onOllama)
+                ollamaView.focusLater()
+            else if (root.expanded && full.onChat)
                 chatView.focusLater()
         }
     }
@@ -146,9 +150,57 @@ PlasmaExtras.Representation {
                         }
                     }
                 }
+                PlasmaComponents.ComboBox {
+                    id: modelCombo
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: Kirigami.Units.gridUnit * 5
+                    visible: full.onOllama
+                    enabled: ollamaView.modelList.length > 0
+                    model: ollamaView.modelList
+                    textRole: "name"
+                    valueRole: "name"
+                    currentIndex: ollamaView.modelIndex
+                    displayText: ollamaView.modelIndex >= 0 ? currentText : i18n("No model")
+                    onActivated: ollamaView.selectModel(currentValue)
+                    Accessible.name: i18n("Model")
+
+                    // Model names come from the server: plain text only.
+                    delegate: PlasmaComponents.ItemDelegate {
+                        id: modelDelegate
+                        required property var modelData
+                        required property int index
+                        width: ListView.view ? ListView.view.width : implicitWidth
+                        highlighted: modelCombo.highlightedIndex === modelDelegate.index
+                        contentItem: RowLayout {
+                            spacing: Kirigami.Units.smallSpacing
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                textFormat: Text.PlainText
+                                text: modelDelegate.modelData.name
+                                elide: Text.ElideRight
+                            }
+                            PlasmaComponents.Label {
+                                textFormat: Text.PlainText
+                                visible: text !== ""
+                                text: modelDelegate.modelData.parameterSize
+                                opacity: 0.6
+                            }
+                        }
+                    }
+                }
+                PlasmaComponents.ToolButton {
+                    icon.name: "view-refresh"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: full.onOllama
+                    enabled: !ollamaView.busy
+                    onClicked: ollamaView.reloadModels()
+                    QQC2.ToolTip.text: i18n("Reload models")
+                    QQC2.ToolTip.visible: hovered
+                }
                 PlasmaComponents.ToolButton {
                     icon.name: "go-previous"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
                     enabled: chatView.canGoBack
                     onClicked: chatView.goBack()
                     QQC2.ToolTip.text: i18n("Back")
@@ -157,6 +209,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "view-refresh"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
                     enabled: chatView.available
                     onClicked: chatView.reload()
                     QQC2.ToolTip.text: i18n("Reload page")
@@ -165,6 +218,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "go-home"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
                     enabled: chatView.available
                     onClicked: chatView.home()
                     QQC2.ToolTip.text: i18n("Home")
@@ -173,6 +227,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "internet-web-browser"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
                     enabled: chatView.canOpenExternally
                     onClicked: chatView.openExternally()
                     QQC2.ToolTip.text: i18n("Open in browser")
@@ -190,7 +245,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "object-locked"
                     display: QQC2.AbstractButton.IconOnly
-                    visible: chatView.persistentActive
+                    visible: !full.onOllama && chatView.persistentActive
                     onClicked: chatView.lockSaved()
                     QQC2.ToolTip.text: i18n("Lock saved sign-ins")
                     QQC2.ToolTip.visible: hovered
@@ -198,9 +253,19 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "edit-clear-history"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
                     enabled: chatView.available
                     onClicked: chatView.confirmingClear = true
                     QQC2.ToolTip.text: i18n("Clear chat data")
+                    QQC2.ToolTip.visible: hovered
+                }
+                PlasmaComponents.ToolButton {
+                    icon.name: "edit-clear-history"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: full.onOllama
+                    enabled: ollamaView.hasConversation
+                    onClicked: ollamaView.confirmingClear = true
+                    QQC2.ToolTip.text: i18n("Clear conversation")
                     QQC2.ToolTip.visible: hovered
                 }
             }
@@ -210,21 +275,34 @@ PlasmaExtras.Representation {
     contentItem: StackLayout {
         currentIndex: full.onChat ? 0 : 1
 
-        ChatView {
-            id: chatView
-            siteIds: root.chatSiteIds
-            siteId: root.chatSiteId
-            customUrls: root.chatCustomUrls
-            // Only while the popup is open, so no web engine starts early.
-            current: full.onChat && root.expanded
-            storageMode: root.chatStorageMode
-            storageReady: root.chatStorageReady
-            storagePath: root.chatProfilePath
-            profileName: root.chatProfileName
-            card: root.chatCard
-            missingTools: root.chatVaultMissing
-            storageNotice: root.chatStorageNotice
-            onStorageRequest: (action) => root.chatStorageRequest(action)
+        StackLayout {
+            currentIndex: root.chatSiteId === "ollama" ? 1 : 0
+
+            ChatView {
+                id: chatView
+                siteIds: root.chatWebSiteIds
+                siteId: root.chatWebSiteId
+                customUrls: root.chatCustomUrls
+                // Only while the popup is open and a web site is shown, so no
+                // web engine starts early or for Ollama alone.
+                current: full.onChat && root.expanded && root.chatSiteId !== "ollama"
+                storageMode: root.chatStorageMode
+                storageReady: root.chatStorageReady
+                storagePath: root.chatProfilePath
+                profileName: root.chatProfileName
+                card: root.chatCard
+                missingTools: root.chatVaultMissing
+                storageNotice: root.chatStorageNotice
+                onStorageRequest: (action) => root.chatStorageRequest(action)
+            }
+
+            OllamaChatView {
+                id: ollamaView
+                current: full.onOllama && root.expanded
+                siteEnabled: root.chatSiteIds.indexOf("ollama") >= 0
+                address: root.chatOllamaAddress
+                appletId: Math.max(0, root.chatAppletId)
+            }
         }
 
         UsageView {}

@@ -39,15 +39,18 @@ shell once per run. That shell prints only the allow-listed variables
 disk.
 
 Hearthside makes no network requests other than to the tracked providers'
-endpoints and the chat websites you open, plus whatever those sites load. No
-analytics or telemetry are collected.
+endpoints and the chat websites you open, plus whatever those sites load, and,
+if you use the built-in Ollama chat, requests over loopback to the Ollama
+server on this computer. No analytics or telemetry are collected.
 
 ## Chat tab
 
 The Chat tab shows a provider's own website (Claude, ChatGPT, Grok, Gemini,
-GitHub Copilot, or Microsoft Copilot), or a chat server on your own computer
-(Local, for example Open WebUI on top of Ollama), in Qt WebEngine inside the
-Plasma process. You sign in on each site as you would in a browser.
+GitHub Copilot, or Microsoft Copilot), or a chat web interface on your own
+computer (Local web UI, for example Open WebUI on top of Ollama), in Qt
+WebEngine inside the Plasma process. You sign in on each site as you would in
+a browser. The built-in Ollama chat is different: it is not a web page and
+does not use Qt WebEngine (see [Ollama](#ollama-built-in-chat) below).
 
 Google's sign-in page (accounts.google.com) refuses embedded browsers
 ("This browser or app may not be secure"). While a chat page or sign-in
@@ -80,8 +83,9 @@ memory. Spell checking is off. You are signed out on every Plasma restart.
 **Clear chat data** (in the Chat tab, after a confirmation) destroys every
 chat page together with the profile, which signs you out of all chat sites at
 once. Chat is the first tab, so Qt WebEngine starts the first time you open
-the popup, unless no chat sites are enabled in settings; it is never started
-just because the widget is on the panel.
+the popup on a web site; it doesn't start while no web chat sites are enabled
+or while only the Ollama chat is shown, and it is never started just because
+the widget is on the panel.
 
 ### Encrypted: saved sign-ins
 
@@ -176,7 +180,9 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), and a profile counter (`chatProfileGeneration`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, or a path | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), and the Ollama address (`chatOllamaUrl`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
+| Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
+| Ollama address | `chatOllamaUrl` in the Plasma configuration file, plain text; only a loopback `http://` address with a port is ever saved | Same |
 | Downloads | Only files you approve, saved to your Downloads folder | Same |
 | Uploads | Read-only, from files you pick in the file dialog | Same |
 | Page console messages | Discarded; never written to the journal | Same |
@@ -192,7 +198,8 @@ pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
 chat data to the Python helper, process arguments, or the environment. For
 Stay signed in the widget runs the helper with fixed words and numbers only
 (see [Provider contracts](provider-contracts.md#stay-signed-in-helper)); its
-replies are short codes, never paths. Load errors show generic text and are
+replies are short codes, never paths. For the Ollama chat it runs the helper
+with the port number only ([port owner helper](provider-contracts.md#port-owner-helper)). Load errors show generic text and are
 not logged. The system file dialog may remember recently used folders, as it
 does for any application.
 
@@ -206,9 +213,9 @@ passwords, tokens, or other secrets in them. Addresses with a user name or
 password (`https://user:pass@host/`) are refused, and text that isn't a valid
 address is never saved. A custom address adds only its exact host to the site.
 
-### Local chat server
+### Local web UI
 
-Local is off by default. It is the only site whose pages may use plain
+Local web UI is off by default. It is the only site whose pages may use plain
 `http:`, and only for the exact address and port you configured on this
 computer (`localhost`, `127.0.0.1`, or `[::1]`); traffic over loopback never
 leaves the computer, but it is not encrypted. That rule covers the pages and
@@ -226,10 +233,77 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   does not delete anything stored by the server.
 - On a shared computer, another user could start their own server on the same
   port before yours does, and the widget would show their page. Only use Local
-  on a computer you trust, and stop using it if the page looks unfamiliar.
+  web UI on a computer you trust, and stop using it if the page looks
+  unfamiliar. (The built-in Ollama chat checks the port's owner; Local web UI
+  does not.)
 - A server on another machine needs `https:` with a certificate your system
   trusts; pages with self-signed or otherwise invalid certificates are not
   loaded. Alternatively, reach it through an SSH tunnel to a local port.
+
+### Ollama (built-in chat)
+
+The Ollama entry (off by default; Settings → Chat) is a small chat written in
+QML that talks to the Ollama API directly. It does not use Qt WebEngine, so
+none of the web profile rules above apply to it; these do:
+
+- **Where your messages go.** Each message, with the conversation so far, is
+  sent in the body of a `POST /api/chat` request over plain `http://` on
+  loopback to the address you set (default `http://127.0.0.1:11434`; only
+  `127.0.0.1`, `localhost`, or `[::1]` with a port is accepted). Hearthside
+  itself sends it nowhere else, and it is readable by the program that
+  answers on that port. With the packaged `ollama.service` that is a process
+  of the system `ollama` account, so the `ollama` account's processes, and
+  root, can read your prompts and the replies. That program decides where
+  the message goes next: Ollama keeps it on this computer for local models,
+  but a program on that port could pass it on, and if it answers with an
+  HTTP redirect, Qt sends the message again to the redirect's address (which
+  may be another computer) before the widget can notice. The widget then
+  drops the request and shows none of that reply, but cannot take the
+  message back.
+- **What Ollama keeps.** Ollama holds the conversation in its memory (the
+  model's context cache, also in GPU memory) until the model is unloaded,
+  5 minutes after the last message by default. **Clear conversation** asks
+  Ollama to unload every model this conversation used (a request with no
+  prompt and `keep_alive: 0`), so the next message loads the model again,
+  which takes a few seconds. This also affects a model you are using with
+  `ollama run` in a terminal at the same time.
+- **Logs.** Ollama's service log records each request's method, path, status
+  and timing (for example `POST /api/chat`), not its content. Don't set
+  `OLLAMA_DEBUG` for the service: debug logging can write more.
+- **Ollama's own history.** Prompts you type into `ollama run` in a terminal
+  are saved by Ollama's command line tool in `~/.ollama/history`. That is not
+  Hearthside, and the widget never writes there, but it is a place your
+  prompts may end up on disk.
+- **Cloud models are hidden.** Ollama can list cloud models (names ending in
+  `:cloud` or `-cloud`, or with a remote host) that forward your messages to
+  ollama.com. Hearthside drops them from the model list and never sends to
+  them. Embedding-only models are hidden too.
+- **The port's owner is checked.** If Ollama is stopped, another program can
+  take its port. Before each model-list load and each send or unload, the
+  widget asks the helper who owns the listening socket (read from
+  `/proc/net/tcp`; the helper sees only the port number, never a prompt) and
+  sends nothing unless it belongs to you, root, or the system `ollama`
+  account. Another user's program gets nothing: "Another user's program is
+  using port …". If the check can't be done, nothing is sent either. The
+  check cannot tell your own programs apart, so a program running as you can
+  still pose as Ollama, and a listener could change in the milliseconds
+  between the check and the request. Hearthside never starts Ollama.
+- **Nothing on disk from Hearthside.** The conversation lives only in Plasma's
+  memory: no file, log, journal message, process argument, environment
+  variable, helper call, or setting holds it. Nothing is in the request
+  address either; only the body carries text. The model you pick is not saved.
+  It stays while the popup is closed or another site is shown, and is gone on
+  Clear conversation, when you turn Ollama off in settings, or on Plasma
+  restart.
+- **What is shown.** Replies and server error messages are shown as plain
+  text only, so a reply containing HTML, Markdown images or links can't make
+  the widget load anything. Fenced code blocks are shown in a monospace font.
+- **Typing.** Spell checking is off in the message field, and it asks input
+  methods not to learn or predict what you type (`ImhSensitiveData`,
+  `ImhNoPredictiveText`); some input methods (for example CJK prediction) may
+  offer fewer suggestions there.
+- **Copying.** The Copy buttons and Ctrl+C put text on the clipboard, where a
+  clipboard manager such as Klipper may keep it (see below).
 
 ### Permissions and prompts
 
@@ -260,7 +334,10 @@ The Chat tab protects against:
 - other local users, who cannot read Plasma's memory or the unlocked
   encrypted folder;
 - the developer: there is no telemetry, the widget makes no requests of its
-  own, and it never reads or changes the pages;
+  own (apart from the Ollama chat's requests to Ollama on this computer), and
+  it never reads or changes the pages;
+- with the Ollama chat: other users' programs on the Ollama port, cloud
+  models, and leftovers of the conversation on disk from Hearthside;
 - with Off: leftovers on disk after a Plasma restart or Clear chat data;
 - with Encrypted: someone who reads your disk while the folder is locked
   (for example a stolen, powered-off laptop), apart from the metadata listed
@@ -273,6 +350,9 @@ It does not protect against:
   while it is unlocked, the encrypted folder, log your keystrokes, or show a
   fake passphrase window;
 - the chat providers themselves, and the third parties their pages load;
+- the Ollama server: the program answering on the Ollama port (with the
+  packaged service, the `ollama` account) reads your prompts and keeps them in
+  its memory until the model is unloaded;
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
   below.
 
@@ -281,9 +361,11 @@ It does not protect against:
 - Use full-disk encryption, or at least encrypted swap, so memory paged out
   to disk (or a hibernation image) is not readable later.
 - Disable stored core dumps (for systemd-coredump, set `Storage=none` in
-  `/etc/systemd/coredump.conf`); a Plasma crash dump would contain chat pages.
+  `/etc/systemd/coredump.conf`); a Plasma crash dump would contain chat pages
+  and the Ollama conversation, and an Ollama crash dump its context.
 - Text you copy is handled by your clipboard manager. If Klipper (or another
-  clipboard manager) keeps its history across sessions, copied chat text may
-  be written to disk. Pages cannot read the clipboard.
+  clipboard manager) keeps its history across sessions, copied chat text
+  (including Ollama replies and code blocks) may be written to disk. Pages
+  cannot read the clipboard.
 - Never set `QTWEBENGINE_REMOTE_DEBUGGING` for Plasma; it would expose every
   open page, including your sessions, to local connections.

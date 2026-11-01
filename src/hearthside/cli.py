@@ -6,19 +6,27 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import vault, webdata
+from .core import portowner, vault, webdata
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
 # Largest applet id or profile generation the plasmoid may pass.
 MAX_INT_ARGUMENT = 2**31
 _INT_ARGUMENT = re.compile(r"[0-9]{1,10}")
+_PORT_ARGUMENT = re.compile(r"[0-9]{1,5}")
 
 
 def _bounded_int(value: str) -> int:
     """A plain decimal 0..2**31: no sign, spaces, underscores or other digits."""
     if not _INT_ARGUMENT.fullmatch(value) or int(value) > MAX_INT_ARGUMENT:
         raise argparse.ArgumentTypeError("expected an integer from 0 to 2147483648")
+    return int(value)
+
+
+def _port(value: str) -> int:
+    """A plain decimal TCP port 1..65535: no sign, spaces, underscores or other digits."""
+    if not _PORT_ARGUMENT.fullmatch(value) or not portowner.MIN_PORT <= int(value) <= portowner.MAX_PORT:
+        raise argparse.ArgumentTypeError("expected a port from 1 to 65535")
     return int(value)
 
 
@@ -62,12 +70,19 @@ def parser() -> argparse.ArgumentParser:
         choices=vault.OPERATIONS,
         help="Manage the passphrase-encrypted Chat folder (no network, no credentials).",
     )
+    result.add_argument(
+        "--port-owner",
+        type=_port,
+        metavar="PORT",
+        help="Say whether you, a trusted system account, another user, or nobody listens on "
+        "this loopback port (reads /proc/net only; no network, no credentials).",
+    )
     result.add_argument("--version", action="version", version=__version__)
     return result
 
 
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--web-data and --vault stand alone; their options need --web-data."""
+    """--web-data, --vault and --port-owner stand alone; the web options need --web-data."""
     snapshot_options = [
         name for name, used in (
             ("--json", args.json),
@@ -84,6 +99,16 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--keep", args.keep is not None),
         ) if used
     ]
+    if args.port_owner is not None:
+        others = snapshot_options + web_options + [
+            name for name, used in (
+                ("--web-data", args.web_data is not None),
+                ("--vault", args.vault is not None),
+            ) if used
+        ]
+        if others:
+            argument_parser.error(f"{others[0]} cannot be combined with --port-owner")
+        return
     if args.web_data is None and args.vault is None:
         if web_options:
             argument_parser.error(f"{web_options[0]} needs --web-data")
@@ -125,7 +150,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
     _check_helper_arguments(args, argument_parser)
-    if args.web_data == "purge":
+    if args.port_owner is not None:
+        payload = _port_owner_reply(args.port_owner)
+    elif args.web_data == "purge":
         payload = _helper_reply(vault.purge)
     elif args.web_data is not None:
         payload = _helper_reply(lambda: webdata.run(
@@ -154,6 +181,14 @@ def _helper_reply(action) -> dict[str, object]:
         return action()
     except Exception:  # noqa: BLE001 - fail closed with a code only
         return {"ok": False, "error": "os-error"}
+
+
+def _port_owner_reply(port: int) -> dict[str, object]:
+    """The owner word only; any surprise fails closed as unreadable."""
+    try:
+        return portowner.run(port)
+    except Exception:  # noqa: BLE001 - fail closed with a code only
+        return {"ok": False, "error": "unreadable"}
 
 
 def print_json() -> int:

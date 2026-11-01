@@ -9,8 +9,10 @@ String literals are kept: a forbidden name inside a string (for example in
 ``Qt.createQmlObject``) is still a real use.
 """
 
+import ast
 import json
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -28,10 +30,19 @@ CHAT_VIEW = UI / "ChatView.qml"
 FULL_REPRESENTATION = UI / "FullRepresentation.qml"
 MAIN_QML = UI / "main.qml"
 CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configChat.qml")
+OLLAMA_CHAT_JS = UI / "OllamaChat.js"
+OLLAMA_CHAT_VIEW = UI / "OllamaChatView.qml"
+SRC = PLASMOID.parent / "src" / "hearthside"
+PORT_OWNER_PY = SRC / "core" / "portowner.py"
+CLI_PY = SRC / "cli.py"
+# Files of the built-in Ollama chat that are written in later plan phases.
+# Rules about them skip while the file does not exist and enforce once it does.
+PHASED_FILES = {"OllamaChat.js": "T1", "OllamaChatView.qml": "T4"}
 # Chat files that may read the plasmoid config but never write it. Only the
 # settings pages persist chat values (and main.qml the profile generation).
 CHAT_CONFIG_READ_ONLY_FILES = (
     "ChatSites.js", "ChatStorage.js", "ChatView.qml", "ChatWebView.qml", "FullRepresentation.qml",
+    "OllamaChat.js", "OllamaChatView.qml",
 )
 KCFG_NS = "{http://www.kde.org/standards/kcfg/1.0}"
 
@@ -47,6 +58,9 @@ CHAT_CONFIG_KEYS = {
     "chatSignInStorage": ("String", "memory"),
     "chatProfileGeneration": ("Int", "0"),
 }
+# The Ollama address (plan T4). Expected once main.xml has it or the Ollama
+# view exists, so it can neither be half-added nor forgotten.
+OLLAMA_CONFIG_KEYS = {"chatOllamaUrl": ("String", "http://127.0.0.1:11434")}
 # Keys that existed before the Chat tab. Anything else in main.xml would be a
 # new persisted value; the Chat tab may only persist the keys above.
 PRE_CHAT_CONFIG_KEYS = {
@@ -150,6 +164,13 @@ def _strip_comments(source, blank_strings=False):
 def _read_code(path):
     assert path.is_file(), f"{path.relative_to(PLASMOID.parent)} is missing"
     return _strip_comments(path.read_text(encoding="utf-8"))
+
+
+def _require_phased(path):
+    """Skip a rule about a not-yet-written Ollama file; enforce once it exists."""
+    if path.name in PHASED_FILES and not path.is_file():
+        pytest.skip(f"{path.name} is not written yet (plan task {PHASED_FILES[path.name]}); "
+                    "this rule enforces as soon as the file exists")
 
 
 def _line_of(text, offset):
@@ -538,10 +559,36 @@ def test_every_web_view_uses_the_chat_profile():
 def test_chat_starts_only_in_the_open_popup():
     # A web view built while Plasma preloads the closed popup stays blank, and
     # no web engine should start before Chat is actually shown.
-    code = _read_code(FULL_REPRESENTATION)
-    assert len(_hits(r"(?m)^\s*current\s*:\s*full\.onChat\s*&&\s*root\.expanded\s*$", code)) == 1, (
-        f"{_rel(FULL_REPRESENTATION)}: ChatView must get `current: full.onChat && root.expanded`"
-    )
+    # With the Ollama view, the web chat must also stay off while Ollama is shown.
+    problems = _chat_view_current_problems(_read_code(FULL_REPRESENTATION), OLLAMA_CHAT_VIEW.is_file())
+    assert not problems, f"{_rel(FULL_REPRESENTATION)}: {problems}"
+
+
+CHAT_VIEW_CURRENT = r"(?m)^\s*current\s*:\s*full\.onChat\s*&&\s*root\.expanded\s*$"
+CHAT_VIEW_CURRENT_OLLAMA = (
+    r'(?m)^\s*current\s*:\s*full\.onChat\s*&&\s*root\.expanded\s*&&\s*root\.chatSiteId\s*!==\s*"ollama"\s*$'
+)
+
+
+def _chat_view_current_problems(code, with_ollama):
+    plain = len(_hits(CHAT_VIEW_CURRENT, code))
+    gated = len(_hits(CHAT_VIEW_CURRENT_OLLAMA, code))
+    if with_ollama and (gated != 1 or plain):
+        return ['ChatView must get `current: full.onChat && root.expanded && root.chatSiteId !== "ollama"`']
+    if not with_ollama and plain + gated != 1:
+        return ["ChatView must get `current: full.onChat && root.expanded`"]
+    return []
+
+
+@pytest.mark.parametrize(("with_ollama", "old", "new"), [
+    (False, "current: full.onChat && root.expanded", "current: full.onChat"),
+    (True, 'current: full.onChat && root.expanded && root.chatSiteId !== "ollama"',
+     "current: full.onChat && root.expanded"),
+    (True, 'current: full.onChat && root.expanded && root.chatSiteId !== "ollama"',
+     'current: full.onChat && root.expanded && root.chatSiteId === "ollama"'),
+])
+def test_proof_chat_view_current_rule_catches(with_ollama, old, new):
+    assert _chat_view_current_problems(_mutated(FULL_REPRESENTATION, old, new), with_ollama)
 
 
 # --- helper commands: built only in ChatStorage.js -------------------------------------
@@ -1018,15 +1065,24 @@ def test_firefox_user_agent_is_declared_only_in_chat_sites_js():
 # --- persisted configuration ------------------------------------------------------
 
 
+def _chat_config_keys():
+    """The chat key set: chatOllamaUrl joins once main.xml has it or the Ollama view exists."""
+    keys = dict(CHAT_CONFIG_KEYS)
+    if OLLAMA_CHAT_VIEW.is_file() or set(OLLAMA_CONFIG_KEYS) & set(_main_xml_entries()):
+        keys.update(OLLAMA_CONFIG_KEYS)
+    return keys
+
+
 def test_main_xml_adds_only_the_chat_keys():
     entries = _main_xml_entries()
+    expected = _chat_config_keys()
     chat_keys = {name for name in entries if name.lower().startswith("chat")}
-    assert chat_keys == set(CHAT_CONFIG_KEYS), (
-        f"{_rel(MAIN_XML)} chat entries must be exactly {sorted(CHAT_CONFIG_KEYS)}, got {sorted(chat_keys)}"
+    assert chat_keys == set(expected), (
+        f"{_rel(MAIN_XML)} chat entries must be exactly {sorted(expected)}, got {sorted(chat_keys)}"
     )
-    unexpected = set(entries) - set(CHAT_CONFIG_KEYS) - PRE_CHAT_CONFIG_KEYS
+    unexpected = set(entries) - set(expected) - PRE_CHAT_CONFIG_KEYS
     assert not unexpected, f"{_rel(MAIN_XML)} has new persisted keys besides the chat ones: {sorted(unexpected)}"
-    for key, (kind, default) in sorted(CHAT_CONFIG_KEYS.items()):
+    for key, (kind, default) in sorted(expected.items()):
         assert entries[key]["group"] == "General", f"{_rel(MAIN_XML)}: {key} must be in group General"
         assert entries[key]["type"] == kind, f"{_rel(MAIN_XML)}: {key} must have type {kind}"
         if default is not None:
@@ -1038,6 +1094,7 @@ def test_main_xml_adds_only_the_chat_keys():
 @pytest.mark.parametrize("filename", CHAT_CONFIG_READ_ONLY_FILES)
 def test_chat_files_never_write_the_plasmoid_config(filename):
     path = UI / filename
+    _require_phased(path)
     code = _read_code(path)
     config = r"\b[Pp]lasmoid\s*\.\s*configuration"
     member = r"(?:\s*\.\s*\w+|\s*\[[^\]]*\])"
@@ -1078,18 +1135,21 @@ def test_proof_main_chat_config_write_is_caught():
 @pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
 def test_config_pages_declare_every_chat_key_and_never_write_config(page):
     code = _read_code(page)
-    for key, (kind, default) in CHAT_CONFIG_KEYS.items():
+    expected = _chat_config_keys()
+    for key, (kind, default) in expected.items():
         qml_type = {"String": "string", "Int": "int", "Bool": "bool"}[kind]
         for name in (f"cfg_{key}", f"cfg_{key}Default"):
             declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+)$", code)
             assert len(declared) == 1 and declared[0][0] == qml_type, (
                 f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
             )
-    for key in ("chatSignInStorage", "chatProfileGeneration"):
-        expected = '"memory"' if key == "chatSignInStorage" else "0"
+    literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0"}
+    if "chatOllamaUrl" in expected:
+        literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
+    for key, literal in literals.items():
         for name in (f"cfg_{key}", f"cfg_{key}Default"):
             value = re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:\s*(.+?)\s*$", code)
-            assert value == [expected], f"{_rel(page)}: {name} must default to {expected}, got {value}"
+            assert value == [literal], f"{_rel(page)}: {name} must default to {literal}, got {value}"
     writes = _hits(r"\bPlasmoid\s*\.\s*configuration\s*(?:\.\s*\w+|\[[^\]]*\])\s*=(?!=)", code)
     assert not writes, f"{_rel(page)} must write cfg_ properties, never Plasmoid.configuration; lines {writes}"
     gen_writes = [
@@ -1175,3 +1235,884 @@ def test_chat_default_site_default_is_a_known_site():
     default = (entries["chatDefaultSite"]["default"] or "").strip()
     assert default == "claude", f"{_rel(MAIN_XML)}: chatDefaultSite default must be claude, got {default!r}"
     assert default in _chat_site_ids(), f"{_rel(MAIN_XML)}: chatDefaultSite {default!r} is not in ChatSites.js"
+
+
+# --- built-in Ollama chat (plan "Policy rules" P1-P11) -----------------------------
+#
+# OllamaChat.js (T1) and OllamaChatView.qml (T4) arrive in later phases. Each
+# rule about them skips while its file is missing and enforces once it exists.
+# Rule checkers take source text; the proofs feed them a violating copy of the
+# real file when it exists, else of the small compliant sample below, so the
+# proofs run in every phase.
+
+# A minimal view that follows every rule. Used only when the real view is
+# missing, and kept here (not in plasmoid/) so it never counts as plasmoid code.
+SAMPLE_OLLAMA_VIEW = """\
+import QtQuick
+import QtQuick.Controls as QQC2
+import org.kde.kirigami as Kirigami
+import org.kde.plasma.plasma5support as Plasma5Support
+import "OllamaChat.js" as OllamaChat
+
+Item {
+    id: ollamaView
+    property var createRequest: function () { return new XMLHttpRequest() }
+    property var runOwnerCheck: function (command) { ownerSource.connectSource(command) }
+
+    function loadTags(address) {
+        var xhr = ollamaView.createRequest()
+        xhr.open("GET", OllamaChat.endpoint(address, "tags"))
+        xhr.send()
+    }
+    function sendChat(address, body) {
+        var xhr = ollamaView.createRequest()
+        xhr.open("POST", OllamaChat.endpoint(address, "chat"))
+        xhr.setRequestHeader("Content-Type", "application/json")
+        xhr.send(body)
+        confirm.open()
+    }
+    Plasma5Support.DataSource {
+        id: ownerSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            ownerSource.disconnectSource(source)
+            ollamaView.ownerDone(OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))
+        }
+    }
+    QQC2.Label {
+        text: i18n("Ollama isn't running.")
+        textFormat: Text.PlainText
+    }
+    Kirigami.Heading { text: i18n("Ollama"); textFormat: Text.PlainText }
+    TextEdit {
+        readOnly: true
+        textFormat: TextEdit.PlainText
+        text: "reply"
+    }
+    QQC2.TextArea {
+        id: input
+        textFormat: TextEdit.PlainText
+        Kirigami.SpellCheck.enabled: false
+        inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhSensitiveData
+    }
+}
+"""
+SAMPLE_OLLAMA_JS = """\
+.pragma library
+
+var DEFAULT_ADDRESS = "http://127.0.0.1:11434"
+
+function ownerCommand(port, run, applet) {
+    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet
+        + " python3 -m hearthside --port-owner " + port
+}
+"""
+
+
+def _ollama_source(path, sample):
+    """The real file when it exists, else the compliant sample (for proofs)."""
+    return path.read_text(encoding="utf-8") if path.is_file() else sample
+
+
+def _mutated_source(path, sample, old, new):
+    raw = _ollama_source(path, sample)
+    assert old in raw, f"proof fixture out of date: {old!r} not in {path.name}"
+    return _strip_comments(raw.replace(old, new, 1))
+
+
+def _inserted_view(snippet):
+    """The view (real or sample) with ``snippet`` added as the root item's first child."""
+    raw = _ollama_source(OLLAMA_CHAT_VIEW, SAMPLE_OLLAMA_VIEW)
+    blanked = _strip_comments(raw, blank_strings=True)
+    match = re.search(r"(?m)^[A-Za-z_][\w.]*\s*\{", blanked)
+    assert match, "the view has no root item"
+    end = match.end()
+    return _strip_comments(raw[:end] + "\n" + snippet + "\n" + raw[end:])
+
+
+def _inserted_js(snippet):
+    raw = _ollama_source(OLLAMA_CHAT_JS, SAMPLE_OLLAMA_JS)
+    head, sep, tail = raw.partition(".pragma library\n")
+    assert sep, "OllamaChat.js must start with .pragma library"
+    return head + sep + snippet + "\n" + tail
+
+
+def test_ollama_samples_follow_every_rule():
+    # The proofs below are only meaningful if the unmutated inputs pass.
+    view = _strip_comments(SAMPLE_OLLAMA_VIEW)
+    assert not _ollama_js_problems(SAMPLE_OLLAMA_JS)
+    assert not _ollama_request_problems(view)
+    assert not _plain_text_problems(view)
+    assert not _input_privacy_problems(view)
+    assert not _port_owner_flag_problems({"OllamaChatView.qml": view,
+                                          "OllamaChat.js": _strip_comments(SAMPLE_OLLAMA_JS)})
+    assert not _seam_problems({"OllamaChatView.qml": view}, view_present=True)
+    assert not _xhr_offenders({"OllamaChatView.qml": view})
+    assert not _ollama_storage_offenders({"OllamaChatView.qml": view,
+                                          "OllamaChat.js": _strip_comments(SAMPLE_OLLAMA_JS)})
+
+
+# P1 OllamaChat.js is a pure library: no imports, no requests, no Qt, no logs, no storage.
+
+OLLAMA_JS_FORBIDDEN = {
+    "XMLHttpRequest": r"\bXMLHttpRequest\b",
+    "Qt.": r"\bQt\s*\.",
+    "console": r"\bconsole\b",
+    "LocalStorage": r"\bLocalStorage\b",
+    "openDatabaseSync": r"\bopenDatabaseSync\b",
+    "eval": r"\beval\s*\(|\bFunction\s*\(",
+}
+
+
+def _ollama_js_problems(raw):
+    code = _strip_comments(raw)
+    problems = []
+    if not re.match(r"\s*\.pragma\s+library\b", code):
+        problems.append("must start with .pragma library")
+    imports = _hits(r"(?m)^\s*(?:\.import\b|import\b)", code) + _hits(r"\bQt\.include\s*\(", code)
+    if imports:
+        problems.append(f"must not import anything (lines {imports})")
+    for name, pattern in OLLAMA_JS_FORBIDDEN.items():
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"must not use {name} (lines {lines})")
+    return problems
+
+
+def test_ollama_chat_js_is_a_pure_library():
+    _require_phased(OLLAMA_CHAT_JS)
+    problems = _ollama_js_problems(OLLAMA_CHAT_JS.read_text(encoding="utf-8"))
+    assert not problems, f"{_rel(OLLAMA_CHAT_JS)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    "import QtQuick 2.15",
+    ".import \"ChatSites.js\" as ChatSites",
+    "Qt.include(\"x.js\")",
+    "function get(u) { var x = new XMLHttpRequest(); return x }",
+    "function open(u) { Qt.openUrlExternally(u) }",
+    "function log(t) { console.log(t) }",
+    "var db = LocalStorage.openDatabaseSync(\"x\", \"1\", \"x\", 1)",
+    "var f = eval(\"1\")",
+])
+def test_proof_ollama_chat_js_rule_catches(snippet):
+    assert _ollama_js_problems(_inserted_js(snippet))
+
+
+def test_proof_ollama_chat_js_needs_pragma():
+    assert _ollama_js_problems(_ollama_source(OLLAMA_CHAT_JS, SAMPLE_OLLAMA_JS).replace(".pragma library", "", 1))
+
+
+# P2 XMLHttpRequest only in OllamaChatView.qml, and there only as the createRequest default.
+
+CREATE_REQUEST_DECLARATION = (
+    r"(?m)^[ \t]*property\s+var\s+createRequest\s*:\s*function\s*\(\s*\)\s*\{\s*"
+    r"return\s+new\s+XMLHttpRequest\s*\(\s*\)\s*;?\s*\}\s*$"
+)
+
+
+def _xhr_offenders(sources):
+    offenders = []
+    for name, code in sources.items():
+        lines = _hits(r"\bXMLHttpRequest\b", code)
+        if not name.endswith("OllamaChatView.qml"):
+            offenders += [f"{name}:{line}" for line in lines]
+        elif lines != _hits(CREATE_REQUEST_DECLARATION, code) or len(lines) > 1:
+            offenders.append(f"{name}: XMLHttpRequest only once, as "
+                             "`property var createRequest: function () { return new XMLHttpRequest() }`")
+    return offenders
+
+
+def test_xml_http_request_only_in_the_ollama_view():
+    offenders = _xhr_offenders(_all_code())
+    assert not offenders, f"XMLHttpRequest belongs to OllamaChatView.qml only: {offenders}"
+
+
+def test_proof_xml_http_request_elsewhere_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function x() { return new XMLHttpRequest() }\n    function chatNext() {")
+    assert _xhr_offenders({"main.qml": code})
+
+
+def test_proof_second_xml_http_request_in_view_is_caught():
+    view = _inserted_view("    function raw() { return new XMLHttpRequest() }")
+    assert _xhr_offenders({"OllamaChatView.qml": view})
+
+
+# P3 Requests go only to OllamaChat.endpoint() with GET or POST and one JSON header.
+
+def _ollama_request_problems(code):
+    problems = []
+    for match in re.finditer(r"\.\s*open\s*\((?!\s*\))", code):
+        if not re.match(r"\.\s*open\s*\(\s*\"(?:GET|POST)\"\s*,\s*OllamaChat\.endpoint\s*\(", code[match.start():]):
+            problems.append(f'line {_line_of(code, match.start())}: .open( must be .open("GET"|"POST", '
+                            "OllamaChat.endpoint(...)")
+    for pattern, rule in (
+            (r"""\[\s*["']open["']\s*\]""", "no indirect open"),
+            (r"""\[\s*["']setRequestHeader["']\s*\]""", "no indirect setRequestHeader"),
+            (r"\bwithCredentials\b", "no withCredentials"),
+            (r"(?i)\bauthorization\b", "no Authorization header"),
+            (r"(?i)\bcookie", "no cookies")):
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"{rule} (lines {lines})")
+    for match in re.finditer(r"\bsetRequestHeader\s*\(", code):
+        if not re.match(r'setRequestHeader\s*\(\s*"Content-Type"\s*,\s*"application/json"\s*\)',
+                        code[match.start():]):
+            problems.append(f'line {_line_of(code, match.start())}: only setRequestHeader("Content-Type", '
+                            '"application/json")')
+    return problems
+
+
+def test_ollama_view_requests_only_the_ollama_endpoints():
+    _require_phased(OLLAMA_CHAT_VIEW)
+    problems = _ollama_request_problems(_read_code(OLLAMA_CHAT_VIEW))
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '    function a(x) { x.open("PUT", OllamaChat.endpoint(ollamaView.address, "chat")) }',
+    '    function a(x) { x.open("GET", ollamaView.address + "/api/tags") }',
+    '    function a(x, m) { x.open(m, OllamaChat.endpoint(ollamaView.address, "chat")) }',
+    '    function a(x) { x.open("GET", "http://127.0.0.1:11434/api/tags") }',
+    '    function a(x) { x["open"]("GET", "http://evil.example/") }',
+    '    function a(x) { x.setRequestHeader("Authorization", "Bearer t") }',
+    '    function a(x) { x.setRequestHeader("Content-Type", "text/plain") }',
+    '    function a(x, h) { x.setRequestHeader(h, "application/json") }',
+    '    function a(x) { x.setRequestHeader("Cookie", "a=b") }',
+    '    function a(x) { x.withCredentials = true }',
+])
+def test_proof_ollama_request_rule_catches(snippet):
+    assert _ollama_request_problems(_inserted_view(snippet))
+
+
+# P4 Model output is untrusted: every text element is PlainText, no rich text, links or images.
+
+TEXT_ELEMENT = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:Text|Label|TextEdit|TextArea|Heading|SelectableLabel)\s*\{"
+PLAIN_TEXT_FORMAT = r"(?:^|[\n;])\s*textFormat\s*:\s*(?:Text|TextEdit)\s*\.\s*PlainText\s*(?=;|\n|$)"
+RICH_TEXT_BANS = {
+    "RichText": r"\bRichText\b",
+    "StyledText": r"\bStyledText\b",
+    "MarkdownText": r"\bMarkdownText\b",
+    "AutoText": r"\bAutoText\b",
+    "onLinkActivated": r"\bonLinkActivated\b",
+    "linkActivated": r"\blinkActivated\b",
+    "openUrlExternally": r"\bopenUrlExternally\b",
+    "baseUrl": r"\bbaseUrl\b",
+    "Image {": r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:Image|AnimatedImage|BorderImage)\s*\{",
+    "non-plain textFormat": r"\btextFormat\s*(?::|=(?!=))(?!\s*(?:Text|TextEdit)\s*\.\s*PlainText\b)",
+}
+
+
+def _top_level(body):
+    """The bindings of one ``{ ... }`` block with nested blocks and strings blanked."""
+    blanked = _strip_comments(body, blank_strings=True)
+    out = []
+    depth = 0
+    for char in blanked:
+        if char == "{":
+            depth += 1
+            out.append(" ")
+        elif char == "}":
+            depth -= 1
+            out.append(" ")
+        else:
+            out.append(char if depth == 1 or char == "\n" else " ")
+    return "".join(out)
+
+
+def _plain_text_problems(code):
+    # TextField (a TextInput) has no textFormat and always shows plain text.
+    problems = []
+    elements = list(_blocks(code, TEXT_ELEMENT))
+    for start, body in elements:
+        if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(body))) != 1:
+            problems.append(f"line {_line_of(code, start)}: text element without "
+                            "`textFormat: Text.PlainText` (or TextEdit.PlainText)")
+    for name, pattern in RICH_TEXT_BANS.items():
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"{name} is forbidden (lines {lines})")
+    return problems
+
+
+def test_ollama_view_shows_everything_as_plain_text():
+    _require_phased(OLLAMA_CHAT_VIEW)
+    code = _read_code(OLLAMA_CHAT_VIEW)
+    problems = _plain_text_problems(code)
+    assert list(_blocks(code, TEXT_ELEMENT)), f"{_rel(OLLAMA_CHAT_VIEW)}: no text elements found"
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    "    Text { text: \"reply\" }",
+    "    QQC2.Label {\n        text: \"reply\"\n    }",
+    "    Kirigami.Heading { text: \"h\" }",
+    "    Kirigami.SelectableLabel { text: \"r\" }",
+    "    TextEdit { readOnly: true; text: \"r\"; textFormat: TextEdit.MarkdownText }",
+    "    Text { text: \"r\"; textFormat: Text.AutoText }",
+    "    Text { text: \"r\"; textFormat: Text.RichText }",
+    "    Text { text: \"r\"; textFormat: Text.StyledText }",
+    "    Text {\n        text: \"r\"\n        Text { textFormat: Text.PlainText }\n    }",
+    "    Text { textFormat: Text.PlainText; onLinkActivated: (link) => Qt.openUrlExternally(link) }",
+    "    TextEdit { textFormat: TextEdit.PlainText; baseUrl: \"http://127.0.0.1/\" }",
+    "    Image { source: \"http://127.0.0.1:9/x\" }",
+    "    function f(t) { t.textFormat = Text.RichText }",
+])
+def test_proof_plain_text_rule_catches(snippet):
+    assert _plain_text_problems(_inserted_view(snippet))
+
+
+# P4 also covers the model picker in FullRepresentation.qml: model names come
+# from the server, so its delegate shows them as plain text only.
+
+MODEL_COMBO = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?ComboBox\s*\{"
+MODEL_COMBO_MODEL = r"(?:^|[\n;])\s*model\s*:\s*ollamaView\s*\.\s*modelList\s*(?=;|\n|$)"
+
+
+def _model_picker_problems(code):
+    pickers = [(start, body) for start, body in _blocks(code, MODEL_COMBO)
+               if re.search(MODEL_COMBO_MODEL, _top_level(body))]
+    if len(pickers) != 1:
+        return [f"exactly one ComboBox with `model: ollamaView.modelList`, found {len(pickers)}"]
+    start, body = pickers[0]
+    line = _line_of(code, start)
+    top = _top_level(body)
+    problems = []
+    if not re.search(r"(?:^|[\n;])\s*delegate\s*:", top):
+        problems.append(f"line {line}: the model picker needs its own delegate (the style's shows AutoText)")
+    if re.search(r"(?:^|[\n;])\s*contentItem\s*:", top):
+        problems.append(f"line {line}: the model picker must keep the style's contentItem (a TextField)")
+    if not list(_blocks(body, TEXT_ELEMENT)):
+        problems.append(f"line {line}: no text elements in the model picker delegate")
+    problems += [f"model picker (from line {line}): {problem}" for problem in _plain_text_problems(body)]
+    return problems
+
+
+def test_model_picker_shows_model_names_as_plain_text():
+    _require_phased(OLLAMA_CHAT_VIEW)
+    problems = _model_picker_problems(_read_code(FULL_REPRESENTATION))
+    assert not problems, f"{_rel(FULL_REPRESENTATION)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("textFormat: Text.PlainText\n                                text: modelDelegate.modelData.name",
+     "text: modelDelegate.modelData.name"),
+    ("textFormat: Text.PlainText\n                                visible: text !== \"\"",
+     "textFormat: Text.StyledText\n                                visible: text !== \"\""),
+    ("                    delegate: PlasmaComponents.ItemDelegate {\n                        id: modelDelegate",
+     "                    property Component unused: PlasmaComponents.ItemDelegate {\n"
+     "                        id: modelDelegate"),
+    ("                    model: ollamaView.modelList\n",
+     "                    model: ollamaView.modelList\n                    contentItem: Text { text: \"x\"; "
+     "textFormat: Text.PlainText }\n"),
+    ("                    model: ollamaView.modelList\n", "                    model: ollamaView.models\n"),
+])
+def test_proof_model_picker_rule_catches(old, new):
+    assert _model_picker_problems(_mutated(FULL_REPRESENTATION, old, new))
+
+
+# P5 The input never feeds spell checkers or IME learning.
+
+EDITABLE_ELEMENT = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:TextArea|TextField|TextEdit|TextInput)\s*\{"
+
+
+def _input_privacy_problems(code):
+    problems = []
+    inputs = [
+        (start, _top_level(body)) for start, body in _blocks(code, EDITABLE_ELEMENT)
+        if not re.search(r"(?:^|[\n;])\s*readOnly\s*:\s*true\s*(?=;|\n|$)", _top_level(body))
+    ]
+    if not inputs:
+        problems.append("no editable input found")
+    for start, top in inputs:
+        line = _line_of(code, start)
+        if not re.search(r"(?:^|[\n;])\s*Kirigami\.SpellCheck\.enabled\s*:\s*false\s*(?=;|\n|$)", top):
+            problems.append(f"line {line}: the input needs `Kirigami.SpellCheck.enabled: false`")
+        hints = re.findall(r"(?:^|[\n;])\s*inputMethodHints\s*:\s*([^;\n]+)", top)
+        if len(hints) != 1 or not all(re.search(rf"\bQt\.{flag}\b", hints[0])
+                                      for flag in ("ImhNoPredictiveText", "ImhSensitiveData")) \
+                or re.search(r"[&~^]", hints[0]):
+            problems.append(f"line {line}: inputMethodHints must include Qt.ImhNoPredictiveText | Qt.ImhSensitiveData")
+    for pattern, rule in ((r"\bSpellCheck\s*\.\s*enabled\s*(?::|=(?!=))(?!\s*false\b)", "spell check on"),
+                          (r"\binputMethodHints\s*=(?!=)", "inputMethodHints changed at runtime")):
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"{rule} (lines {lines})")
+    return problems
+
+
+def test_ollama_input_disables_spell_check_and_ime_learning():
+    _require_phased(OLLAMA_CHAT_VIEW)
+    problems = _input_privacy_problems(_read_code(OLLAMA_CHAT_VIEW))
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    "    QQC2.TextArea { textFormat: TextEdit.PlainText }",
+    "    QQC2.TextField { Kirigami.SpellCheck.enabled: false }",
+    "    QQC2.TextArea {\n        textFormat: TextEdit.PlainText\n        Kirigami.SpellCheck.enabled: false\n"
+    "        inputMethodHints: Qt.ImhNoPredictiveText\n    }",
+    "    QQC2.TextArea {\n        textFormat: TextEdit.PlainText\n        Kirigami.SpellCheck.enabled: true\n"
+    "        inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhSensitiveData\n    }",
+    "    function f() { input.inputMethodHints = Qt.ImhNone }",
+])
+def test_proof_input_privacy_rule_catches(snippet):
+    assert _input_privacy_problems(_inserted_view(snippet))
+
+
+def test_proof_input_without_any_editable_is_caught():
+    assert _input_privacy_problems(_strip_comments("Item {\n    Text { textFormat: Text.PlainText }\n}\n"))
+
+
+# P6 (config) lives in the persisted-configuration rules above: both Ollama
+# files are in CHAT_CONFIG_READ_ONLY_FILES and chatOllamaUrl joins the key set.
+
+def test_proof_ollama_view_config_write_is_caught():
+    view = _inserted_view("    function f() { Plasmoid.configuration.chatOllamaUrl = \"http://127.0.0.1:1\" }")
+    config = r"\b[Pp]lasmoid\s*\.\s*configuration(?:\s*\.\s*\w+|\s*\[[^\]]*\])+\s*=(?!=)"
+    assert _hits(config, view)
+
+
+def test_proof_ollama_key_with_a_different_default_is_caught():
+    # The config page rule compares the declared literal with this exact text.
+    assert OLLAMA_CONFIG_KEYS == {"chatOllamaUrl": ("String", "http://127.0.0.1:11434")}
+    page = _strip_comments(
+        'property string cfg_chatOllamaUrl: "http://0.0.0.0:11434"\n'
+        'property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"\n')
+    values = [re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:\s*(.+?)\s*$", page)
+              for name in ("cfg_chatOllamaUrl", "cfg_chatOllamaUrlDefault")]
+    assert values[0] != ['"http://127.0.0.1:11434"'] and values[1] == ['"http://127.0.0.1:11434"']
+
+
+# P7 The owner check command is built only by OllamaChat.js; its reply is stdout only.
+
+OWNER_COMMAND = (
+    r'"env HEARTHSIDE_RUN="\s*\+\s*\w+\s*\+\s*" HEARTHSIDE_APPLET="\s*\+\s*\w+\s*'
+    r'\+\s*" python3 -m hearthside --port-owner "\s*\+\s*\w+'
+)
+OTHER_HELPER_FLAGS = ("--json", "--providers", "--catalog", "--detect") + HELPER_FLAGS
+
+
+def _port_owner_flag_problems(sources):
+    problems = [
+        f"{name}:{line} --port-owner outside OllamaChat.js"
+        for name, code in sources.items() if not name.endswith("OllamaChat.js")
+        for line in _hits(r"(?<![\w-])--port-owner(?![\w-])", code)
+    ]
+    for name, code in sources.items():
+        if name.endswith("OllamaChat.js"):
+            if len(_hits(r"--port-owner", code)) != 1 or len(re.findall(OWNER_COMMAND, code)) != 1:
+                problems.append(f"{name}: --port-owner once, as `\"env HEARTHSIDE_RUN=\" + run + "
+                                "\" HEARTHSIDE_APPLET=\" + applet + \" python3 -m hearthside --port-owner \" + port`")
+            problems += [f"{name}:{line} {flag}" for flag in OTHER_HELPER_FLAGS
+                         for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)]
+        if name.endswith("OllamaChatView.qml"):
+            problems += [f"{name}:{line} stderr" for line in _hits(r"\bstderr\b", code)]
+    return problems
+
+
+def test_port_owner_command_is_built_only_by_ollama_chat_js():
+    _require_phased(OLLAMA_CHAT_JS)
+    problems = _port_owner_flag_problems(_all_code())
+    assert not problems, f"port owner check: {problems}"
+
+
+@pytest.mark.parametrize("target,old,new", [
+    ("js", " python3 -m hearthside --port-owner ", " python3 -m hearthside --port-owner --json "),
+    ("js", '" HEARTHSIDE_APPLET=" + applet\n', '""\n'),
+    ("js", "--port-owner", "--port-owne"),
+])
+def test_proof_port_owner_command_rule_catches(target, old, new):
+    js = _mutated_source(OLLAMA_CHAT_JS, SAMPLE_OLLAMA_JS, old, new)
+    assert _port_owner_flag_problems({"OllamaChat.js": js})
+
+
+@pytest.mark.parametrize("snippet", [
+    '    readonly property string cmd: "python3 -m hearthside --port-owner 11434"',
+    '    function f(data) { return data["stderr"] }',
+])
+def test_proof_port_owner_view_rule_catches(snippet):
+    assert _port_owner_flag_problems({"OllamaChatView.qml": _inserted_view(snippet)})
+
+
+def test_proof_port_owner_flag_in_main_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function x() { return \"python3 -m hearthside --port-owner 1\" }\n    function chatNext() {")
+    assert _port_owner_flag_problems({"main.qml": code})
+
+
+# P8 No storage APIs anywhere; no PUT/DELETE or file: URLs in the Ollama files.
+
+PLASMOID_STORAGE_BANS = {
+    "LocalStorage": r"\bLocalStorage\b",
+    "openDatabaseSync": r"\bopenDatabaseSync\b",
+    "Settings {": r"\bSettings\s*\{",
+    "Qt.labs.settings": r"\bQt\s*\.\s*labs\s*\.\s*settings\b",
+    "FileIO": r"\bFileIO\b",
+}
+OLLAMA_FILE_BANS = {
+    "PUT/DELETE/PATCH": r"""(?i)["']\s*(?:PUT|DELETE|PATCH)\s*["']""",
+    "file: URL": r"(?i)\bfile:",
+}
+
+
+def _ollama_storage_offenders(sources):
+    return [
+        f"{name}:{line} {rule}"
+        for name, code in sources.items()
+        for rule, pattern in PLASMOID_STORAGE_BANS.items()
+        for line in _hits(pattern, code)
+    ] + [
+        f"{name}:{line} {rule}"
+        for name, code in sources.items() if name.endswith(("OllamaChat.js", "OllamaChatView.qml"))
+        for rule, pattern in OLLAMA_FILE_BANS.items()
+        for line in _hits(pattern, code)
+    ]
+
+
+def test_plasmoid_never_uses_local_storage_or_settings_files():
+    offenders = _ollama_storage_offenders(_all_code())
+    assert not offenders, f"forbidden storage in plasmoid/: {offenders}"
+
+
+@pytest.mark.parametrize("name,snippet", [
+    ("main.qml", "import QtQuick.LocalStorage"),
+    ("main.qml", "var db = openDatabaseSync(\"x\", \"1\", \"x\", 1)"),
+    ("main.qml", "Settings { property string last: \"\" }"),
+    ("main.qml", "QtCore.Settings { category: \"x\" }"),
+    ("main.qml", "import Qt.labs.settings"),
+    ("main.qml", "FileIO { id: f }"),
+    ("OllamaChatView.qml", "x.open(\"PUT\", OllamaChat.endpoint(a, \"chat\"))"),
+    ("OllamaChat.js", "var LOG = \"file:///tmp/ollama.log\""),
+])
+def test_proof_storage_rule_catches(name, snippet):
+    assert _ollama_storage_offenders({name: _strip_comments(snippet)})
+
+
+# P9 The test seams are set only by tests.
+
+SEAMS = ("createRequest", "runOwnerCheck")
+
+
+def _seam_problems(sources, view_present):
+    problems = []
+    for name, code in sources.items():
+        for seam in SEAMS:
+            problems += [f"{name}:{line} {seam} assigned" for line in _hits(rf"\b{seam}\s*=(?!=)", code)]
+            declarations = _hits(rf"(?m)^[ \t]*property\s+var\s+{seam}\s*:", code)
+            bindings = _hits(rf"(?<![\w.]){seam}\s*:", code)
+            if not name.endswith("OllamaChatView.qml"):
+                problems += [f"{name}:{line} {seam} bound" for line in bindings]
+            elif bindings != declarations or len(declarations) != 1:
+                problems.append(f"{name}: {seam} must be declared once (`property var {seam}: ...`) "
+                                "and never bound elsewhere")
+    if view_present and not any(name.endswith("OllamaChatView.qml") for name in sources):
+        problems.append("OllamaChatView.qml is missing")
+    return problems
+
+
+def test_ollama_test_seams_are_never_set_in_the_plasmoid():
+    # Enforced in every phase for the other files; the view's own
+    # declarations are checked once it exists.
+    sources = _all_code()
+    problems = _seam_problems(sources, view_present=OLLAMA_CHAT_VIEW.is_file())
+    assert not problems, f"createRequest/runOwnerCheck are for tests only: {problems}"
+
+
+@pytest.mark.parametrize("name,snippet", [
+    ("FullRepresentation.qml", "OllamaChatView { createRequest: function () { return null } }"),
+    ("FullRepresentation.qml", "ollamaView.runOwnerCheck = function (c) {}"),
+    ("main.qml", "Component.onCompleted: view.createRequest = null"),
+])
+def test_proof_seam_rule_catches_outside_the_view(name, snippet):
+    assert _seam_problems({name: _strip_comments(snippet)}, view_present=False)
+
+
+@pytest.mark.parametrize("snippet", [
+    "    property var createRequest: null",
+    "    function f() { ollamaView.runOwnerCheck = function (c) {} }",
+])
+def test_proof_seam_rule_catches_inside_the_view(snippet):
+    assert _seam_problems({"OllamaChatView.qml": _inserted_view(snippet)}, view_present=True)
+
+
+# P10 The port owner helper reads /proc only and prints nothing itself.
+
+NETWORK_MODULES = {
+    "socket", "http", "urllib", "subprocess", "ssl", "asyncio", "selectors", "socketserver",
+    "ftplib", "smtplib", "imaplib", "poplib", "xmlrpc", "multiprocessing", "ctypes", "importlib",
+    "webbrowser", "shutil",
+}
+PROCESS_CALLS = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp"}
+
+
+def _port_owner_module_problems(source):
+    tree = ast.parse(source)
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                problems.append(f"line {node.lineno}: no relative imports")
+                continue
+            names = [node.module or ""]
+        else:
+            names = []
+        for module in names:
+            top = module.split(".")[0]
+            if top not in sys.stdlib_module_names or top in NETWORK_MODULES:
+                problems.append(f"line {node.lineno}: import {module} is not allowed")
+        if isinstance(node, ast.Name) and node.id in {"print", "__import__", "eval", "exec", "open"}:
+            problems.append(f"line {node.lineno}: {node.id} is not allowed")
+        if isinstance(node, ast.Attribute) and (
+                node.attr in PROCESS_CALLS or node.attr.startswith(("exec", "spawn"))
+                or node.attr in {"write_text", "write_bytes", "unlink", "mkdir"}):
+            problems.append(f"line {node.lineno}: .{node.attr} is not allowed")
+    return problems
+
+
+def _cli_print_problems(source):
+    tree = ast.parse(source)
+    prints = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print"]
+    writes = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Attribute) and node.attr in {"stdout", "stderr"}]
+    problems = []
+    if len(prints) != 1:
+        problems.append(f"exactly one print() expected, found {len(prints)}")
+    else:
+        call = prints[0]
+        dumps = call.args[0] if len(call.args) == 1 else None
+        if call.keywords or not (isinstance(dumps, ast.Call) and isinstance(dumps.func, ast.Attribute)
+                                 and dumps.func.attr == "dumps" and isinstance(dumps.func.value, ast.Name)
+                                 and dumps.func.value.id == "json"):
+            problems.append("the one print() must be print(json.dumps(payload, ...))")
+    if writes:
+        problems.append(f"no direct sys.stdout/sys.stderr use (lines {[node.lineno for node in writes]})")
+    return problems
+
+
+def test_port_owner_module_is_stdlib_only_and_offline():
+    problems = _port_owner_module_problems(PORT_OWNER_PY.read_text(encoding="utf-8"))
+    assert not problems, f"{PORT_OWNER_PY.relative_to(PLASMOID.parent)}: {problems}"
+
+
+def test_cli_prints_exactly_one_json_object():
+    problems = _cli_print_problems(CLI_PY.read_text(encoding="utf-8"))
+    assert not problems, f"{CLI_PY.relative_to(PLASMOID.parent)}: {problems}"
+
+
+@pytest.mark.parametrize("old,new", [
+    ("import ipaddress\n", "import ipaddress\nimport socket\n"),
+    ("import ipaddress\n", "import ipaddress\nfrom urllib import request\n"),
+    ("import ipaddress\n", "import ipaddress\nimport subprocess\n"),
+    ("import ipaddress\n", "import ipaddress\nimport http.client\n"),
+    ("import ipaddress\n", "import ipaddress\nimport requests\n"),
+    ("import ipaddress\n", "import ipaddress\nfrom . import http\n"),
+    ("    return frozenset(trusted)\n", "    print(trusted)\n    return frozenset(trusted)\n"),
+    ("    return frozenset(trusted)\n", "    os.system(\"ss -ltn\")\n    return frozenset(trusted)\n"),
+])
+def test_proof_port_owner_module_rule_catches(old, new):
+    raw = PORT_OWNER_PY.read_text(encoding="utf-8")
+    assert old in raw
+    assert _port_owner_module_problems(raw.replace(old, new, 1))
+
+
+@pytest.mark.parametrize("old,new", [
+    ("    return 0\n\n\ndef _helper_reply", "    print(payload)\n    return 0\n\n\ndef _helper_reply"),
+    ('print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))', "print(payload)"),
+    ("    return 0\n\n\ndef _helper_reply", "    sys.stdout.write(\"\\n\")\n    return 0\n\n\ndef _helper_reply"),
+])
+def test_proof_cli_print_rule_catches(old, new):
+    raw = CLI_PY.read_text(encoding="utf-8")
+    assert old in raw
+    assert _cli_print_problems(raw.replace(old, new, 1))
+
+
+# P11 Ollama is not a web site: the ChatSites.js `sites` literal stays the seven web ids.
+
+def _site_ids_problems(source):
+    literal = _sites_literal(_strip_comments(source))
+    ids = re.findall(r"""[{,]\s*["']?id["']?\s*:\s*["']([^"']+)["']""", literal)
+    # Labels may name Ollama (the Local site fronts it); ids may not.
+    if ids != EXPECTED_SITE_IDS or "ollama" in ids:
+        return [f"site ids must stay {EXPECTED_SITE_IDS}, got {ids}"]
+    return []
+
+
+def test_chat_sites_literal_has_no_ollama_entry():
+    problems = _site_ids_problems(CHAT_SITES_JS.read_text(encoding="utf-8"))
+    assert not problems, f"{_rel(CHAT_SITES_JS)}: {problems}"
+
+
+def test_proof_ollama_site_in_chat_sites_is_caught():
+    raw = CHAT_SITES_JS.read_text(encoding="utf-8")
+    old = "        id: \"local\",\n"
+    assert old in raw
+    assert _site_ids_problems(raw.replace(old, "        id: \"ollama\",\n", 1))
+    blanked = _strip_comments(raw, blank_strings=True)
+    end = _sites_literal(raw)
+    start = raw.index(end)
+    tail = start + len(end) - 1
+    assert blanked[tail] == "]"
+    added = raw[:tail] + "    { id: \"ollama\", name: \"Ollama\", url: \"http://127.0.0.1:11434\" },\n" + raw[tail:]
+    assert _site_ids_problems(added)
+
+
+# P12 The owner check gates every request. The functions that send, and the
+# one that takes the check's result, are reached only along the gate:
+# ownerSource.onNewData (parsed stdout) → ownerDone → afterOwnerCheck →
+# probeVersion / startChat / unloadModels; checkOwner and checkTimer may end
+# a check (fail closed) through afterOwnerCheck too.
+
+OWNER_GATE_CALLERS = {
+    "runOwnerCheck": {"checkOwner"},
+    "ownerDone": {"ownerSource.onNewData"},
+    "afterOwnerCheck": {"checkOwner", "ownerDone", "checkTimer.onTriggered"},
+    "probeVersion": {"afterOwnerCheck"},
+    "listModels": {"probeVersion"},
+    "fetch": {"probeVersion", "listModels"},
+    "startChat": {"afterOwnerCheck"},
+    "unloadModels": {"afterOwnerCheck"},
+}
+OWNER_GATE_HANDLERS = (
+    ("ownerSource.onNewData", r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?DataSource\s*\{", "ownerSource", "onNewData"),
+    ("checkTimer.onTriggered", r"(?<![\w.])Timer\s*\{", "checkTimer", "onTriggered"),
+)
+OWNER_DONE_CALL = (
+    r'ollamaView\s*\.\s*ownerDone\s*\(\s*source\s*,\s*OllamaChat\s*\.\s*parseOwnerReply\s*\(\s*'
+    r'data\s*\[\s*"exit code"\s*\]\s*,\s*data\s*\[\s*"stdout"\s*\]\s*\)\s*\)'
+)
+RUN_OWNER_CHECK_DEFAULT = (
+    r"(?m)^[ \t]*property\s+var\s+runOwnerCheck\s*:\s*function\s*\(\s*command\s*\)\s*\{\s*"
+    r"ownerSource\s*\.\s*connectSource\s*\(\s*command\s*\)\s*;?\s*\}\s*$"
+)
+
+
+def _brace_end(blanked, start):
+    """The offset just past the block whose ``{`` is at ``start``."""
+    depth = 0
+    for index in range(start, len(blanked)):
+        if blanked[index] == "{":
+            depth += 1
+        elif blanked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(blanked)
+
+
+def _handler_spans(blanked, opener, object_id, handler):
+    """Spans of ``handler`` at the top level of each ``opener`` block with ``id: object_id``."""
+    spans = []
+    for match in re.finditer(opener, blanked):
+        start = blanked.find("{", match.end() - 1)
+        body = blanked[start:_brace_end(blanked, start)]
+        top = _top_level(body)
+        if not re.search(rf"(?:^|[\n;])\s*id\s*:\s*{object_id}\s*(?=;|\n|$)", top):
+            continue
+        for found in re.finditer(rf"\b{handler}\s*:\s*(?:\([^)]*\)\s*=>\s*)?\{{", body):
+            if top[found.start()] != " ":
+                brace = start + found.end() - 1
+                spans.append((brace, _brace_end(blanked, brace)))
+    return spans
+
+
+def _owner_gate_problems(code):
+    blanked = _strip_comments(code, blank_strings=True)
+    problems = []
+    spans = []
+    definitions = {}
+    for match in re.finditer(r"\bfunction\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{", blanked):
+        spans.append((match.start(), _brace_end(blanked, match.end() - 1), match.group(1)))
+        definitions.setdefault(match.group(1), []).append(match.start(1))
+    for label, opener, object_id, handler in OWNER_GATE_HANDLERS:
+        found = _handler_spans(blanked, opener, object_id, handler)
+        if len(found) != 1:
+            problems.append(f"{label}: expected exactly one such handler, found {len(found)}")
+        spans += [(start, end, label) for start, end in found]
+
+    def caller(offset):
+        around = [span for span in spans if span[0] <= offset < span[1]]
+        return min(around, key=lambda span: span[1] - span[0])[2] if around else None
+
+    for name, allowed in OWNER_GATE_CALLERS.items():
+        defined = definitions.get(name, [])
+        if name != "runOwnerCheck" and len(defined) != 1:
+            problems.append(f"`function {name}(` must be defined exactly once, found {len(defined)}")
+        calls = 0
+        for match in re.finditer(rf"(?<![\w$]){name}(?![\w$])", blanked):
+            line = _line_of(code, match.start())
+            if match.start() in defined:
+                continue
+            if name == "runOwnerCheck" and re.search(r"\bproperty\s+var\s+$",
+                                                     blanked[blanked.rfind("\n", 0, match.start()) + 1:match.start()]):
+                continue
+            if not re.match(r"\s*\(", blanked[match.end():]):
+                problems.append(f"line {line}: {name} may only be called directly, not passed around")
+                continue
+            calls += 1
+            where = caller(match.start())
+            if where not in allowed:
+                problems.append(f"line {line}: {name}() called from {where or 'outside any function'}; "
+                                f"only from {sorted(allowed)}")
+        if calls == 0:
+            problems.append(f"{name}() is never called along the gate")
+    names = "|".join(OWNER_GATE_CALLERS)
+    for line in _hits(rf"""["'`]\s*(?:{names})\s*["'`]""", code):
+        problems.append(f"line {line}: a gate function named in a string (indirect call)")
+    for start, end in _handler_spans(blanked, *OWNER_GATE_HANDLERS[0][1:]):
+        if len(re.findall(OWNER_DONE_CALL, code[start:end])) != 1:
+            problems.append("ownerSource.onNewData must call ollamaView.ownerDone(source, "
+                            'OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))')
+    if len(_hits(RUN_OWNER_CHECK_DEFAULT, code)) != 1:
+        problems.append("runOwnerCheck must default to `function (command) { ownerSource.connectSource(command) }`")
+    if len(_hits(r"\bconnectSource\s*\(", blanked)) != 1:
+        problems.append("connectSource( only once, in the runOwnerCheck default")
+    return problems
+
+
+def test_owner_check_gates_every_request():
+    _require_phased(OLLAMA_CHAT_VIEW)
+    problems = _owner_gate_problems(_read_code(OLLAMA_CHAT_VIEW))
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    # A reply that wasn't parsed from the helper's stdout.
+    ('ollamaView.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))',
+     'ollamaView.ownerDone(source, { ok: true, owner: "self" })'),
+    # ownerDone from anywhere else.
+    ("        ollamaView.focusLater()\n    }\n    onSiteEnabledChanged: {",
+     "        ollamaView.focusLater()\n        ollamaView.ownerDone(ollamaView.ownerSourceName, null)\n"
+     "    }\n    onSiteEnabledChanged: {"),
+    # Skipping the check.
+    ('        ollamaView.checkOwner("send")\n', '        ollamaView.afterOwnerCheck("send", "")\n'),
+    ('        ollamaView.checkOwner("send")\n', "        ollamaView.startChat()\n"),
+    ('        ollamaView.checkOwner("load")\n', "        ollamaView.probeVersion()\n"),
+    ('            ollamaView.checkOwner("unload")\n', "            ollamaView.unloadModels(names)\n"),
+    ("            ollamaView.load()\n    }\n\n    // --- requests",
+     "            ollamaView.fetch(\"tags\", function () {})\n    }\n\n    // --- requests"),
+    # A check that times out somewhere else must not reach afterOwnerCheck.
+    ("        id: checkTimer\n", "        id: ownerTimer\n"),
+    # The default seam must run the real helper.
+    ("function (command) { ownerSource.connectSource(command) }",
+     'function (command) { ollamaView.ownerDone(command, { ok: true, owner: "self" }) }'),
+])
+def test_proof_owner_gate_rule_catches(old, new):
+    assert _owner_gate_problems(_mutated(OLLAMA_CHAT_VIEW, old, new))
+
+
+@pytest.mark.parametrize("snippet", [
+    "    function later() { Qt.callLater(ollamaView.startChat) }",
+    "    function later() { ollamaView[\"startChat\"]() }",
+    "    function startChat() {}",
+    "    function sneak() { ollamaView.unloadModels([\"llama3:latest\"]) }",
+    "    Component.onCompleted: ollamaView.probeVersion()",
+    "    function again(c) { ownerSource.connectSource(c) }",
+])
+def test_proof_owner_gate_rule_catches_insertions(snippet):
+    assert _owner_gate_problems(_inserted_view(snippet))

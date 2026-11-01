@@ -67,6 +67,13 @@ TestCase {
         compare(ChatSites.byId("local").default_on, false)
     }
 
+    // The web UI entry is named so it isn't mistaken for the built-in
+    // Ollama chat (OllamaChat.js); its id stays "local".
+    function test_localSiteLabel() {
+        compare(ChatSites.byId("local").name, "Local web UI (Open WebUI)")
+        compare(ChatSites.siteIds().indexOf("ollama"), -1)
+    }
+
     function test_enabledSites() {
         var defaults = ChatSites.defaultSiteIds()
         compare(ids(ChatSites.enabledSites(

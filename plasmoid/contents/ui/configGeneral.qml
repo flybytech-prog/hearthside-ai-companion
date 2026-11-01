@@ -42,6 +42,8 @@ KCM.ScrollViewKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
+    property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
 
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []

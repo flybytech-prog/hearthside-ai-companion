@@ -68,7 +68,7 @@ var sites = [
         // A chat server on this computer. Plain http is allowed only here and
         // only for the exact loopback origin of its address.
         id: "local",
-        name: "Local (Ollama / Open WebUI)",
+        name: "Local web UI (Open WebUI)",
         url: "http://localhost:3000/",
         icon: "provider-local.svg",
         site_hosts: ["localhost", "127.0.0.1", "[::1]"],

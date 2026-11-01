@@ -155,10 +155,13 @@ compare-before-write still catches their concurrent writes.
 ## Chat tab
 
 The Chat tab is not a provider contract: it shows each provider's own website
-and never calls an API or reads the pages. It runs the helper only for Stay
-signed in (see [below](#stay-signed-in-helper)), never with chat data. Sites,
-their home pages and host lists live only in `plasmoid/contents/ui/ChatSites.js`.
-The navigation rules below are the same with Stay signed in Off or Encrypted.
+and never calls an API or reads the pages. The one exception is the built-in
+Ollama chat, which calls the local Ollama API (see
+[below](#built-in-ollama-chat)). It runs the helper only for Stay signed in
+(see [below](#stay-signed-in-helper)) and for the Ollama port check (see
+[below](#port-owner-helper)), never with chat data. Web sites, their home
+pages and host lists live only in `plasmoid/contents/ui/ChatSites.js`. The
+navigation rules below are the same with Stay signed in Off or Encrypted.
 
 | Site | Home page | Site hosts | Sign-in hosts |
 | --- | --- | --- | --- |
@@ -168,7 +171,7 @@ The navigation rules below are the same with Stay signed in Off or Encrypted.
 | Gemini (best effort) | `https://gemini.google.com/app` | gemini.google.com, accounts.google.com, consent.google.com | accounts.google.com |
 | GitHub Copilot | `https://github.com/login?return_to=%2Fcopilot` | github.com | github.com, accounts.google.com, appleid.apple.com |
 | Microsoft Copilot | `https://copilot.microsoft.com/` | copilot.microsoft.com, microsoft.com, bing.com | login.microsoftonline.com, login.live.com, account.live.com, accounts.google.com, appleid.apple.com |
-| Local (Ollama / Open WebUI), off by default | `http://localhost:3000/` | localhost, 127.0.0.1, [::1] | none |
+| Local web UI (Open WebUI), off by default | `http://localhost:3000/` | localhost, 127.0.0.1, [::1] | none |
 
 GitHub Copilot starts at the sign-in page because signed-out visitors to
 `/copilot` are redirected to a landing page; after sign-in GitHub returns to
@@ -237,6 +240,110 @@ loopback address.
 Gemini sign-in may be refused by Google inside embedded browsers. The
 Microsoft Copilot host lists are a best guess; a wrong entry only changes
 whether a link opens inside the widget or in the browser.
+
+### Built-in Ollama chat
+
+"Ollama" (id `ollama`, off by default) is not a web site and is not in
+`ChatSites.js`: `plasmoid/contents/ui/OllamaChat.js` holds its entry and all
+parsing, and `OllamaChatView.qml` makes the requests with QML
+`XMLHttpRequest` (the only file that does). `chatSites` may contain `ollama`,
+and `chatDefaultSite` may be `ollama`; the dropdown lists it after the web
+sites. The web view never gets `ollama` as a site and does not start while
+Ollama is shown.
+
+Address (`chatOllamaUrl`, String, default `http://127.0.0.1:11434`, written
+only by the settings page):
+
+- Exactly `http://<host>:<port>` with an optional trailing `/`, at most 64
+  characters, saved normalized as `http://host:port`. `host` is `127.0.0.1`,
+  `localhost`, or `[::1]` (any case), nothing else: no other `127.x` address,
+  `0.0.0.0`, numeric spellings such as `2130706433` or `0x7f000001`,
+  `*.localhost`, or names that resolve to loopback. `port` is 1 to 65535 and
+  must be given.
+- Refused, with these codes: `too-long`, `whitespace` (also control
+  characters), `userinfo`, `scheme` (anything but `http`), `not-loopback`,
+  `port-missing`, `port-range`, `path` (any path, query or fragment),
+  `malformed`. Empty text means the default. While the field holds invalid
+  text the value saved when the page opened stays saved. A config value that
+  doesn't validate is replaced by the default when used.
+
+Requests, all to the configured address, nothing in the URL but the path:
+
+| Request | When | Body |
+| --- | --- | --- |
+| `GET /api/version` | The Ollama view is shown, after the owner check | none |
+| `GET /api/tags` | After a valid version reply | none |
+| `POST /api/chat` | Send, after its own owner check | `{"model":m,"messages":[{"role":"user"\|"assistant","content":s},…],"stream":true}` |
+| `POST /api/chat` | Clear conversation, once per model used, after an owner check | `{"model":m,"messages":[],"keep_alive":0}` (unloads the model) |
+
+The only header set is `Content-Type: application/json` (POST only); no
+credentials, cookies or `Authorization`, and Qt's XMLHttpRequest sends no
+`Origin` header (Ollama answers 403 to a foreign `Origin`). Nothing is
+requested until Ollama is enabled and shown in the open popup, and there is no
+polling: the list is loaded when the view is shown while it isn't loaded yet
+(also after a failure), on **Retry** or **Reload models**, and when the
+address changes. Each turn sends the whole
+conversation; prompts are at most 32000 characters (Send is disabled above
+that).
+
+Replies:
+
+- `/api/version` must be status 200 with a JSON object whose `version`
+  matches `^\d+\.\d+` (at most 32 characters); anything else is "Something
+  other than Ollama is answering at this address." and nothing more is sent.
+- `/api/tags`: `models[]` in server order, at most 200. A model is kept when
+  its `name` matches `^[A-Za-z0-9._:/+-]{1,200}$`. Dropped and counted as
+  hidden: entries with `remote_host` or `remote_model`, or names ending in
+  `:cloud` or `-cloud` (cloud models forward prompts to ollama.com). Dropped
+  silently: entries whose `capabilities` exists but lacks `completion`
+  (embedding models) and duplicates. `details.parameter_size` and `family`
+  are shown only when they are short plain words. The model choice is
+  runtime only: the previous choice while it is still listed, else the first.
+- `/api/chat` streams NDJSON. Only complete `\n`-terminated lines are read
+  (plus the last line when the reply ends); blank lines are skipped. For each
+  object, `message.content` is appended; `message.thinking` only shows
+  "Thinking…" and its text is discarded; `done: true` ends the reply; an
+  `error` string ends it as a server error. A line that isn't a JSON object
+  ends it as unreadable. Replies are cut at 200000 characters (the request is
+  aborted and the text kept). Unknown fields are ignored.
+- Server error text is shown only as plain text, at most 300 characters,
+  with control characters, bidi controls and `<`, `>`, `&` removed.
+
+Status handling: 0 (connection refused) "Ollama isn't running."; 403
+"Ollama refused the request."; 404 on chat "This model isn't installed any
+more."; anything else non-2xx a generic error plus the server's `error`
+text. No first byte within 300 s (a model can take minutes to load on a CPU)
+or no data for 120 s aborts with "Ollama stopped responding." Stop and Esc
+abort the request; a reply that was already partly shown is kept and marked
+stopped. Late events of any aborted or finished request are ignored.
+
+Owner check (see [below](#port-owner-helper)): `none` is "Ollama isn't
+running.", `other` "Another user's program is using port N. Hearthside won't
+send anything to it.", any failure or a check that takes over 15 s
+"Couldn't check which program is using port N."; only `self` and `system`
+let a request through. Error texts never show the address, only its port.
+
+Redirects: Qt's XMLHttpRequest follows HTTP redirects on its own, including
+to another host or port, and repeats a POST body there; JavaScript never sees
+the 3xx (measured with Qt 6.12.0 for 302 and 307). From readyState 3 on,
+`responseURL` holds the address that actually answered, so every reply is
+checked against the exact `OllamaChat.endpoint()` it was sent to. On the
+first mismatch the request is aborted and nothing from it is read: a
+redirected `/api/version` or `/api/tags` is "Something other than Ollama is
+answering at this address." (no model list, nothing can be sent), a
+redirected `/api/chat` ends as "Ollama reported an error." with no reply text
+and no server error text shown.
+
+Limits: by the time a redirect is seen, Qt has already sent the request to
+the new address, so a trusted listener (one that passed the owner check) that
+answers `/api/version` and `/api/tags` normally but redirects only
+`POST /api/chat` still hands the prompt to wherever it points, possibly
+another computer. That is the same trust as in a listener that proxies the
+request onward itself; the owner check covers only the configured port. An
+unload request (no prompt) is sent the same way and its reply is never read.
+The check also cannot tell programs of your own user apart. While a reply
+streams, it is read at most every 100 ms (Qt decodes the whole body again on
+each read), and once more when it ends.
 
 ## Stay signed in helper
 
@@ -362,3 +469,48 @@ gocryptfs exit codes are mapped as measured with gocryptfs 2.6.1: 12
 for `create`); 11 `absent`; 19 `busy` when a mount is present afterwards,
 else `mount-failed`; anything else `init-failed` (`create`), `mount-failed`
 (mount), or `os-error` (`change-passphrase`).
+
+## Port owner helper
+
+Before the built-in Ollama chat loads the model list or sends a message, the
+plasmoid asks the helper who listens on the Ollama port, so a prompt never
+goes to another user's program that took the port while Ollama was down. The
+command is built in `plasmoid/contents/ui/OllamaChat.js` from integers only:
+
+    env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -m hearthside --port-owner <port>
+
+The env words only keep DataSource names unique (as for the Stay signed in
+helper); the helper ignores them. The command carries no prompt, model name,
+or address, touches no credentials, and makes no network request.
+
+- Reads only `/proc/net/tcp` and `/proc/net/tcp6`; opens no socket and starts
+  no program (`src/hearthside/core/portowner.py`).
+- Counts sockets in state LISTEN (`0A`) on `<port>` whose local address a
+  connection to `127.0.0.1`, `localhost`, or `[::1]` can reach: `127.0.0.1`,
+  `0.0.0.0`, `::1`, `::`, `::ffff:127.0.0.1`, `::ffff:0.0.0.0`. Other bind
+  addresses (for example `127.0.0.2` or a LAN address) and connections in any
+  other state are ignored.
+- Trusted owners are your own uid, root (uid 0), and the system `ollama`
+  account when that user exists (`getpwnam("ollama")`).
+- A missing `/proc/net/tcp6` (kernel without IPv6) counts as no IPv6 sockets.
+  A missing or unreadable `/proc/net/tcp`, an unreadable `tcp6`, or any line
+  that does not parse gives `unreadable`, never `none`.
+
+Reply (one JSON object on stdout, exit 0):
+
+| Reply | Meaning |
+| --- | --- |
+| `{"ok":true,"owner":"none"}` | Nothing listens there |
+| `{"ok":true,"owner":"self"}` | Every listener is yours |
+| `{"ok":true,"owner":"system"}` | Every listener is trusted and at least one is root or `ollama` (the packaged `ollama.service`) |
+| `{"ok":true,"owner":"other"}` | At least one listener belongs to another user |
+| `{"ok":false,"error":"unreadable"}` | The tables could not be read or parsed, or anything unexpected happened |
+
+Replies never contain uids, user names, inodes, or addresses. `<port>` is a
+plain decimal integer from 1 to 65535 (at most 5 digits; no sign, spaces, or
+underscores), and `--port-owner` cannot be combined with any other option;
+otherwise argparse exits 2 with a usage message on stderr and prints nothing on
+stdout. The plasmoid sends only for `self` or `system` and fails closed on
+everything else, including a non-zero exit or any other output (`bad-reply`).
+The check cannot tell your own programs apart, and a listener could change in
+the milliseconds between the check and the request; see `docs/privacy.md`.

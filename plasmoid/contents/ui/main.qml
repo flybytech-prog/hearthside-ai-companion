@@ -10,6 +10,7 @@ import "RefreshGate.js" as RefreshGate
 import "SnapshotLogic.js" as SnapshotLogic
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
+import "OllamaChat.js" as OllamaChat
 
 PlasmoidItem {
     id: root
@@ -37,8 +38,20 @@ PlasmoidItem {
     property string chatSiteId: ""
     property bool chatPinned: false
     property bool chatDialogOpen: false
-    readonly property var chatSites: ChatSites.enabledSites(Plasmoid.configuration.chatSites)
+    // Web sites, then the built-in Ollama chat when it is on.
+    readonly property var chatSites: OllamaChat.menuEntries(
+        ChatSites.enabledSites(Plasmoid.configuration.chatSites),
+        Plasmoid.configuration.chatSites)
     readonly property var chatSiteIds: root.chatSites.map(function (site) { return site.id })
+    // The web chat only knows web sites. It keeps its last one while Ollama
+    // is shown, so its pages stay as they were.
+    readonly property var chatWebSiteIds: root.chatSiteIds.filter(function (id) {
+        return id !== OllamaChat.ENTRY.id
+    })
+    property string chatWebSiteId: ""
+    // Validated loopback address; anything odd → the default.
+    readonly property string chatOllamaAddress:
+        OllamaChat.effectiveAddress(Plasmoid.configuration.chatOllamaUrl)
     // {siteId: url}; only valid addresses survive, anything odd → built-in.
     readonly property var chatCustomUrls:
         ChatSites.parseCustomUrls(Plasmoid.configuration.chatCustomUrls)
@@ -695,6 +708,10 @@ PlasmoidItem {
             root.chatPinned = false
     }
     onChatSiteIdsChanged: root.syncChatSite()
+    onChatSiteIdChanged: {
+        if (root.chatSiteId !== OllamaChat.ENTRY.id)
+            root.chatWebSiteId = root.chatSiteId
+    }
 
     hideOnWindowDeactivate: !root.chatPinned && !root.chatDialogOpen
 

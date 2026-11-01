@@ -46,12 +46,15 @@ panel support **Left** and **Used** display modes.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
   remains on a panel.
 - **Chat** tab, the first tab in the popup (the usage view is second): pick Claude, ChatGPT, Grok,
-  Gemini (best effort), GitHub Copilot, Microsoft Copilot, or Local
-  (Ollama / Open WebUI) from a dropdown and use the site right in the popup.
+  Gemini (best effort), GitHub Copilot, Microsoft Copilot, or Local web UI
+  (Open WebUI) from a dropdown and use the site right in the popup.
   It runs in a private, in-memory browser profile: you sign in on each site
   normally, nothing is saved to disk, and you are signed out when Plasma
   restarts or you choose **Clear chat data**. Choose the sites under
-  **Settings → Chat**; Local is off until you turn it on.
+  **Settings → Chat**; Local web UI is off until you turn it on.
+- **Ollama** (optional, off by default): a built-in chat with the models of
+  the Ollama server on this computer, in the same dropdown. It needs no web
+  browser engine; the conversation stays in memory only.
 - **Stay signed in** (optional, off by default): keep your chat sign-ins
   across Plasma restarts in an encrypted folder protected by a passphrase you
   choose (made with gocryptfs). You unlock it once per Plasma session from the
@@ -64,21 +67,38 @@ panel support **Left** and **Used** display modes.
   `github.com/copilot` once you are signed in (signed-out visitors to
   `/copilot` only get a landing page). Google and Apple sign-in may be
   refused inside the widget; GitHub's own sign-in and two-factor prompts work.
-- **Local (Ollama / Open WebUI)** shows a chat web interface running on this
-  computer, by default `http://localhost:3000/`. Ollama alone has no web
-  interface; run [Open WebUI](https://github.com/open-webui/open-webui) on top
-  of it, for example
+- **Ollama** talks straight to the [Ollama](https://ollama.com) server on this
+  computer and shows its own simple chat: pick a model, type, and the reply
+  streams in. Turn it on under **Settings → Chat**, then choose it in the
+  Chat tab's dropdown. It lists the models you have installed (install one in
+  a terminal with `ollama pull llama3`; **Reload models** picks up new ones);
+  cloud models are hidden because they send your messages to ollama.com.
+  Enter sends, Shift+Enter adds a line, Esc or **Stop** ends a reply, each
+  reply and code block has a Copy button, and **Clear conversation** drops it
+  from memory and asks Ollama to unload the models it used. Replies are shown
+  as plain text, with fenced code blocks in a monospace font; links, images
+  and other formatting are not rendered. Hearthside never starts Ollama: if
+  it isn't running, the Chat tab says so and shows
+  `systemctl start ollama` (or `ollama serve`). The address is
+  `http://127.0.0.1:11434` unless you change it under **Show advanced
+  settings → Ollama address**; only `http://` on this computer (`127.0.0.1`,
+  `localhost`, `[::1]`) with a port is accepted. Before it sends anything,
+  Hearthside checks that the program on that port belongs to you or to the
+  system (the packaged `ollama` service), never to another user.
+- **Local web UI (Open WebUI)** shows a chat web interface running on this
+  computer, by default `http://localhost:3000/`, for example
+  [Open WebUI](https://github.com/open-webui/open-webui) on top of Ollama:
   `docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui ghcr.io/open-webui/open-webui:main`
   (or `open-webui serve`, which listens on port 8080; set that address below).
 - **Custom addresses**: under **Settings → Chat → Show advanced settings**
   each site can open a different address, for example a self-hosted
   instance. Leave a field empty to use the built-in address. Addresses must
-  use `https://`; only Local may also use plain `http://`, and only for this
+  use `https://`; only Local web UI may also use plain `http://`, and only for this
   computer (`localhost`, `127.0.0.1`, `[::1]`). A custom address adds only its
   exact host to the site, never its subdomains. Don't put passwords or tokens
   in an address; it is stored in your Plasma configuration file. The widget
   never opens a page, window or embedded frame on this computer for any site
-  but Local, and for Local allows plain `http://` only at the configured
+  but Local web UI, and for it allows plain `http://` only at the configured
   address; background requests a page makes itself (fetch, WebSocket, images)
   aren't filtered, as in any browser. See [docs/privacy.md](docs/privacy.md).
 - **A chat server on another machine** (for example Open WebUI on your home
@@ -86,7 +106,7 @@ panel support **Left** and **Used** display modes.
   trusts (self-signed certificates are refused), or forward it to this
   computer with an SSH tunnel such as `ssh -N -L 3000:localhost:3000 server`
   (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
-  and keep Local at `http://localhost:3000/`.
+  and keep Local web UI at `http://localhost:3000/`.
 
 Fresh installs track all providers, show Claude Code and Codex in the panel,
 select Weekly for each, display usage left, and refresh every five minutes.
@@ -179,6 +199,9 @@ usage, reset/retry times, and no credential data.
   install. Each open
   chat site uses roughly 200–500 MB of memory until Plasma restarts or you
   clear chat data.
+- For the Ollama chat only: [Ollama](https://ollama.com) installed and
+  running on this computer, with at least one model pulled. Qt WebEngine is
+  not needed for it.
 - For Stay signed in only: gocryptfs 2 (`sudo pacman -S --needed gocryptfs`
   on Arch), plus kdialog and fuse3, which are usually already installed with
   KDE. The Chat tab shows the install command if something is missing.
@@ -199,8 +222,11 @@ scripts the pages. Page console messages
 are discarded. Custom chat addresses are stored in plain text in your Plasma
 configuration file. With Stay signed in, sign-ins and site data are saved
 only in your encrypted folder; while it is unlocked, programs running as you
-can read it. The [Chat tab privacy notes](docs/privacy.md#chat-tab) also
-list what it does not protect against.
+can read it. The Ollama chat keeps the conversation in memory only and sends
+it over loopback to the Ollama server on this computer, which can read it
+(see [Ollama](docs/privacy.md#ollama-built-in-chat)). The
+[Chat tab privacy notes](docs/privacy.md#chat-tab) also list what it does not
+protect against.
 
 See [Privacy](docs/privacy.md) and
 [Provider contracts](docs/provider-contracts.md).
