@@ -69,6 +69,58 @@ for executable in python3 kpackagetool6; do
     fi
 done
 
+# Required: Python 3.11+ with pip (the helper is stdlib only, pip installs it).
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    echo "Hearthside needs Python 3.11 or newer." >&2
+    exit 1
+fi
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    echo "Required Python module not found: pip (Arch: sudo pacman -S --needed python-pip)" >&2
+    exit 1
+fi
+
+# QML modules the widget imports. Plasma, Kirigami and Qt Quick are required;
+# the Chat tab needs Qt WebEngine (without it the widget shows a hint instead).
+qml_directory=$(qtpaths6 --query QT_INSTALL_QML 2>/dev/null || true)
+[ -n "$qml_directory" ] || qml_directory=/usr/lib/qt6/qml
+missing_required=""
+for entry in \
+    "QtQuick/Layouts:qt6-declarative" \
+    "QtQuick/Dialogs:qt6-declarative" \
+    "QtCore:qt6-declarative" \
+    "org/kde/kirigami:kirigami" \
+    "org/kde/kcmutils:kcmutils" \
+    "org/kde/plasma/plasma5support:plasma5support" \
+    "org/kde/plasma/components:libplasma" \
+    "org/kde/plasma/extras:libplasma" \
+    "org/kde/plasma/plasmoid:libplasma"; do
+    if [ ! -d "$qml_directory/${entry%%:*}" ]; then
+        missing_required="$missing_required ${entry##*:}"
+    fi
+done
+if [ -n "$missing_required" ]; then
+    packages=$(printf '%s\n' $missing_required | sort -u | tr '\n' ' ')
+    echo "Required QML modules are missing. Arch: sudo pacman -S --needed $packages" >&2
+    exit 1
+fi
+
+# Optional features: report what is missing, install anyway.
+optional_notes=""
+if [ ! -d "$qml_directory/QtWebEngine" ]; then
+    optional_notes="${optional_notes}  Chat tab (web sites): sudo pacman -S --needed qt6-webengine\n"
+fi
+missing_vault=""
+for executable in gocryptfs kdialog fusermount3; do
+    command -v "$executable" >/dev/null 2>&1 || missing_vault="$missing_vault $executable"
+done
+if [ -n "$missing_vault" ]; then
+    packages=$(printf '%s\n' $missing_vault | sed 's/^fusermount3$/fuse3/' | sort -u | tr '\n' ' ')
+    optional_notes="${optional_notes}  Stay signed in (encrypted folder): sudo pacman -S --needed $packages\n"
+fi
+if ! command -v ollama >/dev/null 2>&1; then
+    optional_notes="${optional_notes}  Ollama chat: install Ollama (sudo pacman -S --needed ollama) and pull a model\n"
+fi
+
 build_directory="$project_directory/build"
 if [ -d "$build_directory" ]; then
     rm -rf -- "$build_directory"
@@ -130,6 +182,10 @@ fi
 
 version=$(python3 -m hearthside --version)
 echo "Hearthside ${version} installed."
+if [ -n "$optional_notes" ]; then
+    echo "Optional features not available yet:"
+    printf '%b' "$optional_notes"
+fi
 if [ "$migrated" = true ]; then
     echo "Remove the old AI Usage widget from your panel if it is still there, then add Hearthside via Add Widgets…"
 fi
