@@ -114,6 +114,11 @@ else
     kpackagetool6 -t Plasma/Applet -i "$project_directory/plasmoid"
 fi
 
+# Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthside").
+icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+mkdir -p -- "$icon_directory"
+cp -f -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
+
 if [ "$restart_plasma" = true ]; then
     if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
         systemctl --user restart plasma-plasmashell.service
