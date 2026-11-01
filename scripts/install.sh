@@ -79,46 +79,88 @@ if ! python3 -m pip --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Offer to install missing Arch packages, only when run in a terminal. pacman
+# itself asks for the password through sudo; nothing is installed without a "y".
+can_offer_install() {
+    [ -t 0 ] && [ -t 1 ] && command -v pacman >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1
+}
+offer_install() {
+    question=$1
+    shift
+    can_offer_install || return 1
+    printf '%s [y/N] ' "$question"
+    read -r answer || return 1
+    case "$answer" in
+        y|Y|yes|Yes|YES) sudo pacman -S --needed -- "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
 # QML modules the widget imports. Plasma, Kirigami and Qt Quick are required;
 # the Chat tab needs Qt WebEngine (without it the widget shows a hint instead).
 qml_directory=$(qtpaths6 --query QT_INSTALL_QML 2>/dev/null || true)
 [ -n "$qml_directory" ] || qml_directory=/usr/lib/qt6/qml
-missing_required=""
-for entry in \
-    "QtQuick/Layouts:qt6-declarative" \
-    "QtQuick/Dialogs:qt6-declarative" \
-    "QtCore:qt6-declarative" \
-    "org/kde/kirigami:kirigami" \
-    "org/kde/kcmutils:kcmutils" \
-    "org/kde/plasma/plasma5support:plasma5support" \
-    "org/kde/plasma/components:libplasma" \
-    "org/kde/plasma/extras:libplasma" \
-    "org/kde/plasma/plasmoid:libplasma"; do
-    if [ ! -d "$qml_directory/${entry%%:*}" ]; then
-        missing_required="$missing_required ${entry##*:}"
+missing_required_packages() {
+    missing=""
+    for entry in \
+        "QtQuick/Layouts:qt6-declarative" \
+        "QtQuick/Dialogs:qt6-declarative" \
+        "QtCore:qt6-declarative" \
+        "org/kde/kirigami:kirigami" \
+        "org/kde/kcmutils:kcmutils" \
+        "org/kde/plasma/plasma5support:plasma5support" \
+        "org/kde/plasma/components:libplasma" \
+        "org/kde/plasma/extras:libplasma" \
+        "org/kde/plasma/plasmoid:libplasma"; do
+        if [ ! -d "$qml_directory/${entry%%:*}" ]; then
+            missing="$missing ${entry##*:}"
+        fi
+    done
+    [ -n "$missing" ] && printf '%s\n' $missing | sort -u | tr '\n' ' '
+    return 0
+}
+packages=$(missing_required_packages)
+if [ -n "$packages" ]; then
+    echo "Hearthside needs these packages: $packages" >&2
+    # shellcheck disable=SC2086
+    if offer_install "Install them now with sudo pacman?" $packages; then
+        packages=$(missing_required_packages)
     fi
-done
-if [ -n "$missing_required" ]; then
-    packages=$(printf '%s\n' $missing_required | sort -u | tr '\n' ' ')
-    echo "Required QML modules are missing. Arch: sudo pacman -S --needed $packages" >&2
-    exit 1
+    if [ -n "$packages" ]; then
+        echo "Required QML modules are missing. Arch: sudo pacman -S --needed $packages" >&2
+        exit 1
+    fi
 fi
 
-# Optional features: report what is missing, install anyway.
+# Optional features: offer each one, install Hearthside either way.
+if [ ! -d "$qml_directory/QtWebEngine" ]; then
+    echo "The Chat tab (AI chat web sites) needs Qt WebEngine (package qt6-webengine)."
+    offer_install "Install qt6-webengine now with sudo pacman?" qt6-webengine || true
+fi
+missing_vault_packages() {
+    missing=""
+    command -v gocryptfs >/dev/null 2>&1 || missing="$missing gocryptfs"
+    command -v kdialog >/dev/null 2>&1 || missing="$missing kdialog"
+    command -v fusermount3 >/dev/null 2>&1 || missing="$missing fuse3"
+    printf '%s' "${missing# }"
+}
+packages=$(missing_vault_packages)
+if [ -n "$packages" ]; then
+    echo "\"Stay signed in\" (encrypted chat sign-ins) needs: $packages"
+    # shellcheck disable=SC2086
+    offer_install "Install them now with sudo pacman?" $packages || true
+fi
+
 optional_notes=""
 if [ ! -d "$qml_directory/QtWebEngine" ]; then
     optional_notes="${optional_notes}  Chat tab (web sites): sudo pacman -S --needed qt6-webengine\n"
 fi
-missing_vault=""
-for executable in gocryptfs kdialog fusermount3; do
-    command -v "$executable" >/dev/null 2>&1 || missing_vault="$missing_vault $executable"
-done
-if [ -n "$missing_vault" ]; then
-    packages=$(printf '%s\n' $missing_vault | sed 's/^fusermount3$/fuse3/' | sort -u | tr '\n' ' ')
+packages=$(missing_vault_packages)
+if [ -n "$packages" ]; then
     optional_notes="${optional_notes}  Stay signed in (encrypted folder): sudo pacman -S --needed $packages\n"
 fi
 if ! command -v ollama >/dev/null 2>&1; then
-    optional_notes="${optional_notes}  Ollama chat: install Ollama (sudo pacman -S --needed ollama) and pull a model\n"
+    optional_notes="${optional_notes}  Ollama chat: install Ollama (Arch: ollama, or ollama-cuda / ollama-rocm for GPUs), run sudo systemctl enable --now ollama, then ollama pull llama3\n"
 fi
 
 build_directory="$project_directory/build"
