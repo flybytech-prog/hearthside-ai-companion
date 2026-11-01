@@ -17,8 +17,6 @@ KCM.SimpleKCM {
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
     property string cfg_trackedProvidersDefault:
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
-    property string cfg_panelProviders: "[\"claude\",\"codex\"]"
-    property string cfg_panelProvidersDefault: "[\"claude\",\"codex\"]"
     property string cfg_providerMetrics:
         "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
     property string cfg_providerMetricsDefault:
@@ -45,6 +43,10 @@ KCM.SimpleKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property int cfg_chatAutoLockMinutes: 0
+    property int cfg_chatAutoLockMinutesDefault: 0
+    property bool cfg_chatKeepOpen: false
+    property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
     property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
 
@@ -321,6 +323,13 @@ KCM.SimpleKCM {
                 ))
                 onActivated: page.cfg_chatDefaultSite = currentValue
             }
+            QQC2.CheckBox {
+                objectName: "keepOpenChoice"
+                Kirigami.FormData.label: i18n("Popup:")
+                text: i18n("Keep the popup open when clicking elsewhere")
+                checked: page.cfg_chatKeepOpen
+                onToggled: page.cfg_chatKeepOpen = checked
+            }
         }
 
         QQC2.Label {
@@ -369,6 +378,40 @@ KCM.SimpleKCM {
             opacity: 0.72
             text: i18n(
                 "Sign-ins and site data, such as cached conversations, are kept in an encrypted folder made with gocryptfs. You enter its passphrase once per Plasma session in the Chat tab; until then you can use a private session. If you forget the passphrase, the saved data is lost: there is no recovery. While the folder is unlocked, programs running as you can read it. Clear chat data deletes the saved sign-ins and locks the folder."
+            )
+        }
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+
+            QQC2.ComboBox {
+                id: autoLockChoice
+                objectName: "autoLockChoice"
+                Kirigami.FormData.label: i18n("Lock automatically:")
+                // Only saved sign-ins can be locked.
+                enabled: page.signInMode === "encrypted"
+                textRole: "text"
+                valueRole: "value"
+                model: [
+                    {value: 0, text: i18n("Never")},
+                    {value: 1, text: i18n("1 minute")},
+                    {value: 5, text: i18n("5 minutes")},
+                    {value: 15, text: i18n("15 minutes")},
+                    {value: 30, text: i18n("30 minutes")},
+                    {value: 60, text: i18n("1 hour")},
+                    {value: 480, text: i18n("8 hours")},
+                    {value: 1440, text: i18n("24 hours")}
+                ]
+                currentIndex: Math.max(0, ChatStorage.AUTO_LOCK_MINUTES.indexOf(
+                    ChatStorage.normalizeAutoLock(page.cfg_chatAutoLockMinutes)))
+                onActivated: page.cfg_chatAutoLockMinutes = currentValue
+            }
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            opacity: 0.72
+            text: i18n(
+                "Locks the encrypted folder once Chat hasn't been shown for this long, as if you pressed Lock. New sign-ins are saved within about 30 seconds, and at once when the folder is locked; if Plasma is stopped abruptly before that, you may have to sign in again."
             )
         }
         ColumnLayout {

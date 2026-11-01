@@ -57,6 +57,10 @@ CHAT_CONFIG_KEYS = {
     "chatCustomUrls": ("String", "{}"),
     "chatSignInStorage": ("String", "memory"),
     "chatProfileGeneration": ("Int", "0"),
+    # Lock automatically, in minutes; 0 = never.
+    "chatAutoLockMinutes": ("Int", "0"),
+    # Keep the popup open when clicking elsewhere.
+    "chatKeepOpen": ("Bool", "false"),
 }
 # The Ollama address (plan T4). Expected once main.xml has it or the Ollama
 # view exists, so it can neither be half-added nor forgotten.
@@ -64,7 +68,7 @@ OLLAMA_CONFIG_KEYS = {"chatOllamaUrl": ("String", "http://127.0.0.1:11434")}
 # Keys that existed before the Chat tab. Anything else in main.xml would be a
 # new persisted value; the Chat tab may only persist the keys above.
 PRE_CHAT_CONFIG_KEYS = {
-    "trackedProviders", "panelProviders", "providerMetrics", "usageMode",
+    "trackedProviders", "providerMetrics", "usageMode",
     "refreshInterval", "configSchemaVersion", "initialSetupComplete",
 }
 
@@ -1143,7 +1147,8 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
             assert len(declared) == 1 and declared[0][0] == qml_type, (
                 f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
             )
-    literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0"}
+    literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0", "chatAutoLockMinutes": "0",
+                "chatKeepOpen": "false"}
     if "chatOllamaUrl" in expected:
         literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
     for key, literal in literals.items():
@@ -1156,6 +1161,93 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
         line for line in _hits(r"\bcfg_chatProfileGeneration\s*=(?!=)", code)
     ]
     assert len(gen_writes) <= 1, f"{_rel(page)}: cfg_chatProfileGeneration may only be synced from the config"
+
+
+# --- locking: the profile is closed before the folder is unmounted ---------------
+
+
+def _lock_wait_problems(code):
+    """Every queued lock follows a wait step; the wait lasts at least 1 s.
+
+    Destroying the saved profile writes its newest cookies and site storage
+    (cookie flush spike, 2026-11-01); the helper must not unmount before.
+    """
+    problems = []
+    for match in re.finditer(r"\bchatEnqueue\s*\(\s*\[([^\]]*)\]", code):
+        steps = re.findall(r'"([\w-]+)"', match.group(1))
+        for index, step in enumerate(steps):
+            if step in ("lock", "leave-lock") and not any(
+                    earlier in ("wait", "leave-wait") for earlier in steps[:index]):
+                problems.append(f"{_line_of(code, match.start())}: {step} without an earlier wait")
+    timers = [body for _, body in _blocks(code, r"\bTimer\s*\{") if re.search(r"\bid\s*:\s*chatWaitTimer\b", body)]
+    intervals = re.findall(r"\binterval\s*:\s*(\d+)\s*$", timers[0], re.M) if len(timers) == 1 else []
+    if len(intervals) != 1 or int(intervals[0]) < 1000:
+        problems.append("chatWaitTimer must exist once with a literal interval of at least 1000 ms")
+    return problems
+
+
+def test_every_lock_waits_for_the_profile_to_close():
+    problems = _lock_wait_problems(_read_code(MAIN_QML))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('root.chatAutoLocking = true\n            root.chatVaultHold = true\n            root.chatVaultError = ""\n'
+     '            root.chatPreparedGeneration = -1\n            root.chatEnqueue(["wait", "lock"])',
+     'root.chatAutoLocking = true\n            root.chatVaultHold = true\n            root.chatVaultError = ""\n'
+     '            root.chatPreparedGeneration = -1\n            root.chatEnqueue(["lock"])'),
+    ('["leave-wait", "leave-remove", "leave-lock"', '["leave-remove", "leave-lock"'),
+    ("        id: chatWaitTimer\n        interval: 1000", "        id: chatWaitTimer\n        interval: 200"),
+])
+def test_proof_lock_wait_rule_catches(old, new):
+    assert _lock_wait_problems(_mutated(MAIN_QML, old, new))
+
+
+# --- popup: closes on click elsewhere unless Keep open is set ---------------------
+
+HIDE_ON_DEACTIVATE = (
+    r"(?m)^\s*hideOnWindowDeactivate\s*:\s*!\s*Plasmoid\.configuration\.chatKeepOpen\s*&&\s*!\s*root\.chatDialogOpen\s*$"
+)
+
+
+def _popup_problems(sources):
+    problems = []
+    main = sources.get("main.qml", "")
+    if len(_hits(HIDE_ON_DEACTIVATE, main)) != 1 or len(_hits(r"\bhideOnWindowDeactivate\s*:", main)) != 1:
+        problems.append("main.qml: hideOnWindowDeactivate must be `!Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen`")
+    for name, code in sources.items():
+        # The transient pin and the panel provider list are gone for good.
+        for word in ("chatPinned", "window-pin", "panelProviders", "compactGroups"):
+            if _hits(rf"\b{re.escape(word)}\b", code):
+                problems.append(f"{name}: {word}")
+    return problems
+
+
+def _ui_sources():
+    return {path.name: _read_code(path) for path in _code_files()}
+
+
+def test_popup_stays_open_only_by_the_setting_or_a_dialog():
+    problems = _popup_problems(_ui_sources())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("hideOnWindowDeactivate: !Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen",
+     "hideOnWindowDeactivate: !root.chatPinned && !root.chatDialogOpen"),
+    ("hideOnWindowDeactivate: !Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen",
+     "hideOnWindowDeactivate: false"),
+])
+def test_proof_popup_rule_catches(old, new):
+    sources = _ui_sources()
+    sources["main.qml"] = _mutated(MAIN_QML, old, new)
+    assert _popup_problems(sources)
+
+
+def test_proof_panel_provider_list_is_caught():
+    sources = _ui_sources()
+    sources["main.qml"] = sources["main.qml"] + "\nreadonly property var panelProviders: []\n"
+    assert _popup_problems(sources)
 
 
 def test_chat_sites_js_declares_the_expected_sites_in_order():

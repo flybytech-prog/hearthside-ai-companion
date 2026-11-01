@@ -14,8 +14,6 @@ KCM.ScrollViewKCM {
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
     property string cfg_trackedProvidersDefault:
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
-    property string cfg_panelProviders: "[\"claude\",\"codex\"]"
-    property string cfg_panelProvidersDefault: "[\"claude\",\"codex\"]"
     property string cfg_providerMetrics:
         "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
     property string cfg_providerMetricsDefault:
@@ -42,6 +40,10 @@ KCM.ScrollViewKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property int cfg_chatAutoLockMinutes: 0
+    property int cfg_chatAutoLockMinutesDefault: 0
+    property bool cfg_chatKeepOpen: false
+    property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
     property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
 
@@ -84,10 +86,6 @@ KCM.ScrollViewKCM {
         return parseList(page.cfg_trackedProviders, Catalog.providerIds())
     }
 
-    function panel() {
-        return parseList(page.cfg_panelProviders, ["claude", "codex"])
-    }
-
     function contains(list, value) {
         return list.indexOf(value) >= 0
     }
@@ -106,35 +104,11 @@ KCM.ScrollViewKCM {
         page.cfg_trackedProviders = JSON.stringify(
             setMembership(tracked(), providerId, enabled)
         )
-        if (!enabled) {
-            page.cfg_panelProviders = JSON.stringify(
-                setMembership(panel(), providerId, false)
-            )
-        }
     }
 
     function selectedMetrics(providerId) {
         var result = parseMetrics()[providerId]
         return Array.isArray(result) ? result : []
-    }
-
-    function setPanel(providerId, enabled) {
-        var trackedProviders = tracked()
-        var panelProviders = panel()
-        var metrics = parseMetrics()
-        if (enabled) {
-            trackedProviders = setMembership(trackedProviders, providerId, true)
-            panelProviders = setMembership(panelProviders, providerId, true)
-            if (!Array.isArray(metrics[providerId]) || metrics[providerId].length === 0) {
-                var descriptor = Catalog.byId(providerId)
-                metrics[providerId] = [descriptor.default_metric]
-            }
-        } else {
-            panelProviders = setMembership(panelProviders, providerId, false)
-        }
-        page.cfg_trackedProviders = JSON.stringify(trackedProviders)
-        page.cfg_panelProviders = JSON.stringify(panelProviders)
-        page.cfg_providerMetrics = JSON.stringify(metrics)
     }
 
     function setMetric(providerId, metricId, enabled) {
@@ -147,13 +121,6 @@ KCM.ScrollViewKCM {
         if (enabled) {
             page.cfg_trackedProviders = JSON.stringify(
                 setMembership(tracked(), providerId, true)
-            )
-            page.cfg_panelProviders = JSON.stringify(
-                setMembership(panel(), providerId, true)
-            )
-        } else if (selected.length === 0) {
-            page.cfg_panelProviders = JSON.stringify(
-                setMembership(panel(), providerId, false)
             )
         }
     }
@@ -324,6 +291,12 @@ KCM.ScrollViewKCM {
                     onClicked: page.refreshProviders()
                 }
             }
+            QQC2.Label {
+                Layout.fillWidth: true
+                text: i18n("Tracked providers appear in the Usage tab. The checked metrics are shown when you hover over the panel icon.")
+                wrapMode: Text.WordWrap
+                opacity: 0.72
+            }
         }
 
         delegate: Rectangle {
@@ -388,17 +361,6 @@ KCM.ScrollViewKCM {
                             providerRow.modelData.provider_id
                         )
                         onClicked: page.setTracked(
-                            providerRow.modelData.provider_id,
-                            checked
-                        )
-                    }
-                    QQC2.Switch {
-                        text: i18n("Panel")
-                        checked: page.contains(
-                            page.panel(),
-                            providerRow.modelData.provider_id
-                        )
-                        onClicked: page.setPanel(
                             providerRow.modelData.provider_id,
                             checked
                         )

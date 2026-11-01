@@ -34,11 +34,15 @@ ColumnLayout {
     property var missingTools: []
     // Message code shown in memory mode too (e.g. the old folder is in use).
     property string storageNotice: ""
+    // Lock automatically (minutes, 0 = never) and whether main.qml is running
+    // a helper step or waiting for a passphrase.
+    property int autoLockMinutes: 0
+    property bool storageBusy: false
     // Overridable by tests only.
     property url webSource: Qt.resolvedUrl("ChatWebView.qml")
 
-    // create, unlock, private, lock, retry, held-open, clear-saved, open,
-    // recheck, dismiss-notice, saved-session
+    // create, unlock, private, lock, auto-lock, retry, held-open, clear-saved,
+    // open, recheck, dismiss-notice, saved-session
     signal storageRequest(string action)
 
     property bool started: false
@@ -65,6 +69,14 @@ ColumnLayout {
     readonly property bool canGoBack: !!chatView.web && chatView.web.canGoBack
     readonly property bool canOpenExternally: !!chatView.web && chatView.web.canOpenExternally
     readonly property bool localSite: chatView.siteId === "local"
+    // Idle = the saved web chat is open but not shown (popup closed, Usage or
+    // Ollama shown). idleSince is the wall-clock time it was last shown, so
+    // time asleep counts too; 0 while not idle.
+    readonly property bool autoLockArmed: chatView.persistentActive && !chatView.current
+        && ChatStorage.autoLockInterval(chatView.autoLockMinutes) > 0
+    property double idleSince: 0
+    // The idle time ran out while main.qml was busy: lock once it is done.
+    property bool autoLockDue: false
 
     spacing: 0
 
@@ -123,6 +135,36 @@ ColumnLayout {
             chatView.web.closeOverlay()
         }
         chatView.storageRequest("lock")
+    }
+
+    function restartIdle() {
+        chatView.autoLockDue = false
+        chatView.idleSince = chatView.autoLockArmed ? Date.now() : 0
+    }
+
+    function checkIdle() {
+        var step = ChatStorage.autoLockStep({
+            armed: chatView.autoLockArmed,
+            minutes: chatView.autoLockMinutes,
+            idleSince: chatView.idleSince,
+            now: Date.now(),
+            busy: chatView.storageBusy || chatView.dialogOpen
+        })
+        switch (step) {
+        case "restart":
+            chatView.restartIdle()
+            break
+        case "wait":
+            chatView.autoLockDue = true
+            break
+        case "lock":
+            // Same as the Lock button; main.qml retries a busy folder later.
+            chatView.autoLockDue = false
+            chatView.web.cancelDownload()
+            chatView.web.closeOverlay()
+            chatView.storageRequest("auto-lock")
+            break
+        }
     }
 
     // Creates, keeps or destroys the web view so it always matches
@@ -204,6 +246,8 @@ ColumnLayout {
             return i18n("Couldn't delete the saved sign-ins. The encrypted folder was locked anyway.")
         case "cleared":
             return i18n("Chat data cleared. The encrypted folder is locked.")
+        case "auto-locked":
+            return i18n("Locked automatically.")
         case "damaged":
             return i18n("The encrypted folder is damaged and can't be opened.")
         case "delete-failed":
@@ -230,6 +274,12 @@ ColumnLayout {
     }
     onWebWantedChanged: chatView.syncLoader()
     onProfileKeyChanged: chatView.syncLoader()
+    onAutoLockArmedChanged: chatView.restartIdle()
+    onAutoLockMinutesChanged: chatView.restartIdle()
+    onStorageBusyChanged: {
+        if (!chatView.storageBusy && chatView.autoLockDue)
+            Qt.callLater(chatView.checkIdle)
+    }
 
     // The popup may be created with Chat already shown: start right away.
     Component.onCompleted: {
@@ -238,6 +288,14 @@ ColumnLayout {
             chatView.focusLater()
         }
         chatView.syncLoader()
+    }
+
+    Timer {
+        id: idleTimer
+        interval: Math.max(1000, ChatStorage.autoLockCheckInterval(chatView.autoLockMinutes))
+        repeat: true
+        running: chatView.autoLockArmed
+        onTriggered: chatView.checkIdle()
     }
 
     Connections {
@@ -488,7 +546,7 @@ ColumnLayout {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
                 visible: storageCard.view !== "busy" && storageCard.message !== ""
-                color: chatView.card.message === "cleared"
+                color: chatView.card.message === "cleared" || chatView.card.message === "auto-locked"
                     ? Kirigami.Theme.textColor : Kirigami.Theme.negativeTextColor
                 text: storageCard.message
             }

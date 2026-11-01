@@ -110,6 +110,14 @@ PlasmaExtras.Representation {
                     checked: root.usageMode === "used"
                     onClicked: root.setUsageMode("used")
                 }
+                // Hides the popup; chat pages and conversations stay as they are.
+                PlasmaComponents.ToolButton {
+                    icon.name: "window-minimize"
+                    display: QQC2.AbstractButton.IconOnly
+                    onClicked: root.expanded = false
+                    QQC2.ToolTip.text: i18n("Minimize")
+                    QQC2.ToolTip.visible: hovered
+                }
             }
 
             RowLayout {
@@ -234,12 +242,10 @@ PlasmaExtras.Representation {
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {
-                    icon.name: "window-pin"
+                    icon.name: "window-minimize"
                     display: QQC2.AbstractButton.IconOnly
-                    checkable: true
-                    checked: root.chatPinned
-                    onToggled: root.chatPinned = checked
-                    QQC2.ToolTip.text: i18n("Keep open")
+                    onClicked: root.expanded = false
+                    QQC2.ToolTip.text: i18n("Minimize")
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {
@@ -293,6 +299,8 @@ PlasmaExtras.Representation {
                 card: root.chatCard
                 missingTools: root.chatVaultMissing
                 storageNotice: root.chatStorageNotice
+                autoLockMinutes: root.chatAutoLockMinutes
+                storageBusy: root.chatStorageBusy || root.chatDialogOpen
                 onStorageRequest: (action) => root.chatStorageRequest(action)
             }
 

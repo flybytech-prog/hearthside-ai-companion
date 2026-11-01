@@ -452,4 +452,58 @@ TestCase {
         compare(ChatStorage.afterDestroy({ok: false, error: "busy"}).state, "")
         compare(card({state: "damaged", error: "busy"}).view, "damaged")
     }
+
+    function test_normalizeAutoLock() {
+        var allowed = [0, 1, 5, 15, 30, 60, 480, 1440]
+        compare(ChatStorage.AUTO_LOCK_MINUTES, allowed)
+        for (var index = 0; index < allowed.length; index++)
+            compare(ChatStorage.normalizeAutoLock(allowed[index]), allowed[index])
+        // Anything else is "never": harmless, the folder just isn't locked by itself.
+        var odd = [2, 10, 59, 61, 1441, -1, 1.5, "5", NaN, Infinity, null, undefined, true, {}, [5]]
+        for (index = 0; index < odd.length; index++)
+            compare(ChatStorage.normalizeAutoLock(odd[index]), 0, String(odd[index]))
+    }
+
+    function test_autoLockIntervals() {
+        compare(ChatStorage.autoLockInterval(0), 0)
+        compare(ChatStorage.autoLockInterval(1), 60000)
+        compare(ChatStorage.autoLockInterval(60), 3600000)
+        compare(ChatStorage.autoLockInterval(1440), 86400000)
+        compare(ChatStorage.autoLockInterval(7), 0)
+        compare(ChatStorage.autoLockCheckInterval(0), 0)
+        compare(ChatStorage.autoLockCheckInterval(1), 15000)
+        compare(ChatStorage.autoLockCheckInterval(5), 30000)
+        compare(ChatStorage.autoLockCheckInterval(1440), 30000)
+        compare(ChatStorage.autoLockCheckInterval("x"), 0)
+    }
+
+    function test_autoLockStep() {
+        var minute = 60000
+        function step(extra) {
+            return ChatStorage.autoLockStep(Object.assign(
+                {armed: true, minutes: 5, idleSince: 1000, now: 1000 + 5 * minute, busy: false}, extra))
+        }
+        compare(step({}), "lock")
+        compare(step({now: 1000 + 5 * minute - 1}), "")
+        compare(step({now: 1000 + 8 * 60 * minute}), "lock")
+        compare(step({busy: true}), "wait")
+        // Never while Chat is shown, never for "Never", never without a start time.
+        compare(step({armed: false}), "")
+        compare(step({armed: 1}), "")
+        compare(step({minutes: 0}), "")
+        compare(step({minutes: 7}), "")
+        compare(step({idleSince: 0}), "")
+        compare(step({idleSince: "1000"}), "")
+        compare(step({now: NaN}), "")
+        compare(step({now: undefined}), "")
+        // The clock went back: start counting again.
+        compare(step({now: 999}), "restart")
+        compare(ChatStorage.autoLockStep(undefined), "")
+    }
+
+    function test_autoLockedMessage() {
+        compare(ChatStorage.messageFor("auto-locked"), "auto-locked")
+        compare(card({state: "locked", error: "auto-locked", hold: true}),
+                {view: "unlock", message: "auto-locked"})
+    }
 }

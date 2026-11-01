@@ -207,6 +207,7 @@ function messageFor(error) {
     case "prepare-failed":
     case "remove-failed":
     case "cleared":
+    case "auto-locked":
     case "damaged":
         return error
     case "not-verified":
@@ -252,6 +253,48 @@ function cardFor(input) {
     default:
         return {view: "retry", message: message !== "" ? message : "failed"}
     }
+}
+
+// --- Lock automatically ---------------------------------------------------
+//
+// Minutes the saved web chat may stay out of sight before the folder is
+// locked; 0 = never. Anything else (odd or hand-edited values) is "never".
+
+var AUTO_LOCK_MINUTES = [0, 1, 5, 15, 30, 60, 480, 1440]
+
+function normalizeAutoLock(value) {
+    return AUTO_LOCK_MINUTES.indexOf(validInt(value)) >= 0 ? value : 0
+}
+
+function autoLockInterval(minutes) {
+    return normalizeAutoLock(minutes) * 60000
+}
+
+// How often the idle time is checked: a quarter of the interval, at most
+// every 30 s, so a sleeping computer is caught soon after it wakes.
+function autoLockCheckInterval(minutes) {
+    var interval = autoLockInterval(minutes)
+    return interval === 0 ? 0 : Math.min(30000, Math.max(1000, Math.floor(interval / 4)))
+}
+
+// context: {armed, minutes, idleSince, now, busy}. idleSince and now are
+// wall-clock milliseconds, so time asleep counts as idle.
+// "" = nothing to do, "lock" = lock now, "wait" = due but a helper step or
+// dialog is running (check again once it ends), "restart" = the clock went
+// back: count from now.
+function autoLockStep(context) {
+    var value = context || {}
+    var interval = autoLockInterval(value.minutes)
+    var since = value.idleSince
+    var now = value.now
+    if (value.armed !== true || interval === 0 || typeof since !== "number" || !(since > 0)
+            || typeof now !== "number" || !isFinite(now))
+        return ""
+    if (now < since)
+        return "restart"
+    if (now - since < interval)
+        return ""
+    return value.busy === true ? "wait" : "lock"
 }
 
 // --- Helper step queue (main.qml runs one step at a time) ----------------

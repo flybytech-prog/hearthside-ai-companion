@@ -36,7 +36,6 @@ PlasmoidItem {
     // Chat tab runtime state; never written to the configuration.
     property string popupTab: "chat"
     property string chatSiteId: ""
-    property bool chatPinned: false
     property bool chatDialogOpen: false
     // Web sites, then the built-in Ollama chat when it is on.
     readonly property var chatSites: OllamaChat.menuEntries(
@@ -91,6 +90,13 @@ PlasmoidItem {
     // Seeded in Component.onCompleted; see ChatStorage.firstRun.
     property int chatOpRun: 0
     readonly property bool chatVaultPrompting: root.chatOp === "create" || root.chatOp === "unlock"
+    // A helper step runs or waits to run; Lock automatically holds off.
+    readonly property bool chatStorageBusy: root.chatOp !== "" || root.chatQueue.length > 0
+    // Lock automatically after this many idle minutes; 0 = never.
+    readonly property int chatAutoLockMinutes:
+        ChatStorage.normalizeAutoLock(Plasmoid.configuration.chatAutoLockMinutes)
+    // The running lock was started by Lock automatically.
+    property bool chatAutoLocking: false
     readonly property bool chatStorageReady: root.chatStorageMode === "encrypted"
         && root.chatVaultState === "unlocked"
         && !root.chatVaultHold
@@ -117,15 +123,11 @@ PlasmoidItem {
         Plasmoid.configuration.trackedProviders,
         Catalog.providerIds()
     )
-    readonly property var panelProviders: configuredList(
-        Plasmoid.configuration.panelProviders,
-        ["claude", "codex"]
-    )
     readonly property var configuredMetrics: configuredObject(
         Plasmoid.configuration.providerMetrics,
         {"claude": ["weekly"], "codex": ["weekly"]}
     )
-    readonly property var compactGroups: compactProviderGroups()
+    readonly property var tooltipGroups: tooltipProviderGroups()
     readonly property color normalUsageColor: {
         var background = Kirigami.Theme.backgroundColor
         var luminance = background.r * 0.2126
@@ -171,10 +173,6 @@ PlasmoidItem {
         return configured.filter(function (metricId) {
             return Catalog.metric(providerId, metricId) !== null
         })
-    }
-
-    function provider(providerId) {
-        return root.providerStates[providerId] || null
     }
 
     // Thin wrappers: reading root.usageMode here keeps callers' bindings live.
@@ -225,20 +223,25 @@ PlasmoidItem {
             : "speedometer"
     }
 
-    function compactProviderGroups() {
+    // The providers the Usage tab shows, each with its selected metrics
+    // (else its default metric).
+    function tooltipProviderGroups() {
         var result = []
-        var installed = root.snapshot.installed_provider_ids || []
-        for (var index = 0; index < root.panelProviders.length; index++) {
-            var providerId = root.panelProviders[index]
-            if (installed.indexOf(providerId) < 0)
+        var shown = root.snapshot.providers || []
+        for (var index = 0; index < shown.length; index++) {
+            var providerId = shown[index].provider_id
+            var descriptor = Catalog.byId(providerId)
+            if (!descriptor)
                 continue
             var metrics = root.selectedMetrics(providerId)
+            if (metrics.length === 0 && Catalog.metric(providerId, descriptor.default_metric) !== null)
+                metrics = [descriptor.default_metric]
             if (metrics.length === 0)
                 continue
             result.push({
                 provider_id: providerId,
-                descriptor: Catalog.byId(providerId),
-                provider: root.provider(providerId),
+                descriptor: descriptor,
+                provider: shown[index],
                 metrics: metrics
             })
         }
@@ -391,7 +394,11 @@ PlasmoidItem {
         if (step === "")
             return
         if (step === "wait" || step === "leave-wait") {
-            // Gives Qt WebEngine a moment to close the profile's files.
+            // Destroying the profile writes its cookies and site storage and
+            // closes its files at once (measured: done within 0.2 s, also
+            // with 150 cookies and 1 MB of site storage); the second is
+            // margin. The helper's unmount fails as busy, never loses data,
+            // while any file is still open.
             root.chatOp = step
             chatWaitTimer.start()
             return
@@ -461,9 +468,19 @@ PlasmoidItem {
         case "create":
         case "unlock":
         case "lock":
-            if (!reply.ok)
+            var automatic = step === "lock" && root.chatAutoLocking
+            if (step === "lock")
+                root.chatAutoLocking = false
+            if (automatic && !reply.ok && reply.error === "busy") {
+                // Never forced: keep the saved sign-ins open; ChatView tries
+                // again after the next idle period.
+                root.chatVaultHold = false
+                root.chatVaultError = ""
+            } else if (!reply.ok)
                 root.chatVaultError = step === "lock" && reply.error === "busy"
                     ? "lock-busy" : reply.error || "failed"
+            else if (automatic)
+                root.chatVaultError = "auto-locked"
             root.chatEnqueue(["status"])
             break
         case "destroy":
@@ -533,6 +550,18 @@ PlasmoidItem {
         case "lock":
             // Destroy the profile first (ready turns false), then unmount.
             // A busy folder is reported, never forced.
+            root.chatAutoLocking = false
+            root.chatVaultHold = true
+            root.chatVaultError = ""
+            root.chatPreparedGeneration = -1
+            root.chatEnqueue(["wait", "lock"])
+            break
+        case "auto-lock":
+            // Same as Lock; ChatView asks only while the saved web chat is
+            // hidden and no helper step runs.
+            if (!root.chatStorageReady || root.chatStorageBusy)
+                break
+            root.chatAutoLocking = true
             root.chatVaultHold = true
             root.chatVaultError = ""
             root.chatPreparedGeneration = -1
@@ -572,6 +601,7 @@ PlasmoidItem {
             return
         root.chatVaultHold = false
         root.chatPrivateSession = false
+        root.chatAutoLocking = false
         root.chatVaultError = ""
         root.chatPreparedGeneration = -1
         chatRecheckTimer.stop()
@@ -704,8 +734,7 @@ PlasmoidItem {
             root.refresh()
             if (root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
                 root.chatEnqueue(["status"])
-        } else
-            root.chatPinned = false
+        }
     }
     onChatSiteIdsChanged: root.syncChatSite()
     onChatSiteIdChanged: {
@@ -713,7 +742,8 @@ PlasmoidItem {
             root.chatWebSiteId = root.chatSiteId
     }
 
-    hideOnWindowDeactivate: !root.chatPinned && !root.chatDialogOpen
+    // Settings → Chat → Keep the popup open; also while a dialog is open.
+    hideOnWindowDeactivate: !Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen
 
     Plasmoid.icon: Qt.resolvedUrl("../images/hearthside.svg")
     Plasmoid.busy: !root.hasData && root.lastError === ""
@@ -723,11 +753,11 @@ PlasmoidItem {
             return i18n("Error: %1", root.lastError)
         if (!root.hasData)
             return i18n("Loading…")
-        if (root.compactGroups.length === 0)
-            return i18n("No panel metrics selected.")
+        if (root.tooltipGroups.length === 0)
+            return i18n("No usage to show.")
         var lines = []
-        for (var groupIndex = 0; groupIndex < root.compactGroups.length; groupIndex++) {
-            var group = root.compactGroups[groupIndex]
+        for (var groupIndex = 0; groupIndex < root.tooltipGroups.length; groupIndex++) {
+            var group = root.tooltipGroups[groupIndex]
             var values = []
             for (var metricIndex = 0; metricIndex < group.metrics.length; metricIndex++) {
                 var metricId = group.metrics[metricIndex]

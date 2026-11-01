@@ -11,7 +11,7 @@
 
 <br>
 
-<img src="docs/preview.png" alt="Hearthside popup opening upward from its compact quota item in the bottom KDE Plasma panel" width="1100">
+<img src="docs/preview.png" alt="Hearthside popup opening upward from its icon in the bottom KDE Plasma panel" width="1100">
 
 </div>
 
@@ -28,9 +28,9 @@ providers supported by the macOS AI Usage menubar app:
 - Devin
 - Grok
 
-It shows each available quota, plan, reset time, extra usage or credits. The
-panel can show any combination of providers and metrics. Both the popup and
-panel support **Left** and **Used** display modes.
+It shows each available quota, plan, reset time, extra usage or credits in
+its popup, with **Left** and **Used** display modes. The panel shows only the
+Hearthside icon; hover over it for a short usage summary.
 
 ## Features
 
@@ -52,6 +52,10 @@ panel support **Left** and **Used** display modes.
   normally, nothing is saved to disk, and you are signed out when Plasma
   restarts or you choose **Clear chat data**. Choose the sites under
   **Settings → Chat**; Local web UI is off until you turn it on.
+- The popup closes when you click elsewhere, unless you turn on **Keep the
+  popup open when clicking elsewhere** under **Settings → Chat**. The
+  **Minimize** button in the Chat toolbar and on the Usage tab hides it either
+  way; chat pages, sign-ins and the Ollama conversation stay as they were.
 - **Ollama** (optional, off by default): a built-in chat with the models of
   the Ollama server on this computer, in the same dropdown. It needs no web
   browser engine; the conversation stays in memory only.
@@ -59,7 +63,11 @@ panel support **Left** and **Used** display modes.
   across Plasma restarts in an encrypted folder protected by a passphrase you
   choose (made with gocryptfs). You unlock it once per Plasma session from the
   Chat tab, or use a private session instead. If you forget the passphrase,
-  the saved sign-ins are lost; there is no recovery.
+  the saved sign-ins are lost; there is no recovery. **Lock automatically**
+  can lock the folder after 1 minute to 24 hours of not using Chat (Never by
+  default). A new sign-in is saved within about 30 seconds, and at once when
+  you lock: lock or wait half a minute after signing in before restarting
+  Plasma or logging out.
 
 ### Chat sites
 
@@ -108,13 +116,14 @@ panel support **Left** and **Used** display modes.
   (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
   and keep Local web UI at `http://localhost:3000/`.
 
-Fresh installs track all providers, show Claude Code and Codex in the panel,
-select Weekly for each, display usage left, and refresh every five minutes.
+Fresh installs track all providers, display usage left, and refresh every
+five minutes.
 
 ## Configure every provider
 
-Track only the tools you use, choose which providers appear in the Plasma
-panel, and select one or more metrics per provider.
+Track only the tools you use, and choose which metrics of each provider the
+panel icon's tooltip shows (its default metric, such as Weekly, when none is
+checked).
 
 <img src="docs/settings.png" alt="Hearthside settings on KDE Plasma showing controls for Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, Devin, and Grok" width="1100">
 

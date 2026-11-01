@@ -240,4 +240,125 @@ TestCase {
         view.card = {view: "damaged", message: "busy"}
         compare(card.message, "The encrypted folder is busy, perhaps used by another Hearthside widget. Try again in a moment.")
     }
+
+    // --- Lock automatically ---------------------------------------------
+
+    // A saved web chat, built while shown (a hidden view never starts) and
+    // then hidden when `current: false` is asked for.
+    function makeSaved(properties) {
+        var extra = Object.assign({}, properties || {})
+        var shown = extra.current !== false
+        delete extra.current
+        var view = make(Object.assign({
+            current: true,
+            storageMode: "encrypted",
+            storageReady: true,
+            storagePath: "/r/hearthside/vault/web/applet-1-g0",
+            profileName: "applet-1-g0",
+            autoLockMinutes: 1
+        }, extra))
+        tryVerify(function () { return view.persistentActive })
+        view.current = shown
+        return view
+    }
+
+    function autoLocks() {
+        return testCase.requests.filter(function (action) { return action === "auto-lock" }).length
+    }
+
+    function test_autoLockNeverWhileChatIsShown() {
+        var view = makeSaved()
+        verify(!view.autoLockArmed)
+        compare(view.idleSince, 0)
+        view.idleSince = Date.now() - 3600000
+        view.checkIdle()
+        compare(autoLocks(), 0)
+    }
+
+    function test_autoLockAfterTheIdleTime() {
+        var view = makeSaved()
+        var before = Date.now()
+        view.current = false
+        verify(view.autoLockArmed)
+        verify(view.idleSince >= before && view.idleSince <= Date.now())
+        view.checkIdle()
+        compare(autoLocks(), 0)
+        // One minute later (wall clock, so time asleep counts too).
+        view.idleSince = Date.now() - 60000
+        view.checkIdle()
+        compare(autoLocks(), 1)
+        compare(testCase.requests.indexOf("lock"), -1)
+    }
+
+    function test_showingChatRestartsTheIdleTime() {
+        var view = makeSaved({current: false})
+        view.idleSince = Date.now() - 59000
+        view.current = true
+        compare(view.idleSince, 0)
+        view.current = false
+        verify(Date.now() - view.idleSince < 1000)
+        view.checkIdle()
+        compare(autoLocks(), 0)
+    }
+
+    function test_autoLockWaitsForHelperSteps() {
+        var view = makeSaved({current: false, storageBusy: true})
+        view.idleSince = Date.now() - 60000
+        view.checkIdle()
+        compare(autoLocks(), 0)
+        verify(view.autoLockDue)
+        // A dialog of the page holds it off as well.
+        view.web.dialogOpen = true
+        view.storageBusy = false
+        wait(50)
+        compare(autoLocks(), 0)
+        view.web.dialogOpen = false
+        view.checkIdle()
+        compare(autoLocks(), 1)
+        verify(!view.autoLockDue)
+    }
+
+    function test_autoLockFiresOnceHelperIsDone() {
+        var view = makeSaved({current: false, storageBusy: true})
+        view.idleSince = Date.now() - 60000
+        view.checkIdle()
+        view.storageBusy = false
+        tryVerify(function () { return autoLocks() === 1 })
+    }
+
+    function test_autoLockOffForNeverAndPrivateSessions() {
+        var never = makeSaved({current: false, autoLockMinutes: 0})
+        verify(!never.autoLockArmed)
+        never.idleSince = Date.now() - 86400000
+        never.checkIdle()
+        var odd = makeSaved({current: false, autoLockMinutes: 7})
+        verify(!odd.autoLockArmed)
+        var memory = make({current: true, autoLockMinutes: 1})
+        tryVerify(function () { return memory.web !== null })
+        memory.current = false
+        verify(!memory.autoLockArmed)
+        memory.idleSince = Date.now() - 86400000
+        memory.checkIdle()
+        compare(autoLocks(), 0)
+    }
+
+    function test_changingTheSettingRestartsTheIdleTime() {
+        var view = makeSaved({current: false})
+        view.idleSince = Date.now() - 60000
+        view.autoLockMinutes = 5
+        verify(Date.now() - view.idleSince < 1000)
+        view.checkIdle()
+        compare(autoLocks(), 0)
+    }
+
+    function test_lockedAutomaticallyCard() {
+        var view = make({
+            current: true,
+            storageMode: "encrypted",
+            card: {view: "unlock", message: "auto-locked"}
+        })
+        var card = findChild(view, "storageCard")
+        verify(card.visible)
+        compare(card.message, "Locked automatically.")
+    }
 }

@@ -134,10 +134,30 @@ Your passphrase:
   Chat → Show advanced settings, and work only while the folder is locked.
 
 The folder stays unlocked until you press the lock button (**Lock saved
-sign-ins**) in the Chat tab, choose **Clear chat data**, turn Stay signed in
-Off, Plasma restarts, you log out, or the computer restarts. Lock closes the chat pages first, then
+sign-ins**) in the Chat tab, it is locked automatically (below), you choose
+**Clear chat data**, turn Stay signed in Off, Plasma restarts, you log out, or
+the computer restarts. Lock closes the chat pages first, then
 locks the folder; if another Hearthside widget is still using it, the folder
 is not locked and the Chat tab says so. It is never forced.
+
+**Lock automatically** (Settings → Chat, under Stay signed in; only with
+Encrypted) locks the folder after Never (the default), 1, 5, 15 or 30 minutes,
+1, 8 or 24 hours of not using Chat. Not using means the Chat tab with a chat
+site hasn't been shown: the popup is closed, or Usage or Ollama is shown.
+Every time Chat is shown again the time starts over, and it never locks while
+Chat is shown. It counts clock time, so time the computer was asleep counts
+too. It works like the lock button, but it waits while a passphrase window or
+another folder step is running, and if another Hearthside widget is using the
+folder it quietly keeps it open and tries again after the next idle period.
+Afterwards the Chat tab says "Locked automatically".
+
+When your sign-ins reach the folder: the web engine writes new cookies to disk
+about 30 seconds after a site sets them (site storage after about 5 seconds),
+and everything at once when the chat pages close: on Lock, Lock automatically,
+Clear chat data, or when Plasma quits normally. If Plasma is stopped abruptly
+(a crash, or killed) within those seconds after you signed in, that newest
+sign-in is lost and you sign in again. To be sure, lock the folder or wait half
+a minute after signing in before restarting Plasma or logging out.
 
 **Clear chat data** in Encrypted mode signs you out of all chat sites,
 deletes this widget's saved sign-ins inside the folder, and locks the folder.
