@@ -51,6 +51,12 @@ Item {
     property var pendingDownload: null
     property string pendingDownloadName: ""
 
+    // The profile's own user agent (QtWebEngine token stripped) and client
+    // hints, captured once; restored whenever no page is on Google sign-in.
+    property string baseUserAgent: ""
+    property bool baseClientHintsEnabled: true
+    property var baseBrands: ({})
+
     function goBack() {
         if (chatWeb.activeView)
             chatWeb.activeView.goBack()
@@ -87,6 +93,61 @@ Item {
         var view = chatWeb.overlayView
         chatWeb.overlayView = null
         view.destroy()
+        Qt.callLater(chatWeb.syncUserAgent)
+    }
+
+    // Addresses of every page and the sign-in window; view's own address is
+    // replaced by pendingUrl (the one it is about to load).
+    function viewList() {
+        var views = []
+        for (var index = 0; index < pages.count; index++) {
+            if (pages.itemAt(index))
+                views.push(pages.itemAt(index))
+        }
+        if (chatWeb.overlayView)
+            views.push(chatWeb.overlayView)
+        return views
+    }
+
+    function viewUrls(view, pendingUrl) {
+        var views = chatWeb.viewList()
+        var urls = []
+        for (var index = 0; index < views.length; index++) {
+            if (views[index] !== view)
+                urls.push(views[index].url.toString())
+        }
+        if (view)
+            urls.push(pendingUrl)
+        return urls
+    }
+
+    function wantedUserAgent(view, pendingUrl) {
+        return ChatSites.userAgentFor(chatWeb.viewUrls(view, pendingUrl), chatWeb.baseUserAgent)
+    }
+
+    // The user agent is profile-wide and only a plain property, but it must
+    // never be set from inside a navigation request (that aborts Qt
+    // WebEngine); callers defer this. On Google sign-in, client hints are
+    // emptied too so they don't name Chromium behind the Firefox agent.
+    function applyUserAgent(userAgent) {
+        if (chatWeb.baseUserAgent === "" || chatProfile.httpUserAgent === userAgent)
+            return
+        var firefox = userAgent === ChatSites.GOOGLE_SIGNIN_UA
+        chatProfile.clientHints.isAllClientHintsEnabled = firefox ? false : chatWeb.baseClientHintsEnabled
+        chatProfile.clientHints.fullVersionList = firefox ? ({}) : chatWeb.baseBrands
+        chatProfile.httpUserAgent = userAgent
+    }
+
+    // Settles the user agent from the loaded addresses, but only while no
+    // page is loading: a load in flight is handled by its own request and
+    // ends with another sync.
+    function syncUserAgent() {
+        var views = chatWeb.viewList()
+        for (var index = 0; index < views.length; index++) {
+            if (views[index].loading)
+                return
+        }
+        chatWeb.applyUserAgent(chatWeb.wantedUserAgent(null, ""))
     }
 
     function openOverlay(request, siteId) {
@@ -220,7 +281,10 @@ Item {
     }
 
     Component.onCompleted: {
-        chatProfile.httpUserAgent = ChatSites.userAgent(chatProfile.httpUserAgent)
+        chatWeb.baseUserAgent = ChatSites.userAgent(chatProfile.httpUserAgent)
+        chatWeb.baseClientHintsEnabled = chatProfile.clientHints.isAllClientHintsEnabled
+        chatWeb.baseBrands = chatProfile.clientHints.fullVersionList
+        chatProfile.httpUserAgent = chatWeb.baseUserAgent
         chatWeb.syncViews()
     }
 
@@ -279,6 +343,8 @@ Item {
             property string homeUrl: ""
             property bool failed: false
             property bool crashed: false
+            // Address re-requested once after a user agent switch.
+            property string userAgentRetry: ""
 
             anchors.fill: parent
             visible: page.isOverlay || page.site === chatWeb.siteId
@@ -341,8 +407,11 @@ Item {
                     siteId: page.site,
                     customUrls: chatWeb.customUrls
                 })
-                if (verdict === "allow")
+                if (verdict === "allow") {
+                    if (request.isMainFrame)
+                        page.checkUserAgent(request)
                     return
+                }
                 request.reject()
                 if (verdict === "external")
                     Qt.openUrlExternally(request.url)
@@ -366,6 +435,30 @@ Item {
                     Qt.openUrlExternally(url)
             }
 
+            // A main-frame load that needs the other user agent is stopped
+            // and asked again once the switch is done, so its very first
+            // request already carries the right one. A form post can't be
+            // replayed: it goes out as is and the switch follows at the end
+            // of the load.
+            function checkUserAgent(request) {
+                var url = request.url.toString()
+                var retried = page.userAgentRetry === url
+                page.userAgentRetry = ""
+                if (retried || chatWeb.wantedUserAgent(page, url) === chatProfile.httpUserAgent)
+                    return
+                if (request.navigationType === WebEngineNavigationRequest.FormSubmittedNavigation)
+                    return
+                request.reject()
+                page.userAgentRetry = url
+                Qt.callLater(function () {
+                    // Closed meanwhile (sign-in window, disabled site).
+                    if (chatWeb.viewList().indexOf(page) < 0)
+                        return
+                    chatWeb.applyUserAgent(chatWeb.wantedUserAgent(page, url))
+                    page.url = url
+                })
+            }
+
             onWindowCloseRequested: {
                 if (page.isOverlay)
                     chatWeb.closeOverlay()
@@ -378,6 +471,8 @@ Item {
                 else if (loadingInfo.status === WebEngineLoadingInfo.LoadFailedStatus
                         && loadingInfo.errorCode !== -3)
                     page.failed = true
+                if (loadingInfo.status !== WebEngineLoadingInfo.LoadStartedStatus)
+                    Qt.callLater(chatWeb.syncUserAgent)
             }
 
             onRenderProcessTerminated: (terminationStatus, exitCode) => {

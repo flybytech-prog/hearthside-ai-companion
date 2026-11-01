@@ -922,6 +922,99 @@ def test_proof_logging_is_caught():
     assert _log_offenders({"main.qml": code})
 
 
+# --- user agent: Firefox only on Google sign-in, never set inside a request ---------
+#
+# Setting the profile's user agent from inside a navigation request aborts Qt
+# WebEngine (experiment 2026-11-01), so it is written only by applyUserAgent,
+# which navigation handling may call only through Qt.callLater, plus the one
+# initial assignment when the item is created.
+
+USER_AGENT_WRITE = r"\b(?:httpUserAgent|clientHints\s*\.\s*\w+)\s*=(?!=)"
+
+
+def _block_spans(code, opener):
+    spans = []
+    for start, body in _blocks(code, opener):
+        offset = code.index(body, start)
+        spans.append((offset, offset + len(body)))
+    return spans
+
+
+def _without_deferred(body):
+    """``body`` with the contents of every ``Qt.callLater(function ...)`` blanked."""
+    blanked = body
+    for start, inner in _blocks(body, r"\bQt\.callLater\s*\(\s*function\s*\([^)]*\)\s*\{"):
+        offset = body.index(inner, start)
+        blanked = blanked[:offset] + " " * len(inner) + blanked[offset + len(inner):]
+    return blanked
+
+
+def _user_agent_problems(code):
+    problems = []
+    allowed = _block_spans(code, r"\bfunction\s+applyUserAgent\s*\([^)]*\)\s*\{")
+    if len(allowed) != 1:
+        return [f"exactly one applyUserAgent function expected, found {len(allowed)}"]
+    # The one initial assignment, when the item is created.
+    initial = [
+        match.start(1) for match in re.finditer(
+            r"(?m)^\s*chatProfile\.(httpUserAgent)\s*=\s*chatWeb\.baseUserAgent\s*$", code)
+    ]
+    for match in re.finditer(USER_AGENT_WRITE, code):
+        inside = any(lo <= match.start() < hi for lo, hi in allowed)
+        if not inside and match.start() not in initial:
+            problems.append(f"user agent or client hints written outside applyUserAgent (line {_line_of(code, match.start())})")
+    if len(initial) != 1:
+        problems.append(f"exactly one initial `chatProfile.httpUserAgent = chatWeb.baseUserAgent` expected, found {len(initial)}")
+    synchronous = [
+        body for opener in (r"\bfunction\s+checkUserAgent\s*\([^)]*\)\s*\{",)
+        for _, body in _blocks(code, opener)
+    ] + [body for _, body in _handler_bodies(code, "onNavigationRequested")]
+    if not synchronous:
+        problems.append("navigation handling (onNavigationRequested / checkUserAgent) not found")
+    for body in synchronous:
+        rest = _without_deferred(body)
+        if re.search(r"\bapplyUserAgent\s*\(|" + USER_AGENT_WRITE, rest):
+            problems.append("navigation handling may switch the user agent only through Qt.callLater")
+    return problems
+
+
+def test_user_agent_is_switched_only_outside_navigation_requests():
+    problems = _user_agent_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+USER_AGENT_MUTATIONS = {
+    "sync switch in request": (
+        "                request.reject()\n                page.userAgentRetry = url\n",
+        "                chatWeb.applyUserAgent(ChatSites.GOOGLE_SIGNIN_UA)\n"
+        "                request.reject()\n                page.userAgentRetry = url\n",
+    ),
+    "direct write elsewhere": (
+        "    function syncUserAgent() {\n",
+        "    function syncUserAgent() {\n        chatProfile.httpUserAgent = \"x\"\n",
+    ),
+    "hints written elsewhere": (
+        "    function syncUserAgent() {\n",
+        "    function syncUserAgent() {\n        chatProfile.clientHints.isAllClientHintsEnabled = true\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(USER_AGENT_MUTATIONS))
+def test_proof_user_agent_rule_catches(name):
+    assert _user_agent_problems(_mutated(CHAT_WEB_VIEW, *USER_AGENT_MUTATIONS[name]))
+
+
+def test_firefox_user_agent_is_declared_only_in_chat_sites_js():
+    offenders = [
+        f"{_rel(path)}:{line}"
+        for path in _code_files() if path != CHAT_SITES_JS
+        for line in _hits(r"Firefox/|Gecko/\d", _read_code(path))
+    ]
+    assert not offenders, f"the Google sign-in user agent belongs in ChatSites.js only: {offenders}"
+    assert len(_hits(r"Gecko/\d+ Firefox/", _read_code(CHAT_SITES_JS))) == 1
+
+
 # --- persisted configuration ------------------------------------------------------
 
 

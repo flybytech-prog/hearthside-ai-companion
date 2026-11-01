@@ -619,6 +619,64 @@ TestCase {
         compare(ChatSites.userAgent(undefined), "")
     }
 
+    function test_isGoogleSignInHost() {
+        verify(ChatSites.isGoogleSignInHost("https://accounts.google.com/"))
+        verify(ChatSites.isGoogleSignInHost("https://accounts.google.com"))
+        verify(ChatSites.isGoogleSignInHost(
+            "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fclaude.ai"))
+        verify(ChatSites.isGoogleSignInHost("HTTPS://Accounts.Google.COM/signin"))
+        verify(ChatSites.isGoogleSignInHost("https://accounts.google.com:443/o/oauth2/auth"))
+        var rejected = [
+            "http://accounts.google.com/",
+            "wss://accounts.google.com/",
+            "https:accounts.google.com/",
+            "https://accounts.google.com:8443/",
+            "https://accounts.google.com./",
+            "https://accounts.google.com.evil.example/",
+            "https://evilaccounts.google.com/",
+            "https://evil-accounts.google.com/",
+            "https://x.accounts.google.com/",
+            "https://google.com/",
+            "https://gemini.google.com/app",
+            "https://accounts.google.co/",
+            "https://accounts.google.com@evil.example/",
+            "https://user@accounts.google.com/",
+            "https://evil.example/?u=https://accounts.google.com/",
+            "https://evil.example/#https://accounts.google.com",
+            "https://evil.example\\@accounts.google.com/",
+            "https://accounts%2egoogle.com/",
+            " https://accounts.google.com/",
+            "about:blank",
+            "",
+            undefined,
+            null
+        ]
+        for (var index = 0; index < rejected.length; index++)
+            verify(!ChatSites.isGoogleSignInHost(rejected[index]), String(rejected[index]))
+    }
+
+    function test_userAgentFor() {
+        var ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            + "QtWebEngine/6.11.3 Chrome/134.0.6998.208 Safari/537.36"
+        var stripped = ChatSites.userAgent(ua)
+        var firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+        compare(ChatSites.GOOGLE_SIGNIN_UA, firefox)
+        compare(ChatSites.userAgentFor("https://accounts.google.com/signin", ua), firefox)
+        compare(ChatSites.userAgentFor("https://claude.ai/new", ua), stripped)
+        compare(ChatSites.userAgentFor("https://gemini.google.com/app", ua), stripped)
+        compare(ChatSites.userAgentFor("https://accounts.google.com.evil.example/", ua), stripped)
+        compare(ChatSites.userAgentFor("http://accounts.google.com/", ua), stripped)
+        compare(ChatSites.userAgentFor("", ua), stripped)
+        compare(ChatSites.userAgentFor(undefined, ua), stripped)
+        // Lists: any page on the sign-in host wins, since the profile is shared.
+        compare(ChatSites.userAgentFor(["https://claude.ai/new", "https://accounts.google.com/"], ua),
+                firefox)
+        compare(ChatSites.userAgentFor(["https://claude.ai/new", "about:blank"], ua), stripped)
+        compare(ChatSites.userAgentFor([], ua), stripped)
+        // Already stripped stays the same.
+        compare(ChatSites.userAgentFor("https://claude.ai/", stripped), stripped)
+    }
+
     function test_popupSize() {
         var gu = 18
         compare(ChatSites.popupSize("usage", gu, 1920, 1080), {width: 23 * gu, height: 28 * gu})

@@ -49,6 +49,13 @@ GitHub Copilot, or Microsoft Copilot), or a chat server on your own computer
 (Local, for example Open WebUI on top of Ollama), in Qt WebEngine inside the
 Plasma process. You sign in on each site as you would in a browser.
 
+Google's sign-in page (accounts.google.com) refuses embedded browsers
+("This browser or app may not be secure"). While a chat page or sign-in
+window is on that page, Hearthside identifies itself as Firefox on Linux and
+sends no browser brand in its client hints, so Google allows the sign-in;
+everywhere else it reports its real Chromium-based engine. Google may change
+this check at any time, and sign-in with Google could stop working.
+
 **Stay signed in** (Settings → Chat) has two choices:
 
 - **Off** (the default): everything you enter (accounts, passwords, prompts,

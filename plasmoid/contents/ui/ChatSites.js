@@ -484,6 +484,33 @@ function userAgent(defaultUa) {
     return defaultUa.replace(/\s*QtWebEngine\/\S+/g, "")
 }
 
+// Google's sign-in refuses embedded Chromium ("This browser or app may not be
+// secure") but accepts a desktop Firefox, as qutebrowser found. Used only on
+// that one page; everywhere else the real engine is announced.
+var GOOGLE_SIGNIN_HOST = "accounts.google.com"
+var GOOGLE_SIGNIN_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+
+// https on exactly accounts.google.com (default port); no subdomains, look-
+// alike suffixes, user info or other schemes.
+function isGoogleSignInHost(url) {
+    var parsed = parseUrl(url)
+    return parsed !== null && parsed.scheme === "https"
+        && parsed.host === GOOGLE_SIGNIN_HOST
+        && (parsed.port === "" || parsed.port === "443")
+}
+
+// The user agent for a profile whose pages are at url (one address or a
+// list): Firefox while any of them is Google's sign-in, otherwise
+// userAgent(defaultUa).
+function userAgentFor(url, defaultUa) {
+    var urls = Array.isArray(url) ? url : [url]
+    for (var index = 0; index < urls.length; index++) {
+        if (isGoogleSignInHost(urls[index]))
+            return GOOGLE_SIGNIN_UA
+    }
+    return userAgent(defaultUa)
+}
+
 // Preferred popup size in pixels for the given tab.
 function popupSize(tab, gu, availW, availH) {
     var unit = Number(gu) > 0 ? Number(gu) : 18
