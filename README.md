@@ -44,7 +44,10 @@ Hearthside icon; hover over it for a short usage summary.
 - Uses Linux Secret Service through `secret-tool` without placing secrets in
   process arguments.
 - Uses Plasma's standard configuration dialog and starts with Plasma while it
-  remains on a panel.
+  remains on a panel. Settings has three pages of its own: **General** (popup,
+  usage display and privacy), **AI Usage** (providers) and **Chat** (sites and
+  addresses); Plasma adds **Keyboard Shortcuts** and **About**. Longer
+  explanations sit behind the small **?** buttons.
 - **Chat** tab, the first tab in the popup (the usage view is second): pick Claude, ChatGPT, Grok,
   Gemini (best effort), GitHub Copilot, Microsoft Copilot, or Local web UI
   (Open WebUI) from a dropdown and use the site right in the popup.
@@ -53,7 +56,7 @@ Hearthside icon; hover over it for a short usage summary.
   restarts or you choose **Clear chat data**. Choose the sites under
   **Settings → Chat**; Local web UI is off until you turn it on.
 - The popup closes when you click elsewhere, unless you turn on **Keep the
-  popup open when clicking elsewhere** under **Settings → Chat**. The
+  popup open when clicking elsewhere** under **Settings → General**. The
   **Minimize** button in the Chat toolbar and on the Usage tab hides it either
   way; chat pages, sign-ins and the Ollama conversation stay as they were.
 - **Ollama** (optional, off by default): a built-in chat with the models of
@@ -116,8 +119,23 @@ Hearthside icon; hover over it for a short usage summary.
   (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
   and keep Local web UI at `http://localhost:3000/`.
 
-Fresh installs track all providers, display usage left, and refresh every
-five minutes.
+### Settings → General
+
+- **Popup**: **Open on** Chat or Usage; **Show tabs** Usage and Chat (at
+  least one stays on); **Size** Compact, Normal or Large (never larger than
+  the screen); **Keep the popup open when clicking elsewhere**. A hidden Chat
+  tab starts no chat page, web engine or Ollama chat, and hiding it locks
+  open saved sign-ins. A hidden Usage tab runs no usage refresh, and the panel
+  icon's tooltip shows only the name. The keyboard shortcut is set in Plasma's
+  own **Keyboard Shortcuts** page.
+- **Usage**: **Display** Left or Used, **Refresh every**, and **Show usage
+  when hovering over the panel icon**.
+- **Privacy**: **Stay signed in** (Off or Encrypted), **Lock automatically**,
+  and under **Show folder actions** **Change passphrase…** and **Delete
+  encrypted folder…**.
+
+Fresh installs open on Chat, show both tabs at Normal size, track all
+providers, display usage left, and refresh every five minutes.
 
 ## Configure every provider
 

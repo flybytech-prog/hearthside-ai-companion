@@ -5,11 +5,13 @@ import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
-import "ProviderCatalog.js" as Catalog
+import "ChatStorage.js" as ChatStorage
+import "SettingsLogic.js" as SettingsLogic
 
-KCM.ScrollViewKCM {
+KCM.SimpleKCM {
     id: page
 
+    // Every key is declared so the config dialog can map all of them.
     property string cfg_trackedProviders:
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
     property string cfg_trackedProvidersDefault:
@@ -46,14 +48,19 @@ KCM.ScrollViewKCM {
     property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
     property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
+    property string cfg_popupDefaultTab: "chat"
+    property string cfg_popupDefaultTabDefault: "chat"
+    property bool cfg_showUsageTab: true
+    property bool cfg_showUsageTabDefault: true
+    property bool cfg_showChatTab: true
+    property bool cfg_showChatTabDefault: true
+    property string cfg_popupSize: "normal"
+    property string cfg_popupSizeDefault: "normal"
+    property bool cfg_tooltipShowsUsage: true
+    property bool cfg_tooltipShowsUsageDefault: true
 
-    property var catalogModel: Catalog.providers
-    property var installedProviderIds: []
-    property var providerResults: ({})
-    property string statusMessage: ""
-    property bool checkingProviders: false
-    property bool detecting: false
-    readonly property string detectCommand: "python3 -m hearthside --detect"
+    // Page-local only; the folder actions always start collapsed.
+    property bool showFolderActions: false
     readonly property var refreshChoices: [
         { value: 60, text: i18n("1 minute") },
         { value: 300, text: i18n("5 minutes") },
@@ -61,94 +68,29 @@ KCM.ScrollViewKCM {
         { value: 1800, text: i18n("30 minutes") },
         { value: 3600, text: i18n("1 hour") }
     ]
+    readonly property var sizeChoices: [
+        { value: "compact", text: i18n("Compact") },
+        { value: "normal", text: i18n("Normal") },
+        { value: "large", text: i18n("Large") }
+    ]
 
-    function parseList(value, fallback) {
-        try {
-            var parsed = JSON.parse(value || "")
-            if (Array.isArray(parsed))
-                return parsed
-        } catch (error) {
-        }
-        return fallback.slice()
-    }
-
-    function parseMetrics() {
-        try {
-            var parsed = JSON.parse(page.cfg_providerMetrics || "")
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-                return parsed
-        } catch (error) {
-        }
-        return {}
-    }
-
-    function tracked() {
-        return parseList(page.cfg_trackedProviders, Catalog.providerIds())
-    }
-
-    function contains(list, value) {
-        return list.indexOf(value) >= 0
-    }
-
-    function setMembership(list, value, enabled) {
-        var result = list.slice()
-        var index = result.indexOf(value)
-        if (enabled && index < 0)
-            result.push(value)
-        else if (!enabled && index >= 0)
-            result.splice(index, 1)
-        return result
-    }
-
-    function setTracked(providerId, enabled) {
-        page.cfg_trackedProviders = JSON.stringify(
-            setMembership(tracked(), providerId, enabled)
-        )
-    }
-
-    function selectedMetrics(providerId) {
-        var result = parseMetrics()[providerId]
-        return Array.isArray(result) ? result : []
-    }
-
-    function setMetric(providerId, metricId, enabled) {
-        var metrics = parseMetrics()
-        var selected = Array.isArray(metrics[providerId])
-            ? metrics[providerId].slice() : []
-        selected = setMembership(selected, metricId, enabled)
-        metrics[providerId] = selected
-        page.cfg_providerMetrics = JSON.stringify(metrics)
-        if (enabled) {
-            page.cfg_trackedProviders = JSON.stringify(
-                setMembership(tracked(), providerId, true)
-            )
-        }
-    }
-
-    function resultFor(providerId) {
-        return page.providerResults[providerId] || null
-    }
-
-    function providerStatus(providerId) {
-        if (!contains(page.installedProviderIds, providerId)) {
-            return page.detecting && page.installedProviderIds.length === 0
-                ? i18n("Checking…") : i18n("Not detected")
-        }
-        var result = resultFor(providerId)
-        if (!result)
-            return page.checkingProviders ? i18n("Checking…") : i18n("Detected")
-        if (result.status === "ok")
-            return result.plan ? i18n("Connected · %1", result.plan) : i18n("Connected")
-        if (result.status === "stale")
-            return i18n("Connected · stale")
-        return result.error_message || result.status
-    }
-
-    function metricAvailable(providerId, metricId) {
-        var result = resultFor(providerId)
-        return !result || !Array.isArray(result.available_metrics)
-            || contains(result.available_metrics, metricId)
-    }
+    // Stay signed in. The mode the page opened with decides whether turning
+    // it off needs a confirmation (applying it deletes the encrypted folder).
+    property string savedSignInMode: "memory"
+    readonly property string signInMode: ChatStorage.normalizeMode(page.cfg_chatSignInStorage)
+    property bool confirmingOff: false
+    property bool confirmingDelete: false
+    // Encrypted folder, as the helper reports it: "", absent, locked,
+    // unlocked, unavailable, error. Never a path.
+    property string vaultState: ""
+    property var vaultMissing: []
+    property string vaultOp: ""
+    property string vaultSourceName: ""
+    // Seeded in Component.onCompleted; see ChatStorage.firstRun.
+    property int vaultRun: 0
+    // Only makes the helper's source name unique; 0 if the id is odd.
+    readonly property int vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
+    property string vaultMessage: ""
 
     function normalizedRefresh(value) {
         var best = page.refreshChoices[0].value
@@ -160,37 +102,112 @@ KCM.ScrollViewKCM {
         return best
     }
 
-    function refreshIndex(value) {
-        for (var index = 0; index < page.refreshChoices.length; index++) {
-            if (page.refreshChoices[index].value === value)
+    function choiceIndex(choices, value, fallback) {
+        for (var index = 0; index < choices.length; index++) {
+            if (choices[index].value === value)
                 return index
         }
-        return 1
+        return fallback
     }
 
-    function refreshProviders() {
-        page.checkingProviders = true
-        var safe = tracked().filter(function (providerId) {
-            return Catalog.byId(providerId) !== null
-        })
-        providerSource.connectSource(
-            "python3 -m hearthside --json --providers=" + safe.join(",")
-        )
+    function syncSignInChoice() {
+        offChoice.checked = page.signInMode === "memory"
+        encryptedChoice.checked = page.signInMode === "encrypted"
     }
 
-    // Network-free: only reports which providers are installed.
-    function detectProviders() {
-        page.detecting = true
-        providerSource.connectSource(page.detectCommand)
+    function chooseSignIn(mode) {
+        page.confirmingOff = false
+        if (mode === "memory" && page.signInMode === "encrypted"
+                && page.savedSignInMode === "encrypted") {
+            page.confirmingOff = true
+            page.syncSignInChoice()
+            return
+        }
+        page.cfg_chatSignInStorage = mode
     }
+
+    function runVault(op) {
+        if (page.vaultOp !== "")
+            return
+        page.vaultRun = ChatStorage.nextRun(page.vaultRun)
+        var command = ChatStorage.vaultCommand(op, page.vaultRun, page.vaultApplet)
+        if (command === "")
+            return
+        page.vaultOp = op
+        page.vaultSourceName = command
+        page.confirmingDelete = false
+        if (op !== "status")
+            page.vaultMessage = ""
+        vaultSource.connectSource(command)
+    }
+
+    function finishVault(op, reply) {
+        page.vaultOp = ""
+        page.vaultSourceName = ""
+        if (op === "status") {
+            page.vaultState = reply.ok && reply.state ? reply.state : "error"
+            page.vaultMissing = reply.missing || []
+            return
+        }
+        if (reply.ok)
+            page.vaultMessage = op === "destroy" ? "deleted" : "changed"
+        else
+            page.vaultMessage = reply.error === "cancelled" || reply.error === "empty-passphrase"
+                ? "" : reply.error
+        page.runVault("status")
+    }
+
+    function vaultText(code) {
+        switch (code) {
+        case "":
+            return ""
+        case "changed":
+            return i18n("Passphrase changed.")
+        case "deleted":
+            return i18n("Encrypted folder deleted.")
+        case "wrong-passphrase":
+            return i18n("Wrong passphrase. Nothing was changed.")
+        case "not-locked":
+            return i18n("Lock the encrypted folder from the Chat tab first.")
+        case "busy":
+            return i18n("The encrypted folder is busy. Try again in a moment.")
+        case "damaged":
+            return i18n("The encrypted folder is damaged and can't be opened. Nothing was changed.")
+        default:
+            return i18n("That didn't work. Nothing was changed.")
+        }
+    }
+
+    function vaultStateText() {
+        switch (page.vaultState) {
+        case "absent":
+            return i18n("No encrypted folder has been created.")
+        case "locked":
+            return i18n("The encrypted folder is locked.")
+        case "unlocked":
+            return i18n("The encrypted folder is unlocked. Lock it from the Chat tab to change its passphrase or delete it.")
+        case "unavailable":
+            return i18n("gocryptfs isn't installed.")
+        case "damaged":
+            return i18n("The encrypted folder is damaged and can't be opened. Delete it to start again with a new one.")
+        case "":
+            return i18n("Checking…")
+        default:
+            return i18n("Couldn't check the encrypted folder.")
+        }
+    }
+
+    onCfg_chatSignInStorageChanged: page.syncSignInChoice()
 
     Component.onCompleted: {
-        page.cfg_refreshInterval = normalizedRefresh(page.cfg_refreshInterval)
-        page.cfg_configSchemaVersion = 2
-        page.cfg_initialSetupComplete = true
-        Qt.callLater(page.detectProviders)
+        page.cfg_refreshInterval = page.normalizedRefresh(page.cfg_refreshInterval)
+        page.savedSignInMode = page.signInMode
+        page.syncSignInChoice()
+        page.vaultRun = ChatStorage.firstRun(Date.now(), Math.random())
+        page.runVault("status")
     }
 
+    // main.qml may move to a new generation while this page is open.
     Connections {
         target: Plasmoid.configuration
         function onValueChanged(key, value) {
@@ -200,281 +217,307 @@ KCM.ScrollViewKCM {
     }
 
     Plasma5Support.DataSource {
-        id: providerSource
+        id: vaultSource
         engine: "executable"
         connectedSources: []
         onNewData: (source, data) => {
-            providerSource.disconnectSource(source)
-            var detectOnly = source === page.detectCommand
-            if (detectOnly)
-                page.detecting = false
-            else
-                page.checkingProviders = false
-            try {
-                var payload = JSON.parse((data["stdout"] || "").toString())
-                if (payload.schema_version !== 2)
-                    throw new Error("schema")
-                if (payload.catalog && payload.catalog.length)
-                    page.catalogModel = payload.catalog
-                page.statusMessage = ""
-                page.installedProviderIds = payload.installed_provider_ids || []
-                // Detection carries no status; keep results from a network run.
-                if (detectOnly)
-                    return
-                var results = {}
-                var providers = payload.providers || []
-                for (var index = 0; index < providers.length; index++)
-                    results[providers[index].provider_id] = providers[index]
-                page.providerResults = results
-            } catch (error) {
-                page.statusMessage = i18n("Could not read provider status.")
-            }
+            vaultSource.disconnectSource(source)
+            if (source !== page.vaultSourceName)
+                return
+            page.finishVault(page.vaultOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
         }
     }
 
-    view: ListView {
-        id: providerList
-        clip: true
-        spacing: Kirigami.Units.smallSpacing
-        model: page.catalogModel
+    QQC2.ButtonGroup {
+        id: signInGroup
+    }
 
-        header: ColumnLayout {
-            width: providerList.width
-            spacing: Kirigami.Units.largeSpacing
+    Kirigami.FormLayout {
+        // --- Popup ----------------------------------------------------------
 
-            Kirigami.Heading {
-                level: 2
-                text: i18n("General")
+        Kirigami.Separator {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Popup")
+        }
+
+        QQC2.ComboBox {
+            objectName: "defaultTabChoice"
+            Kirigami.FormData.label: i18n("Open on:")
+            // Only a choice while both tabs are shown.
+            enabled: page.cfg_showUsageTab && page.cfg_showChatTab
+            textRole: "text"
+            valueRole: "value"
+            model: [
+                { value: "chat", text: i18n("Chat") },
+                { value: "usage", text: i18n("Usage") }
+            ]
+            currentIndex: SettingsLogic.normalizeDefaultTab(page.cfg_popupDefaultTab) === "usage" ? 1 : 0
+            onActivated: page.cfg_popupDefaultTab = currentValue
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Show tabs:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "showUsageChoice"
+                text: i18n("Usage")
+                checked: page.cfg_showUsageTab
+                // The last shown tab can't be unticked.
+                enabled: !checked || SettingsLogic.canUntick(page.cfg_showChatTab)
+                onToggled: page.cfg_showUsageTab = checked
             }
-
-            Kirigami.FormLayout {
-                Layout.fillWidth: true
-
-                QQC2.ComboBox {
-                    Kirigami.FormData.label: i18n("Display:")
-                    model: [i18n("Left"), i18n("Used")]
-                    currentIndex: page.cfg_usageMode === "used" ? 1 : 0
-                    onActivated: page.cfg_usageMode = currentIndex === 1
-                        ? "used" : "remaining"
-                }
-
-                QQC2.ComboBox {
-                    Kirigami.FormData.label: i18n("Refresh every:")
-                    textRole: "text"
-                    valueRole: "value"
-                    model: page.refreshChoices
-                    currentIndex: page.refreshIndex(page.cfg_refreshInterval)
-                    onActivated: page.cfg_refreshInterval = currentValue
-                }
-
-                QQC2.Label {
-                    Kirigami.FormData.label: i18n("Startup:")
-                    text: i18n(
-                        "Starts with Plasma while this widget remains on a panel."
-                    )
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
+            QQC2.CheckBox {
+                objectName: "showChatChoice"
+                text: i18n("Chat")
+                checked: page.cfg_showChatTab
+                enabled: !checked || SettingsLogic.canUntick(page.cfg_showUsageTab)
+                onToggled: page.cfg_showChatTab = checked
             }
-
-            RowLayout {
-                Layout.fillWidth: true
-                Kirigami.Heading {
-                    Layout.fillWidth: true
-                    level: 2
-                    text: i18n("Providers")
-                }
-                QQC2.Button {
-                    text: page.checkingProviders ? i18n("Checking…") : i18n("Refresh status")
-                    icon.name: "view-refresh"
-                    enabled: !page.checkingProviders
-                    onClicked: page.refreshProviders()
-                }
-            }
-            QQC2.Label {
-                Layout.fillWidth: true
-                text: i18n("Tracked providers appear in the Usage tab. The checked metrics are shown when you hover over the panel icon.")
-                wrapMode: Text.WordWrap
-                opacity: 0.72
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("At least one tab stays shown. A hidden Chat tab opens no chat site and no Ollama chat, and locks saved sign-ins. Chat is also hidden while no chat site is enabled. A hidden Usage tab refreshes no usage, and the panel icon's tooltip shows only the name.")
             }
         }
 
-        delegate: Rectangle {
-            id: providerRow
-            required property var modelData
-            width: providerList.width
-            implicitHeight: providerColumn.implicitHeight
-                + Kirigami.Units.largeSpacing * 2
-            radius: Kirigami.Units.smallSpacing
-            color: Qt.rgba(
-                Kirigami.Theme.textColor.r,
-                Kirigami.Theme.textColor.g,
-                Kirigami.Theme.textColor.b,
-                0.045
-            )
+        RowLayout {
+            Kirigami.FormData.label: i18n("Size:")
+            spacing: Kirigami.Units.smallSpacing
 
-            ColumnLayout {
-                id: providerColumn
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                    margins: Kirigami.Units.largeSpacing
-                }
-                spacing: Kirigami.Units.smallSpacing
-
-                RowLayout {
-                    Layout.fillWidth: true
-
-                    Kirigami.Icon {
-                        source: Qt.resolvedUrl(
-                            "../images/" + providerRow.modelData.icon
-                        )
-                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                        isMask: true
-                        color: Kirigami.Theme.textColor
-                    }
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Kirigami.Heading {
-                            Layout.fillWidth: true
-                            level: 4
-                            text: providerRow.modelData.display_name
-                            elide: Text.ElideRight
-                        }
-                        QQC2.Label {
-                            Layout.fillWidth: true
-                            text: page.providerStatus(
-                                providerRow.modelData.provider_id
-                            )
-                            opacity: 0.62
-                            elide: Text.ElideRight
-                            font: Kirigami.Theme.smallFont
-                        }
-                    }
-                    QQC2.Switch {
-                        text: i18n("Track")
-                        checked: page.contains(
-                            page.tracked(),
-                            providerRow.modelData.provider_id
-                        )
-                        onClicked: page.setTracked(
-                            providerRow.modelData.provider_id,
-                            checked
-                        )
-                    }
-                }
-
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-
-                    Repeater {
-                        model: providerRow.modelData.metrics || []
-
-                        delegate: QQC2.CheckBox {
-                            id: metricCheck
-                            required property var modelData
-                            text: page.metricAvailable(
-                                providerRow.modelData.provider_id,
-                                metricCheck.modelData.id
-                            )
-                                ? metricCheck.modelData.title
-                                : i18n("%1 (unavailable)", metricCheck.modelData.title)
-                            opacity: page.metricAvailable(
-                                providerRow.modelData.provider_id,
-                                metricCheck.modelData.id
-                            ) ? 1 : 0.65
-                            checked: page.contains(
-                                page.selectedMetrics(
-                                    providerRow.modelData.provider_id
-                                ),
-                                metricCheck.modelData.id
-                            )
-                            onClicked: page.setMetric(
-                                providerRow.modelData.provider_id,
-                                metricCheck.modelData.id,
-                                checked
-                            )
-                        }
-                    }
-                }
+            QQC2.ComboBox {
+                objectName: "popupSizeChoice"
+                textRole: "text"
+                valueRole: "value"
+                model: page.sizeChoices
+                currentIndex: page.choiceIndex(page.sizeChoices,
+                    SettingsLogic.normalizePopupSize(page.cfg_popupSize), 1)
+                onActivated: page.cfg_popupSize = currentValue
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("The popup never grows larger than the screen.")
             }
         }
 
-        footer: ColumnLayout {
-            width: providerList.width
-            spacing: Kirigami.Units.largeSpacing
+        QQC2.CheckBox {
+            objectName: "keepOpenChoice"
+            text: i18n("Keep the popup open when clicking elsewhere")
+            checked: page.cfg_chatKeepOpen
+            onToggled: page.cfg_chatKeepOpen = checked
+        }
 
-            Kirigami.Separator {
-                Layout.fillWidth: true
+        // --- Usage ----------------------------------------------------------
+
+        Kirigami.Separator {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Usage")
+        }
+
+        QQC2.ComboBox {
+            Kirigami.FormData.label: i18n("Display:")
+            enabled: page.cfg_showUsageTab
+            model: [i18n("Left"), i18n("Used")]
+            currentIndex: page.cfg_usageMode === "used" ? 1 : 0
+            onActivated: page.cfg_usageMode = currentIndex === 1
+                ? "used" : "remaining"
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Refresh every:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.ComboBox {
+                enabled: page.cfg_showUsageTab
+                textRole: "text"
+                valueRole: "value"
+                model: page.refreshChoices
+                currentIndex: page.choiceIndex(page.refreshChoices, page.cfg_refreshInterval, 1)
+                onActivated: page.cfg_refreshInterval = currentValue
             }
-            Kirigami.Heading {
-                level: 2
-                text: i18n("About")
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Hearthside starts with Plasma while this widget remains on a panel.")
             }
+        }
+
+        QQC2.CheckBox {
+            objectName: "tooltipUsageChoice"
+            enabled: page.cfg_showUsageTab
+            text: i18n("Show usage when hovering over the panel icon")
+            checked: page.cfg_tooltipShowsUsage
+            onToggled: page.cfg_tooltipShowsUsage = checked
+        }
+
+        // --- Privacy --------------------------------------------------------
+
+        Kirigami.Separator {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Privacy")
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Stay signed in:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.RadioButton {
+                id: offChoice
+                QQC2.ButtonGroup.group: signInGroup
+                text: i18n("Off")
+                onToggled: if (checked) page.chooseSignIn("memory")
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Chat sites open in a private, in-memory browser profile. You are signed out on every Plasma restart; nothing is saved to disk. Clear chat data signs you out immediately.")
+            }
+        }
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.RadioButton {
+                id: encryptedChoice
+                QQC2.ButtonGroup.group: signInGroup
+                text: i18n("Encrypted")
+                onToggled: if (checked) page.chooseSignIn("encrypted")
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Sign-ins and site data, such as cached conversations, are kept in an encrypted folder made with gocryptfs. You enter its passphrase once per Plasma session in the Chat tab; until then you can use a private session. If you forget the passphrase, the saved data is lost: there is no recovery. While the folder is unlocked, programs running as you can read it. Clear chat data deletes the saved sign-ins and locks the folder.")
+            }
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Lock automatically:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.ComboBox {
+                id: autoLockChoice
+                objectName: "autoLockChoice"
+                // Only saved sign-ins can be locked.
+                enabled: page.signInMode === "encrypted"
+                textRole: "text"
+                valueRole: "value"
+                model: [
+                    {value: 0, text: i18n("Never")},
+                    {value: 1, text: i18n("1 minute")},
+                    {value: 5, text: i18n("5 minutes")},
+                    {value: 15, text: i18n("15 minutes")},
+                    {value: 30, text: i18n("30 minutes")},
+                    {value: 60, text: i18n("1 hour")},
+                    {value: 480, text: i18n("8 hours")},
+                    {value: 1440, text: i18n("24 hours")}
+                ]
+                currentIndex: Math.max(0, ChatStorage.AUTO_LOCK_MINUTES.indexOf(
+                    ChatStorage.normalizeAutoLock(page.cfg_chatAutoLockMinutes)))
+                onActivated: page.cfg_chatAutoLockMinutes = currentValue
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Locks the encrypted folder once Chat hasn't been shown for this long, as if you pressed Lock. New sign-ins are saved within about 30 seconds, and at once when the folder is locked; if Plasma is stopped abruptly before that, you may have to sign in again.")
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: page.vaultState === "unavailable"
+            spacing: Kirigami.Units.smallSpacing
+
             QQC2.Label {
                 Layout.fillWidth: true
-                text: i18n("Hearthside %1", Plasmoid.metaData.version)
-                font.bold: true
-            }
-            QQC2.Label {
-                Layout.fillWidth: true
-                text: i18n(
-                    "Credentials stay on this computer. The helper only contacts the usage APIs of providers you track."
-                )
                 wrapMode: Text.WordWrap
-                opacity: 0.72
+                text: i18n("This needs gocryptfs, which isn't installed. Install it with:")
             }
-            RowLayout {
+            QQC2.TextField {
                 Layout.fillWidth: true
-                Item {
-                    Layout.fillWidth: true
-                }
-                QQC2.Button {
-                    text: i18n("Remove Widget…")
+                readOnly: true
+                selectByMouse: true
+                text: ChatStorage.installCommand(page.vaultMissing)
+            }
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.confirmingOff
+            type: Kirigami.MessageType.Warning
+            text: i18n("Turn off Stay signed in? When you apply this, the encrypted folder and every sign-in saved in it are deleted, for all Hearthside widgets. This can't be undone.")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Turn off and delete")
                     icon.name: "edit-delete"
-                    onClicked: {
-                        var dialog = removeDialogFactory.createObject(page)
-                        if (dialog)
-                            dialog.open()
+                    onTriggered: {
+                        page.confirmingOff = false
+                        page.cfg_chatSignInStorage = "memory"
+                    }
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: {
+                        page.confirmingOff = false
+                        page.syncSignInChoice()
                     }
                 }
+            ]
+        }
+
+        QQC2.CheckBox {
+            Kirigami.FormData.label: i18n("Encrypted folder:")
+            text: i18n("Show folder actions")
+            checked: page.showFolderActions
+            onToggled: page.showFolderActions = checked
+        }
+
+        QQC2.Label {
+            Layout.fillWidth: true
+            visible: page.showFolderActions
+            wrapMode: Text.WordWrap
+            text: page.vaultStateText()
+        }
+
+        RowLayout {
+            visible: page.showFolderActions
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Button {
+                text: i18n("Change passphrase…")
+                icon.name: "document-edit"
+                enabled: page.vaultState === "locked" && page.vaultOp === ""
+                onClicked: page.runVault("change-passphrase")
             }
-            QQC2.Label {
-                visible: page.statusMessage !== ""
-                Layout.fillWidth: true
-                text: page.statusMessage
-                wrapMode: Text.WordWrap
-                opacity: 0.72
+            QQC2.Button {
+                text: i18n("Delete encrypted folder…")
+                icon.name: "edit-delete"
+                enabled: (page.vaultState === "locked" || page.vaultState === "damaged")
+                    && page.vaultOp === ""
+                onClicked: page.confirmingDelete = true
             }
-            Item {
-                implicitHeight: Kirigami.Units.largeSpacing
+            QQC2.BusyIndicator {
+                visible: page.vaultOp !== ""
+                running: visible
+                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
             }
         }
-    }
 
-    Component {
-        id: removeDialogFactory
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.showFolderActions && page.confirmingDelete
+            type: Kirigami.MessageType.Warning
+            text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthside widgets. This can't be undone.")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Delete")
+                    icon.name: "edit-delete"
+                    onTriggered: page.runVault("destroy")
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: page.confirmingDelete = false
+                }
+            ]
+        }
 
-        QQC2.Dialog {
-            parent: page
-            anchors.centerIn: parent
-            modal: true
-            title: i18n("Remove Hearthside?")
-            standardButtons: QQC2.Dialog.Cancel | QQC2.Dialog.Ok
-            onAccepted: Plasmoid.internalAction("remove").trigger()
-            onClosed: destroy()
-
-            QQC2.Label {
-                width: Kirigami.Units.gridUnit * 18
-                text: i18n(
-                    "This removes the widget from the panel. Provider credentials are not changed."
-                )
-                wrapMode: Text.WordWrap
-            }
+        QQC2.Label {
+            Layout.fillWidth: true
+            visible: page.showFolderActions && page.vaultMessage !== ""
+            wrapMode: Text.WordWrap
+            color: page.vaultMessage === "changed" || page.vaultMessage === "deleted"
+                ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
+            text: page.vaultText(page.vaultMessage)
         }
     }
 }

@@ -511,15 +511,15 @@ function userAgentFor(url, defaultUa) {
     return userAgent(defaultUa)
 }
 
-// Preferred popup size in pixels for the given tab.
-function popupSize(tab, gu, availW, availH) {
+// Preferred popup size in pixels for the given tab, times scale (Settings →
+// General → Size; anything odd is 1), clamped to the screen.
+function popupSize(tab, gu, availW, availH, scale) {
     var unit = Number(gu) > 0 ? Number(gu) : 18
+    var factor = Number(scale) > 0 && isFinite(Number(scale)) ? Number(scale) : 1
     var minWidth = unit * 18
     var minHeight = unit * 15
-    if (tab !== "chat")
-        return { width: unit * 23, height: unit * 28 }
-    var width = unit * 34
-    var height = unit * 40
+    var width = Math.round(unit * (tab === "chat" ? 34 : 23) * factor)
+    var height = Math.round(unit * (tab === "chat" ? 40 : 28) * factor)
     if (Number(availW) > 0)
         width = Math.min(width, Number(availW) - unit * 2)
     if (Number(availH) > 0)

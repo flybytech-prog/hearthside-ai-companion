@@ -78,6 +78,47 @@ TestCase {
         compare(testCase.requests, ["open"])
     }
 
+    // Settings → General hid the Chat tab: the web view goes, nothing comes
+    // back until Chat is shown again, and that starts afresh.
+    function test_stopDropsTheWebView() {
+        var view = make({current: true})
+        tryVerify(function () { return view.web !== null })
+        view.current = false
+        view.stop()
+        verify(!view.started)
+        compare(view.web, null)
+        wait(50)
+        compare(view.web, null)
+        // No saved sign-ins were open: nothing to lock.
+        compare(testCase.requests, ["open"])
+        view.current = true
+        tryVerify(function () { return view.web !== null })
+        compare(testCase.requests, ["open", "open"])
+    }
+
+    function test_stopLocksSavedSignIns() {
+        var view = make({
+            current: true,
+            storageMode: "encrypted",
+            storageReady: true,
+            storagePath: "/run/user/1/hearthside/vault/web/applet-1-g0",
+            profileName: "applet-1-g0",
+            card: {view: "web", message: ""}
+        })
+        tryVerify(function () { return view.persistentActive })
+        view.current = false
+        view.stop()
+        compare(view.web, null)
+        compare(testCase.requests, ["open", "lock"])
+    }
+
+    function test_stopBeforeStartDoesNothing() {
+        var view = make({current: false})
+        view.stop()
+        verify(!view.started)
+        compare(testCase.requests, [])
+    }
+
     function test_encryptedCardHidesWebUntilReady() {
         var view = make({
             current: true,

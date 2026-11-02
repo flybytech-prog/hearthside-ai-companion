@@ -59,7 +59,7 @@ sends no browser brand in its client hints, so Google allows the sign-in;
 everywhere else it reports its real Chromium-based engine. Google may change
 this check at any time, and sign-in with Google could stop working.
 
-**Stay signed in** (Settings → Chat) has two choices:
+**Stay signed in** (Settings → General → Privacy) has two choices:
 
 - **Off** (the default): everything you enter (accounts, passwords, prompts,
   uploaded files, cookies) stays in Plasma's memory and is gone when Plasma
@@ -131,7 +131,8 @@ Your passphrase:
 - There is no recovery key. If you forget the passphrase, the saved sign-ins
   are lost: delete the folder and start again.
 - **Change passphrase…** and **Delete encrypted folder…** are under Settings →
-  Chat → Show advanced settings, and work only while the folder is locked.
+  General → Privacy → Show folder actions, and work only while the folder is
+  locked.
 
 The folder stays unlocked until you press the lock button (**Lock saved
 sign-ins**) in the Chat tab, it is locked automatically (below), you choose
@@ -140,7 +141,7 @@ the computer restarts. Lock closes the chat pages first, then
 locks the folder; if another Hearthside widget is still using it, the folder
 is not locked and the Chat tab says so. It is never forced.
 
-**Lock automatically** (Settings → Chat, under Stay signed in; only with
+**Lock automatically** (Settings → General → Privacy; only with
 Encrypted) locks the folder after Never (the default), 1, 5, 15 or 30 minutes,
 1, 8 or 24 hours of not using Chat. Not using means the Chat tab with a chat
 site hasn't been shown: the popup is closed, or Usage or Ollama is shown.
@@ -165,7 +166,12 @@ deletes this widget's saved sign-ins inside the folder, and locks the folder.
 Turning Stay signed in **Off** (after a confirmation in settings) deletes the
 whole encrypted folder, with every sign-in saved in it, for all Hearthside
 widgets. If another widget still has it open, it is not deleted and the Chat
-tab tells you; delete it later under Settings → Chat → Show advanced settings.
+tab tells you; delete it later under Settings → General → Privacy → Show
+folder actions.
+
+Hiding the Chat tab (Settings → General → Show tabs) closes the chat pages
+and, if saved sign-ins are open, locks the folder as the lock button does.
+While Chat is hidden no chat page, web engine or Ollama chat starts.
 
 Small files in `$XDG_RUNTIME_DIR/hearthside/` (in memory, mode `0600`):
 `vault.lock`, an empty lock file, and briefly `passwd.status`, which holds only
@@ -200,7 +206,7 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), and the Ollama address (`chatOllamaUrl`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `chatKeepOpen`, `chatAutoLockMinutes`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Ollama address | `chatOllamaUrl` in the Plasma configuration file, plain text; only a loopback `http://` address with a port is ever saved | Same |
 | Downloads | Only files you approve, saved to your Downloads folder | Same |

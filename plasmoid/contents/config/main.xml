@@ -47,5 +47,20 @@
         <entry name="chatOllamaUrl" type="String">
             <default>http://127.0.0.1:11434</default>
         </entry>
+        <entry name="popupDefaultTab" type="String">
+            <default>chat</default>
+        </entry>
+        <entry name="showUsageTab" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="showChatTab" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="popupSize" type="String">
+            <default>normal</default>
+        </entry>
+        <entry name="tooltipShowsUsage" type="Bool">
+            <default>true</default>
+        </entry>
     </group>
 </kcfg>

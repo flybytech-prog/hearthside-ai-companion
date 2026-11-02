@@ -137,6 +137,25 @@ ColumnLayout {
         chatView.storageRequest("lock")
     }
 
+    // Settings → General hid the Chat tab: saved sign-ins are locked as with
+    // Lock (Lock automatically lives here) and the web view is dropped.
+    // Showing Chat again starts afresh.
+    function stop() {
+        if (!chatView.started)
+            return
+        if (chatView.web) {
+            chatView.web.cancelDownload()
+            chatView.web.closeOverlay()
+        }
+        if (chatView.persistentActive)
+            chatView.storageRequest("lock")
+        chatView.started = false
+        chatView.confirmingClear = false
+        chatView.confirmingDelete = false
+        chatView.syncLoader()
+        gc()
+    }
+
     function restartIdle() {
         chatView.autoLockDue = false
         chatView.idleSince = chatView.autoLockArmed ? Date.now() : 0

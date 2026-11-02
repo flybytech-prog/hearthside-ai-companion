@@ -29,7 +29,11 @@ CHAT_WEB_VIEW = UI / "ChatWebView.qml"
 CHAT_VIEW = UI / "ChatView.qml"
 FULL_REPRESENTATION = UI / "FullRepresentation.qml"
 MAIN_QML = UI / "main.qml"
-CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configChat.qml")
+CONFIG_QML = CONTENTS / "config" / "config.qml"
+# Settings pages in dialog order: General (popup, usage display, privacy),
+# AI Usage (providers), Chat (sites, addresses).
+CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configUsage.qml", UI / "configChat.qml")
+SETTINGS_LOGIC_JS = UI / "SettingsLogic.js"
 OLLAMA_CHAT_JS = UI / "OllamaChat.js"
 OLLAMA_CHAT_VIEW = UI / "OllamaChatView.qml"
 SRC = PLASMOID.parent / "src" / "hearthside"
@@ -70,6 +74,14 @@ OLLAMA_CONFIG_KEYS = {"chatOllamaUrl": ("String", "http://127.0.0.1:11434")}
 PRE_CHAT_CONFIG_KEYS = {
     "trackedProviders", "providerMetrics", "usageMode",
     "refreshInterval", "configSchemaVersion", "initialSetupComplete",
+}
+# Settings → General → Popup / Usage, with exact type and default.
+GENERAL_CONFIG_KEYS = {
+    "popupDefaultTab": ("String", "chat"),
+    "showUsageTab": ("Bool", "true"),
+    "showChatTab": ("Bool", "true"),
+    "popupSize": ("String", "normal"),
+    "tooltipShowsUsage": ("Bool", "true"),
 }
 
 # Characters after which a "/" starts a regex literal rather than division.
@@ -1084,7 +1096,7 @@ def test_main_xml_adds_only_the_chat_keys():
     assert chat_keys == set(expected), (
         f"{_rel(MAIN_XML)} chat entries must be exactly {sorted(expected)}, got {sorted(chat_keys)}"
     )
-    unexpected = set(entries) - set(expected) - PRE_CHAT_CONFIG_KEYS
+    unexpected = set(entries) - set(expected) - PRE_CHAT_CONFIG_KEYS - set(GENERAL_CONFIG_KEYS)
     assert not unexpected, f"{_rel(MAIN_XML)} has new persisted keys besides the chat ones: {sorted(unexpected)}"
     for key, (kind, default) in sorted(expected.items()):
         assert entries[key]["group"] == "General", f"{_rel(MAIN_XML)}: {key} must be in group General"
@@ -1161,6 +1173,231 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
         line for line in _hits(r"\bcfg_chatProfileGeneration\s*=(?!=)", code)
     ]
     assert len(gen_writes) <= 1, f"{_rel(page)}: cfg_chatProfileGeneration may only be synced from the config"
+
+
+# --- settings pages: General, AI Usage, Chat ----------------------------------------
+
+
+def test_general_keys_have_their_exact_type_and_default():
+    entries = _main_xml_entries()
+    for key, (kind, default) in sorted(GENERAL_CONFIG_KEYS.items()):
+        assert key in entries, f"{_rel(MAIN_XML)} is missing {key}"
+        assert entries[key] == {"group": "General", "type": kind, "default": default}, (
+            f"{_rel(MAIN_XML)}: {key} must be {kind} {default!r} in group General, got {entries[key]}"
+        )
+
+
+def test_config_qml_lists_the_pages_in_order():
+    code = _read_code(CONFIG_QML)
+    sources = re.findall(r'\bsource\s*:\s*"([^"]+)"', code)
+    assert sources == [page.name for page in CONFIG_PAGES], (
+        f"{_rel(CONFIG_QML)} must list {[page.name for page in CONFIG_PAGES]}, got {sources}"
+    )
+    for page in CONFIG_PAGES:
+        assert page.is_file(), f"{_rel(page)} is missing"
+
+
+_QML_TYPES = {"String": "string", "Int": "int", "Bool": "bool"}
+
+
+def _page_key_problems(code, entries):
+    """Each page declares cfg_<key> and cfg_<key>Default once, with the kcfg type, for every key."""
+    problems = []
+    for key, entry in sorted(entries.items()):
+        qml_type = _QML_TYPES[entry["type"]]
+        for name in (f"cfg_{key}", f"cfg_{key}Default"):
+            declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:", code)
+            if declared != [qml_type]:
+                problems.append(f"{name}: want `property {qml_type}` once, got {declared}")
+    return problems
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+def test_config_pages_declare_every_key(page):
+    code = _read_code(page)
+    problems = _page_key_problems(code, _main_xml_entries())
+    for key, (kind, default) in GENERAL_CONFIG_KEYS.items():
+        literal = f'"{default}"' if kind == "String" else default
+        for name in (f"cfg_{key}", f"cfg_{key}Default"):
+            value = re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:\s*(.+?)\s*$", code)
+            if value != [literal]:
+                problems.append(f"{name} must default to {literal}, got {value}")
+    assert not problems, f"{_rel(page)}: {problems}"
+
+
+def test_proof_missing_page_key_is_caught():
+    code = _mutated(CONFIG_PAGES[0], '    property string cfg_popupSize: "normal"\n', "")
+    assert _page_key_problems(code, _main_xml_entries())
+
+
+# Keys main.qml may write: the profile generation, the schema and first-run
+# flags, the normalized refresh interval and the popup's Left/Used buttons.
+MAIN_WRITABLE_KEYS = {
+    "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
+}
+
+
+def _main_written_keys(code):
+    return {
+        match.group(1)
+        for match in re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*(\w+)\s*(?:[-+*/%&|^]|\?\?)?=(?!=)", code)
+    }
+
+
+def test_main_writes_only_its_own_keys():
+    written = _main_written_keys(_read_code(MAIN_QML))
+    assert written <= MAIN_WRITABLE_KEYS, f"{_rel(MAIN_QML)} writes {sorted(written - MAIN_WRITABLE_KEYS)}"
+
+
+def test_proof_main_general_key_write_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function x() { Plasmoid.configuration.showChatTab = true }\n    function chatNext() {")
+    assert _main_written_keys(code) - MAIN_WRITABLE_KEYS
+
+
+def _shortcut_offenders(sources):
+    # The shortcut lives only in Plasma's own Keyboard Shortcuts tab.
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items()
+        for pattern in (r"\bglobalShortcut\b", r"\bKeySequenceItem\b", r"\borg\.kde\.kquickcontrols\b")
+        for line in _hits(pattern, code)
+    ]
+
+
+def test_no_page_sets_the_keyboard_shortcut():
+    offenders = _shortcut_offenders(_all_code())
+    assert not offenders, f"the keyboard shortcut belongs to Plasma's Keyboard Shortcuts tab: {offenders}"
+
+
+def test_proof_shortcut_field_is_caught():
+    assert _shortcut_offenders({"configGeneral.qml": "function saveConfig() { Plasmoid.globalShortcut = k }"})
+
+
+def _privacy_page_problems(sources):
+    """Stay signed in, its confirmation and the encrypted-folder helper live on the General page only."""
+    problems = []
+    general = "plasmoid/contents/ui/configGeneral.qml"
+    for name, code in sources.items():
+        if name == general:
+            continue
+        if _hits(r"\bcfg_chatSignInStorage\s*=(?!=)", code):
+            problems.append(f"{name}: writes cfg_chatSignInStorage")
+        if _hits(r"\bid\s*:\s*vaultSource\b", code):
+            problems.append(f"{name}: declares vaultSource")
+        if name != "plasmoid/contents/ui/main.qml" and _hits(r"\bChatStorage\s*\.\s*vaultCommand\s*\(", code):
+            problems.append(f"{name}: builds a vault command")
+    code = sources.get(general, "")
+    if len(_hits(r"\bid\s*:\s*vaultSource\b", code)) != 1:
+        problems.append("configGeneral.qml must declare vaultSource once")
+    if not re.search(r"confirmingOff\s*=\s*false\s*\n\s*page\.cfg_chatSignInStorage\s*=\s*\"memory\"", code):
+        problems.append("configGeneral.qml: Off is applied only from the Turn off and delete confirmation")
+    return problems
+
+
+def test_privacy_settings_live_on_the_general_page():
+    problems = _privacy_page_problems(_all_code())
+    assert not problems, problems
+
+
+def test_proof_privacy_page_rule_catches():
+    sources = _all_code()
+    sources["plasmoid/contents/ui/configChat.qml"] += "\nfunction f() { page.cfg_chatSignInStorage = \"memory\" }\n"
+    assert _privacy_page_problems(sources)
+
+
+# Hidden tabs: no usage helper without Usage, no chat view or Ollama without Chat.
+HIDDEN_TAB_RULES = {
+    "main.qml": (
+        (r"readonly\s+property\s+var\s+popupTabs\s*:\s*SettingsLogic\.visibleTabs\(\s*"
+         r"Plasmoid\.configuration\.showUsageTab\s*,\s*Plasmoid\.configuration\.showChatTab\s*,\s*"
+         r"root\.chatSiteIds\.length\s*>\s*0\s*\)", "popupTabs from SettingsLogic.visibleTabs"),
+        (r"readonly\s+property\s+bool\s+chatShown\s*:\s*root\.popupTabs\.chat\s*\n", "chatShown"),
+        (r"readonly\s+property\s+bool\s+usageShown\s*:\s*root\.popupTabs\.usage\s*\n", "usageShown"),
+        (r"function\s+refresh\s*\(\s*\)\s*\{\s*if\s*\(\s*!\s*root\.usageShown\s*\)\s*return\b",
+         "refresh() returns at once while Usage is hidden"),
+        (r"interval\s*:\s*root\.refreshInterval\s*\*\s*1000\s*\n\s*running\s*:\s*root\.usageShown\s*\n",
+         "the refresh timer runs only while Usage is shown"),
+        (r"toolTipSubText\s*:\s*\{\s*if\s*\(\s*!\s*root\.usageShown\s*\|\|\s*!\s*root\.tooltipShowsUsage\s*\)\s*"
+         r"return\s*\"\"", "the tooltip shows only the name without Usage"),
+    ),
+    "FullRepresentation.qml": (
+        (r"readonly\s+property\s+bool\s+chatAvailable\s*:\s*root\.chatShown\s*\n", "chatAvailable: root.chatShown"),
+        (r"function\s+onChatShownChanged\s*\(\s*\)\s*\{\s*if\s*\(\s*!\s*root\.chatShown\s*\)\s*chatView\.stop\(\)",
+         "hiding Chat stops the chat view"),
+        (r"siteEnabled\s*:\s*root\.chatShown\s*&&\s*root\.chatSiteIds\.indexOf\(\"ollama\"\)\s*>=\s*0\s*\n",
+         "Ollama is enabled only while Chat is shown"),
+    ),
+}
+
+
+def _hidden_tab_problems(sources):
+    problems = []
+    for name, rules in HIDDEN_TAB_RULES.items():
+        for pattern, what in rules:
+            if len(re.findall(pattern, sources[name])) != 1:
+                problems.append(f"{name}: {what}")
+    return problems
+
+
+def test_hidden_tabs_start_nothing():
+    sources = {"main.qml": _read_code(MAIN_QML), "FullRepresentation.qml": _read_code(FULL_REPRESENTATION)}
+    problems = _hidden_tab_problems(sources)
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("target", "old", "new"), [
+    (MAIN_QML, "        if (!root.usageShown)\n            return\n        var providerIds", "        var providerIds"),
+    (MAIN_QML, "        running: root.usageShown", "        running: true"),
+    (MAIN_QML, "    readonly property bool chatShown: root.popupTabs.chat", "    readonly property bool chatShown: true"),
+    (FULL_REPRESENTATION, "readonly property bool chatAvailable: root.chatShown",
+     "readonly property bool chatAvailable: root.chatSiteIds.length > 0"),
+    (FULL_REPRESENTATION, "                chatView.stop()", "                chatView.focusLater()"),
+    (FULL_REPRESENTATION, 'siteEnabled: root.chatShown && root.chatSiteIds.indexOf("ollama") >= 0',
+     'siteEnabled: root.chatSiteIds.indexOf("ollama") >= 0'),
+])
+def test_proof_hidden_tab_rule_catches(target, old, new):
+    sources = {"main.qml": _read_code(MAIN_QML), "FullRepresentation.qml": _read_code(FULL_REPRESENTATION)}
+    sources[target.name] = _mutated(target, old, new)
+    assert _hidden_tab_problems(sources)
+
+
+def test_settings_logic_js_is_a_pure_library():
+    code = _read_code(SETTINGS_LOGIC_JS)
+    assert re.match(r"\s*\.pragma\s+library\b", code), "SettingsLogic.js must start with .pragma library"
+    for pattern in (r"\.import\b", r"\bQt\s*\.", r"\bXMLHttpRequest\b", r"\bconsole\b", r"\bPlasmoid\b"):
+        assert not _hits(pattern, code), f"{_rel(SETTINGS_LOGIC_JS)} must stay pure: {pattern}"
+
+
+# "?" hints: fixed text only, never something read from the helper or a site.
+HELP_TEXT = r"\btoolTipText\s*:\s*(.*)"
+
+
+def _help_hint_problems(code):
+    return [
+        f"line {_line_of(code, match.start())}: {match.group(1).strip()[:60]}"
+        for match in re.finditer(HELP_TEXT, code)
+        if not re.fullmatch(r'i18n\("(?:[^"\\]|\\.)*"\)', match.group(1).strip())
+    ]
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+def test_help_hints_show_fixed_text_only(page):
+    code = _read_code(page)
+    assert _hits(r"\bKirigami\.ContextualHelpButton\s*\{", code), f"{_rel(page)} has no help hints"
+    problems = _help_hint_problems(code)
+    assert not problems, f"{_rel(page)}: {problems}"
+
+
+def test_proof_help_hint_rule_catches():
+    assert _help_hint_problems("Kirigami.ContextualHelpButton { toolTipText: page.statusMessage }")
+    assert _help_hint_problems('Kirigami.ContextualHelpButton { toolTipText: i18n("a %1", x) }')
+
+
+def test_usage_page_has_no_about_block():
+    code = _read_code(UI / "configUsage.qml")
+    for word in ("Remove Widget", "internalAction", "metaData.version", 'i18n("About")'):
+        assert word not in code, f"configUsage.qml must not have the About block: {word}"
 
 
 # --- locking: the profile is closed before the folder is unmounted ---------------

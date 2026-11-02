@@ -687,11 +687,31 @@ TestCase {
     function test_popupSize() {
         var gu = 18
         compare(ChatSites.popupSize("usage", gu, 1920, 1080), {width: 23 * gu, height: 28 * gu})
-        compare(ChatSites.popupSize("usage", gu, 100, 100), {width: 23 * gu, height: 28 * gu})
+        // Clamped to the screen too, never below the popup minimums.
+        compare(ChatSites.popupSize("usage", gu, 100, 100), {width: 18 * gu, height: 15 * gu})
         compare(ChatSites.popupSize("chat", gu, 1920, 1080), {width: 34 * gu, height: 40 * gu})
         compare(ChatSites.popupSize("chat", gu, 600, 700), {width: 600 - 2 * gu, height: 700 - 4 * gu})
         // Never below the existing popup minimums.
         compare(ChatSites.popupSize("chat", gu, 200, 200), {width: 18 * gu, height: 15 * gu})
         compare(ChatSites.popupSize("chat", gu, 0, undefined), {width: 34 * gu, height: 40 * gu})
+    }
+
+    // Settings → General → Size scales the popup, still within the screen.
+    function test_popupSizeScale() {
+        var gu = 18
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, 1), {width: 34 * gu, height: 40 * gu})
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, 1.25),
+                {width: Math.round(34 * gu * 1.25), height: Math.round(40 * gu * 1.25)})
+        compare(ChatSites.popupSize("usage", gu, 4000, 4000, 0.8),
+                {width: Math.round(23 * gu * 0.8), height: Math.round(28 * gu * 0.8)})
+        compare(ChatSites.popupSize("chat", gu, 1366, 768, 1.25),
+                {width: Math.round(34 * gu * 1.25), height: 768 - 4 * gu})
+        // Odd scales are 1.
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, 0), {width: 34 * gu, height: 40 * gu})
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, -2), {width: 34 * gu, height: 40 * gu})
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, "x"), {width: 34 * gu, height: 40 * gu})
+        compare(ChatSites.popupSize("chat", gu, 4000, 4000, Infinity), {width: 34 * gu, height: 40 * gu})
+        // Compact never goes below the popup minimums.
+        compare(ChatSites.popupSize("usage", 10, 0, 0, 0.8), {width: 184, height: 224})
     }
 }

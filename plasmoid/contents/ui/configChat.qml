@@ -4,9 +4,7 @@ import QtQuick.Layouts
 import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
-import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatSites.js" as ChatSites
-import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
 
 KCM.SimpleKCM {
@@ -49,123 +47,19 @@ KCM.SimpleKCM {
     property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
     property string cfg_chatOllamaUrlDefault: "http://127.0.0.1:11434"
+    property string cfg_popupDefaultTab: "chat"
+    property string cfg_popupDefaultTabDefault: "chat"
+    property bool cfg_showUsageTab: true
+    property bool cfg_showUsageTabDefault: true
+    property bool cfg_showChatTab: true
+    property bool cfg_showChatTabDefault: true
+    property string cfg_popupSize: "normal"
+    property string cfg_popupSizeDefault: "normal"
+    property bool cfg_tooltipShowsUsage: true
+    property bool cfg_tooltipShowsUsageDefault: true
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
-
-    // Stay signed in. The mode the page opened with decides whether turning
-    // it off needs a confirmation (applying it deletes the encrypted folder).
-    property string savedSignInMode: "memory"
-    readonly property string signInMode: ChatStorage.normalizeMode(page.cfg_chatSignInStorage)
-    property bool confirmingOff: false
-    property bool confirmingDelete: false
-    // Encrypted folder, as the helper reports it: "", absent, locked,
-    // unlocked, unavailable, error. Never a path.
-    property string vaultState: ""
-    property var vaultMissing: []
-    property string vaultOp: ""
-    property string vaultSourceName: ""
-    // Seeded in Component.onCompleted; see ChatStorage.firstRun.
-    property int vaultRun: 0
-    // Only makes the helper's source name unique; 0 if the id is odd.
-    readonly property int vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
-    property string vaultMessage: ""
-
-    function syncSignInChoice() {
-        offChoice.checked = page.signInMode === "memory"
-        encryptedChoice.checked = page.signInMode === "encrypted"
-    }
-
-    function chooseSignIn(mode) {
-        page.confirmingOff = false
-        if (mode === "memory" && page.signInMode === "encrypted"
-                && page.savedSignInMode === "encrypted") {
-            page.confirmingOff = true
-            page.syncSignInChoice()
-            return
-        }
-        page.cfg_chatSignInStorage = mode
-    }
-
-    function runVault(op) {
-        if (page.vaultOp !== "")
-            return
-        page.vaultRun = ChatStorage.nextRun(page.vaultRun)
-        var command = ChatStorage.vaultCommand(op, page.vaultRun, page.vaultApplet)
-        if (command === "")
-            return
-        page.vaultOp = op
-        page.vaultSourceName = command
-        page.confirmingDelete = false
-        if (op !== "status")
-            page.vaultMessage = ""
-        vaultSource.connectSource(command)
-    }
-
-    function finishVault(op, reply) {
-        page.vaultOp = ""
-        page.vaultSourceName = ""
-        if (op === "status") {
-            page.vaultState = reply.ok && reply.state ? reply.state : "error"
-            page.vaultMissing = reply.missing || []
-            return
-        }
-        if (reply.ok)
-            page.vaultMessage = op === "destroy" ? "deleted" : "changed"
-        else
-            page.vaultMessage = reply.error === "cancelled" || reply.error === "empty-passphrase"
-                ? "" : reply.error
-        page.runVault("status")
-    }
-
-    function vaultText(code) {
-        switch (code) {
-        case "":
-            return ""
-        case "changed":
-            return i18n("Passphrase changed.")
-        case "deleted":
-            return i18n("Encrypted folder deleted.")
-        case "wrong-passphrase":
-            return i18n("Wrong passphrase. Nothing was changed.")
-        case "not-locked":
-            return i18n("Lock the encrypted folder from the Chat tab first.")
-        case "busy":
-            return i18n("The encrypted folder is busy. Try again in a moment.")
-        case "damaged":
-            return i18n("The encrypted folder is damaged and can't be opened. Nothing was changed.")
-        default:
-            return i18n("That didn't work. Nothing was changed.")
-        }
-    }
-
-    function vaultStateText() {
-        switch (page.vaultState) {
-        case "absent":
-            return i18n("No encrypted folder has been created.")
-        case "locked":
-            return i18n("The encrypted folder is locked.")
-        case "unlocked":
-            return i18n("The encrypted folder is unlocked. Lock it from the Chat tab to change its passphrase or delete it.")
-        case "unavailable":
-            return i18n("gocryptfs isn't installed.")
-        case "damaged":
-            return i18n("The encrypted folder is damaged and can't be opened. Delete it to start again with a new one.")
-        case "":
-            return i18n("Checking…")
-        default:
-            return i18n("Couldn't check the encrypted folder.")
-        }
-    }
-
-    onCfg_chatSignInStorageChanged: page.syncSignInChoice()
-
-    Component.onCompleted: {
-        page.savedSignInMode = page.signInMode
-        page.syncSignInChoice()
-        page.vaultRun = ChatStorage.firstRun(Date.now(), Math.random())
-        page.runVault("status")
-    }
 
     // main.qml may move to a new generation while this page is open.
     Connections {
@@ -173,18 +67,6 @@ KCM.SimpleKCM {
         function onValueChanged(key, value) {
             if (key === "chatProfileGeneration")
                 page.cfg_chatProfileGeneration = value
-        }
-    }
-
-    Plasma5Support.DataSource {
-        id: vaultSource
-        engine: "executable"
-        connectedSources: []
-        onNewData: (source, data) => {
-            vaultSource.disconnectSource(source)
-            if (source !== page.vaultSourceName)
-                return
-            page.finishVault(page.vaultOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
         }
     }
 
@@ -269,9 +151,15 @@ KCM.SimpleKCM {
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
 
-        Kirigami.Heading {
-            level: 2
-            text: i18n("Chat sites")
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Kirigami.Heading {
+                level: 2
+                text: i18n("Chat sites")
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Sites open in a private, in-memory browser profile unless Stay signed in is on (General). The widget never reads or changes the pages and sends nothing to the developer. Microphone, camera, screen sharing, notifications, location and clipboard reading are always denied. Downloads ask first and go to your Downloads folder. Links to other websites open in your browser. Text you copy may be kept by your clipboard manager. Each open site uses roughly 200–500 MB of memory.")
+            }
         }
 
         Repeater {
@@ -296,15 +184,23 @@ KCM.SimpleKCM {
                     color: Kirigami.Theme.textColor
                 }
                 QQC2.Label {
-                    Layout.fillWidth: true
                     text: siteRow.modelData.native === true
                         ? i18n("%1 (built-in chat with Ollama on this computer)", siteRow.modelData.name)
                         : siteRow.modelData.name
                     elide: Text.ElideRight
+                    Layout.fillWidth: false
+                    Layout.maximumWidth: implicitWidth
                     MouseArea {
                         anchors.fill: parent
                         onClicked: page.setEnabled(siteRow.modelData.id, !siteCheck.checked)
                     }
+                }
+                Kirigami.ContextualHelpButton {
+                    visible: siteRow.modelData.native === true
+                    toolTipText: i18n("The conversation is kept in memory only and goes to the Ollama server on this computer, nowhere else. Clear also unloads the models it used. Cloud models are hidden. Before sending, Hearthside checks that the Ollama port belongs to you or to the system, never to another user. Hearthside never starts Ollama.")
+                }
+                Item {
+                    Layout.fillWidth: true
                 }
             }
         }
@@ -323,13 +219,6 @@ KCM.SimpleKCM {
                 ))
                 onActivated: page.cfg_chatDefaultSite = currentValue
             }
-            QQC2.CheckBox {
-                objectName: "keepOpenChoice"
-                Kirigami.FormData.label: i18n("Popup:")
-                text: i18n("Keep the popup open when clicking elsewhere")
-                checked: page.cfg_chatKeepOpen
-                onToggled: page.cfg_chatKeepOpen = checked
-            }
         }
 
         QQC2.Label {
@@ -339,145 +228,12 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             opacity: 0.72
         }
-
-        Kirigami.Separator {
-            Layout.fillWidth: true
-        }
-
-        Kirigami.Heading {
-            level: 2
-            text: i18n("Privacy")
-        }
-
         QQC2.Label {
             Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            text: i18n(
-                "By default chat sites open in a private, in-memory browser profile. You are signed out on every Plasma restart; nothing is saved to disk. Clear chat data signs you out immediately."
-            )
-        }
-
-        Kirigami.Heading {
-            level: 3
-            text: i18n("Stay signed in")
-        }
-
-        QQC2.RadioButton {
-            id: offChoice
-            text: i18n("Off: sign in again after every Plasma restart")
-            onToggled: if (checked) page.chooseSignIn("memory")
-        }
-        QQC2.RadioButton {
-            id: encryptedChoice
-            text: i18n("Encrypted: keep sign-ins in a passphrase-protected folder")
-            onToggled: if (checked) page.chooseSignIn("encrypted")
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
+            visible: !page.cfg_showChatTab
+            text: i18n("The Chat tab is hidden in General.")
             wrapMode: Text.WordWrap
             opacity: 0.72
-            text: i18n(
-                "Sign-ins and site data, such as cached conversations, are kept in an encrypted folder made with gocryptfs. You enter its passphrase once per Plasma session in the Chat tab; until then you can use a private session. If you forget the passphrase, the saved data is lost: there is no recovery. While the folder is unlocked, programs running as you can read it. Clear chat data deletes the saved sign-ins and locks the folder."
-            )
-        }
-        Kirigami.FormLayout {
-            Layout.fillWidth: true
-
-            QQC2.ComboBox {
-                id: autoLockChoice
-                objectName: "autoLockChoice"
-                Kirigami.FormData.label: i18n("Lock automatically:")
-                // Only saved sign-ins can be locked.
-                enabled: page.signInMode === "encrypted"
-                textRole: "text"
-                valueRole: "value"
-                model: [
-                    {value: 0, text: i18n("Never")},
-                    {value: 1, text: i18n("1 minute")},
-                    {value: 5, text: i18n("5 minutes")},
-                    {value: 15, text: i18n("15 minutes")},
-                    {value: 30, text: i18n("30 minutes")},
-                    {value: 60, text: i18n("1 hour")},
-                    {value: 480, text: i18n("8 hours")},
-                    {value: 1440, text: i18n("24 hours")}
-                ]
-                currentIndex: Math.max(0, ChatStorage.AUTO_LOCK_MINUTES.indexOf(
-                    ChatStorage.normalizeAutoLock(page.cfg_chatAutoLockMinutes)))
-                onActivated: page.cfg_chatAutoLockMinutes = currentValue
-            }
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            opacity: 0.72
-            text: i18n(
-                "Locks the encrypted folder once Chat hasn't been shown for this long, as if you pressed Lock. New sign-ins are saved within about 30 seconds, and at once when the folder is locked; if Plasma is stopped abruptly before that, you may have to sign in again."
-            )
-        }
-        ColumnLayout {
-            Layout.fillWidth: true
-            visible: page.vaultState === "unavailable"
-            spacing: Kirigami.Units.smallSpacing
-
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: i18n("This needs gocryptfs, which isn't installed. Install it with:")
-            }
-            QQC2.TextField {
-                Layout.fillWidth: true
-                readOnly: true
-                selectByMouse: true
-                text: ChatStorage.installCommand(page.vaultMissing)
-            }
-        }
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            visible: page.confirmingOff
-            type: Kirigami.MessageType.Warning
-            text: i18n("Turn off Stay signed in? When you apply this, the encrypted folder and every sign-in saved in it are deleted, for all Hearthside widgets. This can't be undone.")
-            actions: [
-                Kirigami.Action {
-                    text: i18n("Turn off and delete")
-                    icon.name: "edit-delete"
-                    onTriggered: {
-                        page.confirmingOff = false
-                        page.cfg_chatSignInStorage = "memory"
-                    }
-                },
-                Kirigami.Action {
-                    text: i18n("Cancel")
-                    icon.name: "dialog-cancel"
-                    onTriggered: {
-                        page.confirmingOff = false
-                        page.syncSignInChoice()
-                    }
-                }
-            ]
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            opacity: 0.72
-            text: i18n(
-                "The widget never reads or changes the pages and sends nothing to the developer. Microphone, camera, screen sharing, notifications, location and clipboard reading are always denied. Downloads ask first and go to your Downloads folder. Links to other websites open in your browser."
-            )
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            opacity: 0.72
-            text: i18n(
-                "Text you copy may be kept by your clipboard manager if it saves history. Each open site uses roughly 200–500 MB of memory."
-            )
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            opacity: 0.72
-            text: i18n(
-                "Ollama: the conversation is kept in memory only and goes to the Ollama server on this computer, nowhere else. Clear also unloads the models it used. Cloud models are hidden. Before sending, Hearthside checks that the Ollama port belongs to you or to the system, never to another user. Hearthside never starts Ollama."
-            )
         }
 
         Kirigami.Separator {
@@ -495,85 +251,15 @@ KCM.SimpleKCM {
             visible: page.showAdvanced
             spacing: Kirigami.Units.largeSpacing
 
-            Kirigami.Heading {
-                level: 2
-                text: i18n("Encrypted folder")
-            }
-
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: page.vaultStateText()
-            }
-
             RowLayout {
                 spacing: Kirigami.Units.smallSpacing
-
-                QQC2.Button {
-                    text: i18n("Change passphrase…")
-                    icon.name: "document-edit"
-                    enabled: page.vaultState === "locked" && page.vaultOp === ""
-                    onClicked: page.runVault("change-passphrase")
+                Kirigami.Heading {
+                    level: 2
+                    text: i18n("Custom addresses")
                 }
-                QQC2.Button {
-                    text: i18n("Delete encrypted folder…")
-                    icon.name: "edit-delete"
-                    enabled: (page.vaultState === "locked" || page.vaultState === "damaged")
-                        && page.vaultOp === ""
-                    onClicked: page.confirmingDelete = true
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Leave a field empty to use the built-in address. Addresses are saved in your Plasma configuration file: don't put passwords, tokens or other secrets in them.")
                 }
-                QQC2.BusyIndicator {
-                    visible: page.vaultOp !== ""
-                    running: visible
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                }
-            }
-
-            Kirigami.InlineMessage {
-                Layout.fillWidth: true
-                visible: page.confirmingDelete
-                type: Kirigami.MessageType.Warning
-                text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthside widgets. This can't be undone.")
-                actions: [
-                    Kirigami.Action {
-                        text: i18n("Delete")
-                        icon.name: "edit-delete"
-                        onTriggered: page.runVault("destroy")
-                    },
-                    Kirigami.Action {
-                        text: i18n("Cancel")
-                        icon.name: "dialog-cancel"
-                        onTriggered: page.confirmingDelete = false
-                    }
-                ]
-            }
-
-            QQC2.Label {
-                Layout.fillWidth: true
-                visible: page.vaultMessage !== ""
-                wrapMode: Text.WordWrap
-                color: page.vaultMessage === "changed" || page.vaultMessage === "deleted"
-                    ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
-                text: page.vaultText(page.vaultMessage)
-            }
-
-            Kirigami.Separator {
-                Layout.fillWidth: true
-            }
-
-            Kirigami.Heading {
-                level: 2
-                text: i18n("Custom addresses")
-            }
-
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                opacity: 0.72
-                text: i18n(
-                    "Addresses are saved in your Plasma configuration file. Don't put passwords, tokens or other secrets in them. Leave empty to use the built-in address."
-                )
             }
 
             Repeater {
@@ -625,10 +311,20 @@ KCM.SimpleKCM {
                         }
                     }
 
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: urlRow.modelData.name
-                        elide: Text.ElideRight
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: urlRow.modelData.name
+                            elide: Text.ElideRight
+                        }
+                        Kirigami.ContextualHelpButton {
+                            visible: urlRow.modelData.local === true
+                            toolTipText: i18n("http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server on another machine use https or an SSH tunnel.")
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
                     }
 
                     RowLayout {
@@ -666,15 +362,6 @@ KCM.SimpleKCM {
                         text: page.customUrlError(urlRow.modelData.id, urlRow.errorCode)
                     }
 
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        visible: urlRow.modelData.local === true
-                        wrapMode: Text.WordWrap
-                        opacity: 0.72
-                        text: i18n(
-                            "http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server on another machine use https or an SSH tunnel."
-                        )
-                    }
                 }
             }
 
@@ -723,10 +410,19 @@ KCM.SimpleKCM {
                     }
                 }
 
-                QQC2.Label {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: i18n("Ollama address")
-                    elide: Text.ElideRight
+                    spacing: Kirigami.Units.smallSpacing
+                    QQC2.Label {
+                        text: i18n("Ollama address")
+                        elide: Text.ElideRight
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Only this computer: http:// with 127.0.0.1, localhost or [::1] and a port. Leave empty for the default, http://127.0.0.1:11434.")
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                    }
                 }
 
                 RowLayout {
@@ -767,14 +463,6 @@ KCM.SimpleKCM {
                     text: page.ollamaAddressError(ollamaRow.errorCode)
                 }
 
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    opacity: 0.72
-                    text: i18n(
-                        "Only this computer: http:// with 127.0.0.1, localhost or [::1] and a port. Leave empty for the default, http://127.0.0.1:11434."
-                    )
-                }
             }
         }
     }

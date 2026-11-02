@@ -11,6 +11,7 @@ import "SnapshotLogic.js" as SnapshotLogic
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
+import "SettingsLogic.js" as SettingsLogic
 
 PlasmoidItem {
     id: root
@@ -37,6 +38,19 @@ PlasmoidItem {
     property string popupTab: "chat"
     property string chatSiteId: ""
     property bool chatDialogOpen: false
+    // Settings → General → Show tabs. Chat also needs an enabled site.
+    readonly property var popupTabs: SettingsLogic.visibleTabs(
+        Plasmoid.configuration.showUsageTab,
+        Plasmoid.configuration.showChatTab,
+        root.chatSiteIds.length > 0)
+    // A hidden Chat tab builds no chat view; a hidden Usage tab runs no
+    // usage helper.
+    readonly property bool chatShown: root.popupTabs.chat
+    readonly property bool usageShown: root.popupTabs.usage
+    // The tab the popup shows: popupTab while it is visible, else the other.
+    readonly property string shownTab: SettingsLogic.shownTab(root.popupTab, root.popupTabs)
+    readonly property real popupScale: SettingsLogic.popupScale(Plasmoid.configuration.popupSize)
+    readonly property bool tooltipShowsUsage: Plasmoid.configuration.tooltipShowsUsage !== false
     // Web sites, then the built-in Ollama chat when it is on.
     readonly property var chatSites: OllamaChat.menuEntries(
         ChatSites.enabledSites(Plasmoid.configuration.chatSites),
@@ -266,6 +280,8 @@ PlasmoidItem {
     }
 
     function refresh() {
+        if (!root.usageShown)
+            return
         var providerIds = activeProviderIds()
         if (root.hasData && providerIds.length === 0)
             return
@@ -350,8 +366,6 @@ PlasmoidItem {
                 root.chatSiteIds,
                 Plasmoid.configuration.chatDefaultSite
             )
-        if (root.chatSiteIds.length === 0)
-            root.popupTab = "usage"
     }
 
     // --- Stay signed in: helper steps, run one at a time --------------------
@@ -688,9 +702,10 @@ PlasmoidItem {
         }
     }
 
+    // Starts (and refreshes at once) when the Usage tab is shown again.
     Timer {
         interval: root.refreshInterval * 1000
-        running: true
+        running: root.usageShown
         repeat: true
         triggeredOnStart: true
         onTriggered: root.refresh()
@@ -713,6 +728,7 @@ PlasmoidItem {
             firstRunSettingsTimer.start()
         }
         root.syncChatSite()
+        root.popupTab = SettingsLogic.normalizeDefaultTab(Plasmoid.configuration.popupDefaultTab)
         root.chatGeneration = root.chatConfiguredGeneration
         root.chatModeSeen = root.chatStorageMode
         root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
@@ -732,23 +748,29 @@ PlasmoidItem {
     onExpandedChanged: {
         if (root.expanded) {
             root.refresh()
-            if (root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
+            if (root.chatShown && root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
                 root.chatEnqueue(["status"])
         }
     }
     onChatSiteIdsChanged: root.syncChatSite()
+    // Settings → General → Open on.
+    readonly property string configuredDefaultTab:
+        SettingsLogic.normalizeDefaultTab(Plasmoid.configuration.popupDefaultTab)
+    onConfiguredDefaultTabChanged: root.popupTab = root.configuredDefaultTab
     onChatSiteIdChanged: {
         if (root.chatSiteId !== OllamaChat.ENTRY.id)
             root.chatWebSiteId = root.chatSiteId
     }
 
-    // Settings → Chat → Keep the popup open; also while a dialog is open.
+    // Settings → General → Keep the popup open; also while a dialog is open.
     hideOnWindowDeactivate: !Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen
 
     Plasmoid.icon: Qt.resolvedUrl("../images/hearthside.svg")
-    Plasmoid.busy: !root.hasData && root.lastError === ""
+    Plasmoid.busy: root.usageShown && !root.hasData && root.lastError === ""
     toolTipMainText: i18n("Hearthside")
     toolTipSubText: {
+        if (!root.usageShown || !root.tooltipShowsUsage)
+            return ""
         if (root.lastError !== "" && !root.hasData)
             return i18n("Error: %1", root.lastError)
         if (!root.hasData)
@@ -777,6 +799,7 @@ PlasmoidItem {
         PlasmaCore.Action {
             text: i18n("Refresh now")
             icon.name: "view-refresh"
+            visible: root.usageShown
             onTriggered: root.refresh()
         }
     ]

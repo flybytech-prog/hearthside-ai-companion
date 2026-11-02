@@ -11,8 +11,9 @@ import "ChatSites.js" as ChatSites
 PlasmaExtras.Representation {
     id: full
 
-    readonly property bool chatAvailable: root.chatSiteIds.length > 0
-    readonly property bool onChat: full.chatAvailable && root.popupTab === "chat"
+    // Settings → General → Show tabs; Chat also needs an enabled site.
+    readonly property bool chatAvailable: root.chatShown
+    readonly property bool onChat: full.chatAvailable && root.shownTab === "chat"
     // The built-in Ollama chat is shown instead of the web chat.
     readonly property bool onOllama: full.onChat && root.chatSiteId === "ollama"
     readonly property var popupSize: ChatSites.popupSize(
@@ -20,7 +21,8 @@ PlasmaExtras.Representation {
         Kirigami.Units.gridUnit,
         // The popup's own screen, not the whole virtual desktop.
         Screen.width,
-        Screen.height
+        Screen.height,
+        root.popupScale
     )
 
     Layout.minimumWidth: Kirigami.Units.gridUnit * 18
@@ -36,6 +38,11 @@ PlasmaExtras.Representation {
             else if (root.expanded && full.onChat)
                 chatView.focusLater()
         }
+        // A hidden Chat tab keeps no web view or saved sign-ins open.
+        function onChatShownChanged() {
+            if (!root.chatShown)
+                chatView.stop()
+        }
     }
 
     header: PlasmaExtras.PlasmoidHeading {
@@ -48,7 +55,7 @@ PlasmaExtras.Representation {
 
                 Kirigami.Heading {
                     Layout.fillWidth: true
-                    visible: !full.chatAvailable
+                    visible: !tabBar.visible
                     level: 2
                     text: i18n("Hearthside")
                     elide: Text.ElideRight
@@ -56,7 +63,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.TabBar {
                     id: tabBar
                     Layout.fillWidth: true
-                    visible: full.chatAvailable
+                    visible: full.chatAvailable && root.usageShown
 
                     Binding on currentIndex {
                         value: full.onChat ? 0 : 1
@@ -76,6 +83,7 @@ PlasmaExtras.Representation {
                 PlasmaComponents.ToolButton {
                     icon.name: "view-refresh"
                     display: QQC2.AbstractButton.IconOnly
+                    visible: root.usageShown
                     onClicked: root.refresh()
                     QQC2.ToolTip.text: i18n("Refresh now")
                     QQC2.ToolTip.visible: hovered
@@ -307,7 +315,7 @@ PlasmaExtras.Representation {
             OllamaChatView {
                 id: ollamaView
                 current: full.onOllama && root.expanded
-                siteEnabled: root.chatSiteIds.indexOf("ollama") >= 0
+                siteEnabled: root.chatShown && root.chatSiteIds.indexOf("ollama") >= 0
                 address: root.chatOllamaAddress
                 appletId: Math.max(0, root.chatAppletId)
             }
