@@ -755,6 +755,9 @@ ColumnLayout {
 
         QQC2.ScrollView {
             anchors.fill: parent
+            // Text wraps; the side margins made the content a few pixels wider
+            // than the view, which showed a stray horizontal scroll bar.
+            QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
 
             ListView {
                 id: transcriptView
@@ -1033,6 +1036,7 @@ ColumnLayout {
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.maximumHeight: Kirigami.Units.gridUnit * 8
+            QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
 
             PlasmaComponents.TextArea {
                 id: input
