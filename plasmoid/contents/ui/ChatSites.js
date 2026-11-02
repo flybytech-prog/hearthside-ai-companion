@@ -565,6 +565,10 @@ function displayHost(url) {
     if (!match)
         return ""
     var authority = match[1]
+    // Browsers read "\" as "/", so "evil.example\@good.example" is on
+    // evil.example: unreadable rather than guessed.
+    if (authority.indexOf("\\") >= 0)
+        return ""
     authority = authority.slice(authority.lastIndexOf("@") + 1)
     var host
     if (authority.charAt(0) === "[") {
@@ -610,6 +614,21 @@ function offSiteHost(request) {
     if (host !== "" && knownHost(site, host))
         return { off: false, host: "" }
     return { off: true, host: shortHost(host) }
+}
+
+// {kind, host} naming a sign-in window: "page" with the host of its own
+// http(s) address; while it has none (about:blank, empty, a page it was
+// written into) "opener" with the host of request.openerUrl, the page that
+// opened it; "unknown" when neither is readable. Hosts as in offSiteHost.
+function overlayHost(request) {
+    var info = request || {}
+    var own = displayHost(info.url)
+    if (own !== "")
+        return { kind: "page", host: shortHost(own) }
+    var opener = displayHost(info.openerUrl)
+    if (opener !== "")
+        return { kind: "opener", host: shortHost(opener) }
+    return { kind: "unknown", host: "" }
 }
 
 // "allow" | "block" for an embedded frame. Frames may load https from any

@@ -225,13 +225,23 @@ ColumnLayout {
         chatView.focusLater()
     }
 
-    // Untrusted file names are shown as plain text, shortened, with hidden
-    // direction and zero-width characters made visible (⟦U+202E⟧), so
-    // "invoice⟦U+202E⟧fdp.exe" can't pass for a PDF.
+    // Untrusted file names are shown as plain text, with hidden and control
+    // characters made visible (⟦U+202E⟧), so "invoice⟦U+202E⟧fdp.exe" can't
+    // pass for a PDF. Long names are shortened in the middle: the end with
+    // the real (last) extension always stays.
     function plainName(name) {
         var text = OllamaChat.revealHidden(String(name || ""))
+        var dot = text.lastIndexOf(".")
+        var tail = Math.min(59, Math.max(28, dot >= 0 ? text.length - dot : 0))
+        var head = text.slice(0, 59 - tail)
+        var end = text.slice(text.length - tail)
+        // Never split a surrogate pair at either cut.
+        if (/[\ud800-\udbff]$/.test(head))
+            head = head.slice(0, -1)
+        if (/^[\udc00-\udfff]/.test(end))
+            end = end.slice(1)
         if (text.length > 60)
-            text = text.slice(0, 57) + "…"
+            text = head + "…" + end
         return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
 
@@ -428,7 +438,7 @@ ColumnLayout {
                 visible: localOwnerMessage.code === "resend"
                 text: i18n("Dismiss")
                 icon.name: "dialog-close"
-                onTriggered: chatView.web.localOwnerProblem = ""
+                onTriggered: chatView.web.dismissLocalOwner()
             }
         ]
     }
@@ -480,6 +490,58 @@ ColumnLayout {
                 icon.name: "go-home"
                 text: i18n("Back to %1", chatView.web ? chatView.web.activeSiteName : "")
                 onClicked: chatView.home()
+            }
+        }
+    }
+
+    // A page asked to open an address in the system browser. Nothing opens
+    // until Open is clicked; the host is ASCII and plain text.
+    Rectangle {
+        id: externalPrompt
+        objectName: "externalPrompt"
+        Layout.fillWidth: true
+        readonly property string host: chatView.web ? chatView.web.externalHost : ""
+        visible: !!chatView.web && chatView.web.externalUrl !== "" && host !== ""
+        implicitHeight: externalRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+        color: Kirigami.Theme.neutralBackgroundColor
+        border.color: Kirigami.Theme.neutralTextColor
+        border.width: 1
+        radius: Kirigami.Units.cornerRadius
+
+        RowLayout {
+            id: externalRow
+            anchors {
+                left: parent.left
+                right: parent.right
+                verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.largeSpacing
+                rightMargin: Kirigami.Units.smallSpacing
+            }
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Icon {
+                source: "internet-web-browser"
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            }
+            PlasmaComponents.Label {
+                objectName: "externalText"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: i18n("Open %1 in your browser?", externalPrompt.host)
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "externalOpen"
+                icon.name: "internet-web-browser"
+                text: i18n("Open")
+                onClicked: chatView.web.acceptExternal()
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "externalCancel"
+                icon.name: "dialog-cancel"
+                text: i18n("Cancel")
+                onClicked: chatView.web.clearExternal()
             }
         }
     }

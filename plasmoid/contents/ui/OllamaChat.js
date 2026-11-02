@@ -387,29 +387,74 @@ function serverErrorText(raw) {
 
 // --- Hidden characters ------------------------------------------------------
 
-// Direction controls (U+200E/F, U+061C, U+202A-E, U+2066-9) and zero-width
-// characters (U+200B-D, U+FEFF) change how text looks without being seen,
-// so a copied command could differ from the one on screen. Each one is
-// shown as a visible marker such as ⟦U+202E⟧ instead.
-var HIDDEN_CHARS = /[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+// Characters that change how text looks, or what a terminal does with it,
+// without being seen, so a copied command could differ from the one on
+// screen: control characters (C0 except tab and line feed, so CR and ESC
+// too; DEL; C1 with U+0085), U+2028/2029, the soft hyphen U+00AD, U+034F,
+// direction controls (U+061C, U+200E/F, U+202A-E, U+2066-9, U+206A-F),
+// zero-width and invisible characters (U+200B-D, U+2060-4, U+FEFF, U+180E,
+// U+17B4/5, Hangul fillers U+115F/1160/3164/FFA0), variation selectors
+// (U+FE00-F, U+E0100-E01EF), interlinear annotation (U+FFF9-B), shorthand
+// format controls (U+1BCA0-3), musical format controls (U+1D173-A) and tag
+// characters (U+E0000-E007F). Each one is shown as a visible marker such as
+// ⟦U+202E⟧ instead. Only exception: one U+FE0F right after an emoji, which
+// just asks for the colour form of that emoji.
+// Built from strings because Qt's JavaScript lexer rejects an escaped U+2028 inside a
+// regular expression literal.
+var HIDDEN_RANGES = [
+    "\\u0000-\\u0008", "\\u000b-\\u001f", "\\u007f-\\u009f", "\\u00ad", "\\u034f",
+    "\\u061c", "\\u115f\\u1160", "\\u17b4\\u17b5", "\\u180e", "\\u200b-\\u200f",
+    "\\u2028\\u2029", "\\u202a-\\u202e", "\\u2060-\\u2064", "\\u2066-\\u206f", "\\u3164",
+    "\\ufe00-\\ufe0f", "\\ufeff", "\\uffa0", "\\ufff9-\\ufffb", "\\u{1bca0}-\\u{1bca3}",
+    "\\u{1d173}-\\u{1d17a}", "\\u{e0000}-\\u{e007f}", "\\u{e0100}-\\u{e01ef}"
+]
+var HIDDEN_CHARS = new RegExp("[" + HIDDEN_RANGES.join("") + "]", "gu")
 
 function hexCode(character) {
-    var hex = character.charCodeAt(0).toString(16).toUpperCase()
+    var hex = character.codePointAt(0).toString(16).toUpperCase()
     while (hex.length < 4)
         hex = "0" + hex
     return "U+" + hex
 }
 
+// Code points that have an emoji form: symbols, arrows, dingbats and the
+// emoji planes. Only used to let one U+FE0F after them stay unmarked.
+function isEmojiBase(point) {
+    return (point >= 0x1f000 && point <= 0x1faff)
+        || (point >= 0x2190 && point <= 0x21ff)
+        || (point >= 0x2300 && point <= 0x23ff)
+        || (point >= 0x25a0 && point <= 0x27bf)
+        || (point >= 0x2900 && point <= 0x297f)
+        || (point >= 0x2b00 && point <= 0x2bff)
+        || [0x00a9, 0x00ae, 0x203c, 0x2049, 0x2122, 0x2139, 0x24c2,
+            0x3030, 0x303d, 0x3297, 0x3299].indexOf(point) >= 0
+}
+
+// The code point that ends just before offset, -1 at the start.
+function pointBefore(text, offset) {
+    if (offset <= 0)
+        return -1
+    var low = text.charCodeAt(offset - 1)
+    if (low >= 0xdc00 && low <= 0xdfff && offset >= 2) {
+        var high = text.charCodeAt(offset - 2)
+        if (high >= 0xd800 && high <= 0xdbff)
+            return text.codePointAt(offset - 2)
+    }
+    return low
+}
+
 function revealHidden(text) {
     if (typeof text !== "string")
         return ""
-    return text.replace(HIDDEN_CHARS, function (character) {
-        return "\u27e6" + hexCode(character) + "\u27e7"
+    return text.replace(HIDDEN_CHARS, function (character, offset, whole) {
+        if (character === "️" && isEmojiBase(pointBefore(whole, offset)))
+            return character
+        return "⟦" + hexCode(character) + "⟧"
     })
 }
 
 function hasHidden(text) {
-    return typeof text === "string" && text.search(HIDDEN_CHARS) >= 0
+    return typeof text === "string" && revealHidden(text) !== text
 }
 
 // --- Reply layout -----------------------------------------------------------

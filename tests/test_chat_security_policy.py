@@ -2818,3 +2818,390 @@ def test_proof_hidden_chars_rule_catches(path, old, new):
     ollama = _mutated(path, old, new) if path == OLLAMA_CHAT_VIEW else _read_code(OLLAMA_CHAT_VIEW)
     chat = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
     assert _hidden_chars_problems(ollama, chat)
+
+
+# N1 A page never opens the system browser by itself. Qt.openUrlExternally
+# appears only in ChatWebView.openExternally (the toolbar's Open in browser,
+# for a page of the current site) and ChatWebView.acceptExternal (Open on the
+# "Open <host> in your browser?" prompt). Page-driven navigations and windows
+# only call askExternal, which keeps one prompt at a time and rate limits.
+# Open and Open in browser are reached only from a button click.
+
+def _external_open_problems(sources):
+    problems = []
+    web_name = _rel(CHAT_WEB_VIEW)
+    web = sources.get(web_name, "")
+    opens = [(name, match.start()) for name, code in sources.items()
+             for match in re.finditer(r"\bopenUrlExternally\b", code)]
+    allowed = []
+    for function in ("openExternally", "acceptExternal"):
+        body = _function_body(web, function)
+        if body is None:
+            problems.append(f"ChatWebView.qml: `function {function}(` must be defined once")
+            continue
+        start = web.find(body)
+        allowed.append((start, start + len(body)))
+        if len(re.findall(r"\bQt\s*\.\s*openUrlExternally\s*\(", body)) != 1:
+            problems.append(f"ChatWebView.{function} must call Qt.openUrlExternally once")
+    for name, offset in opens:
+        if name != web_name or not any(low <= offset < high for low, high in allowed):
+            problems.append(f"{name}:{_line_of(sources[name], offset)}: openUrlExternally outside "
+                            "ChatWebView.openExternally / acceptExternal")
+    opener = _function_body(web, "openExternally") or ""
+    if not re.match(r"\{\s*if\s*\(\s*chatWeb\s*\.\s*canOpenExternally\s*\)\s*Qt\s*\.\s*openUrlExternally\s*\(",
+                    opener):
+        problems.append("ChatWebView.openExternally must open only `if (chatWeb.canOpenExternally)`")
+    accept = _function_body(web, "acceptExternal") or ""
+    if not re.search(r"chatWeb\s*\.\s*clearExternal\s*\(\s*\)\s*if\s*\(\s*ChatSites\s*\.\s*isHttpsUrl\s*\(\s*url\s*\)"
+                     r"\s*\)\s*Qt\s*\.\s*openUrlExternally\s*\(\s*url\s*\)", accept):
+        problems.append("ChatWebView.acceptExternal must clear the prompt, then open only an https url")
+    ask = _function_body(web, "askExternal") or ""
+    if not re.search(r'chatWeb\s*\.\s*externalUrl\s*!==\s*""\s*\|\|\s*now\s*<\s*chatWeb\s*\.\s*externalQuietUntil', ask) \
+            or not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*now\s*\+\s*chatWeb\s*\.\s*externalPromptGap", ask) \
+            or not re.search(r'if\s*\(\s*host\s*===\s*""\s*\)\s*return', ask):
+        problems.append("ChatWebView.askExternal must drop requests while one waits, during the quiet time "
+                        "and without a host, and start the quiet time")
+    clear = _function_body(web, "clearExternal") or ""
+    if not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*"
+                     r"chatWeb\s*\.\s*externalPromptGap", clear):
+        problems.append("ChatWebView.clearExternal must start the quiet time")
+    # The page-driven paths only ask.
+    navs = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(navs) != 1 or not re.search(r'if\s*\(\s*verdict\s*===\s*"external"\s*\)\s*'
+                                       r"chatWeb\s*\.\s*askExternal\s*\(\s*request\s*\.\s*url\s*\.\s*toString\s*\(\s*\)\s*\)",
+                                       navs[0] if navs else ""):
+        problems.append('onNavigationRequested: an "external" verdict must only call chatWeb.askExternal(...)')
+    windows = [body for _, body in _blocks(web, r"\bonNewWindowRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{")]
+    if len(windows) != 1 or not re.search(r"request\s*\.\s*userInitiated\s*&&\s*ChatSites\s*\.\s*isHttpsUrl\s*\(\s*url\s*\)"
+                                          r"\s*\)\s*chatWeb\s*\.\s*askExternal\s*\(\s*url\s*\)",
+                                          windows[0] if windows else ""):
+        problems.append("onNewWindowRequested: only a clicked https window may call chatWeb.askExternal(url)")
+    # Open and the toolbar button are only ever a click away.
+    accepts = [(name, match.start()) for name, code in sources.items()
+               for match in re.finditer(r"\bacceptExternal\s*\(", code)]
+    view_name = _rel(CHAT_VIEW)
+    view = sources.get(view_name, "")
+    good_accepts = [(name, offset) for name, offset in accepts
+                    if name == view_name and re.match(r"acceptExternal\s*\(\s*\)", view[offset:])
+                    and re.search(r"onClicked\s*:\s*chatView\s*\.\s*web\s*\.\s*$", view[:offset].splitlines()[-1] + "")]
+    defined = [(name, offset) for name, offset in accepts
+               if name == web_name and re.search(r"\bfunction\s+$", web[:offset])]
+    if len(good_accepts) != 1 or len(accepts) != len(good_accepts) + len(defined) or len(defined) != 1:
+        problems.append("acceptExternal is called only from one `onClicked: chatView.web.acceptExternal()` in ChatView")
+    prompts = [body for _, body in _blocks(view, r"(?<![\w.])Rectangle\s*\{") if 'objectName: "externalPrompt"' in body]
+    if len(prompts) != 1 or "acceptExternal" not in prompts[0] \
+            or not re.search(r"onClicked\s*:\s*chatView\s*\.\s*web\s*\.\s*clearExternal\s*\(\s*\)", prompts[0]):
+        problems.append("ChatView.qml: one externalPrompt with Open (acceptExternal) and Cancel (clearExternal)")
+    for name, code in sources.items():
+        for match in re.finditer(r"\bopenExternally\s*\(", code):
+            line = code[:match.end()].splitlines()[-1]
+            if re.search(r"\bfunction\s+openExternally\s*\($", line):
+                continue
+            if name == _rel(FULL_REPRESENTATION) and re.search(r"onClicked\s*:\s*chatView\s*\.\s*openExternally\s*\($", line):
+                continue
+            body = _function_body(view, "openExternally") or ""
+            if name == view_name and re.search(r"chatView\s*\.\s*web\s*\.\s*openExternally\s*\($", line) \
+                    and body and view.find(body) <= match.start() < view.find(body) + len(body):
+                continue
+            problems.append(f"{name}:{_line_of(code, match.start())}: openExternally() outside the toolbar click")
+    labels = [(start, body) for start, body in _blocks(view, TEXT_ELEMENT)
+              if re.search(r"\bexternal(?:Host|Url)\b|\bexternalPrompt\s*\.\s*host\b", body)]
+    if not labels:
+        problems.append("ChatView.qml: no label names the host of the browser prompt")
+    for start, body in labels:
+        if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(body))) != 1:
+            problems.append(f"ChatView.qml:{_line_of(view, start)}: the browser prompt host must be PlainText")
+    for start, body in _blocks(view, MESSAGE_ELEMENT):
+        if re.search(r"\bexternal(?:Host|Url)\b|\bexternalPrompt\b", body):
+            problems.append(f"ChatView.qml:{_line_of(view, start)}: the browser prompt in a rich-text message")
+    return problems
+
+
+def test_pages_only_ask_to_open_the_browser():
+    problems = _external_open_problems(_all_code())
+    assert not problems, problems
+
+
+EXTERNAL_MUTATIONS = [
+    (CHAT_WEB_VIEW, "chatWeb.askExternal(request.url.toString())", "Qt.openUrlExternally(request.url)"),
+    (CHAT_WEB_VIEW, "chatWeb.askExternal(url)", "Qt.openUrlExternally(url)"),
+    (CHAT_WEB_VIEW, "        chatWeb.externalUrl = url\n    }",
+     "        chatWeb.externalUrl = url\n        chatWeb.acceptExternal()\n    }"),
+    (CHAT_WEB_VIEW, '        if (chatWeb.externalUrl !== "" || now < chatWeb.externalQuietUntil',
+     "        if (now < chatWeb.externalQuietUntil"),
+    (CHAT_WEB_VIEW, "        chatWeb.externalQuietUntil = now + chatWeb.externalPromptGap\n", ""),
+    (CHAT_WEB_VIEW, '        if (host === "")\n            return\n', ""),
+    (CHAT_WEB_VIEW, "        chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap\n", ""),
+    (CHAT_WEB_VIEW, "        if (ChatSites.isHttpsUrl(url))\n            Qt.openUrlExternally(url)",
+     "        Qt.openUrlExternally(url)"),
+    (CHAT_WEB_VIEW, "        if (chatWeb.canOpenExternally)\n            Qt.openUrlExternally(chatWeb.activeView.url)",
+     "        Qt.openUrlExternally(chatWeb.activeView.url)"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
+     "        chatWeb.syncViews()\n        chatWeb.acceptExternal()\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.askExternal(url)",
+     "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.acceptExternal(url)"),
+    (CHAT_WEB_VIEW, "                else if (verdict !== \"block\" && request.userInitiated\n",
+     "                else if (verdict !== \"block\"\n"),
+    (CHAT_VIEW, "onClicked: chatView.web.clearExternal()", "onClicked: chatView.web.acceptExternal()"),
+    (CHAT_VIEW, "onClicked: chatView.web.acceptExternal()", "onClicked: {}"),
+    (CHAT_VIEW, "        if (chatView.web)\n            chatView.web.openExternally()",
+     "        if (chatView.web)\n            chatView.web.openExternally()\n        chatView.web.acceptExternal()"),
+    (CHAT_VIEW, "    function focusView() {\n", "    function focusView() {\n        chatView.web.openExternally()\n"),
+    (CHAT_VIEW, '                objectName: "externalText"\n                Layout.fillWidth: true\n'
+                "                textFormat: Text.PlainText\n",
+     '                objectName: "externalText"\n                Layout.fillWidth: true\n'),
+    (CHAT_VIEW, "    Kirigami.InlineMessage {\n        Layout.fillWidth: true\n        visible: !!chatView.web && chatView.web.pendingDownloadName",
+     "    Kirigami.InlineMessage { text: chatView.web.externalHost }\n"
+     "    Kirigami.InlineMessage {\n        Layout.fillWidth: true\n        visible: !!chatView.web && chatView.web.pendingDownloadName"),
+    (FULL_REPRESENTATION, "onClicked: chatView.openExternally()", "onClicked: Qt.openUrlExternally(\"https://x.example/\")"),
+    (USAGE_VIEW, "import QtQuick\n", "import QtQuick\n// x\n"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), EXTERNAL_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(EXTERNAL_MUTATIONS)])
+def test_proof_external_open_rule_catches(path, old, new):
+    sources = _all_code()
+    sources[_rel(path)] = _mutated(path, old, new)
+    if path == USAGE_VIEW:
+        # A new browser call anywhere else.
+        sources[_rel(path)] += "\nfunction leak(u) { Qt.openUrlExternally(u) }\n"
+    assert _external_open_problems(sources)
+
+
+# N4 A "Send the form again" pass is good for ownerPassLifetime (10 s) only:
+# each grant stamps ownerPassExpires, the gate drops an expired pass before
+# it is used, and Dismiss, any problem and the timer clear every pass.
+
+def _owner_pass_expiry_problems(web, view):
+    problems = []
+    if not re.search(r"(?m)^\s*property\s+int\s+ownerPassLifetime\s*:\s*10000\s*$", web):
+        problems.append("ChatWebView.qml: `property int ownerPassLifetime: 10000`")
+    grants = list(re.finditer(r"\b(\w+)\s*\.\s*ownerPass\s*=\s*(pending\.url|chatWeb\.localCreatePass)\b", web))
+    if len(grants) != 2:
+        problems.append("ChatWebView.qml: expected two pass grants (pending.url, localCreatePass)")
+    for match in grants:
+        stamp = rf"\s*{match.group(1)}\s*\.\s*ownerPassExpires\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*chatWeb\s*\.\s*ownerPassLifetime\b"
+        if not re.match(stamp, web[match.end():]):
+            problems.append(f"line {_line_of(web, match.start())}: a pass grant must be followed by its expiry stamp")
+    navs = [body for _, body in _blocks(web, NAV_HANDLER)]
+    nav = navs[0] if len(navs) == 1 else ""
+    expiry = re.search(r'if\s*\(\s*Date\s*\.\s*now\s*\(\s*\)\s*>=\s*page\s*\.\s*ownerPassExpires\s*\)\s*'
+                       r'page\s*\.\s*ownerPass\s*=\s*""', nav)
+    gate = re.search(r"\blocalOwnerGate\s*\(", nav)
+    if not expiry or not gate or expiry.start() > gate.start():
+        problems.append("onNavigationRequested must drop an expired pass before localOwnerGate")
+    for function in ("blankLocalViews", "dismissLocalOwner"):
+        if not re.search(r"chatWeb\s*\.\s*clearOwnerPasses\s*\(\s*\)", _function_body(web, function) or ""):
+            problems.append(f"ChatWebView.{function} must call clearOwnerPasses()")
+    clear = _function_body(web, "clearOwnerPasses") or ""
+    if not re.search(r'views\s*\[\s*index\s*\]\s*\.\s*ownerPass\s*=\s*""', clear) \
+            or not re.search(r'chatWeb\s*\.\s*localCreatePass\s*=\s*""', clear):
+        problems.append("ChatWebView.clearOwnerPasses must clear every view's pass and the create pass")
+    timers = [body for _, body in _blocks(web, r"(?<![\w.])Timer\s*\{") if "id: ownerPassTimer" in body]
+    if len(timers) != 1 or not re.search(r"interval\s*:\s*chatWeb\s*\.\s*ownerPassLifetime", timers[0]) \
+            or "clearOwnerPasses" not in timers[0] or "dismissLocalOwner" not in timers[0]:
+        problems.append("ChatWebView.qml: ownerPassTimer (ownerPassLifetime) must clear the passes")
+    if not re.search(r"ownerPass\s*=\s*pending\s*\.\s*url\s*view\s*\.\s*ownerPassExpires[^\n]*\n\s*ownerPassTimer\s*\.\s*restart\s*\(\s*\)",
+                     web):
+        problems.append("localOwnerFinished must restart ownerPassTimer with each pass")
+    if len(re.findall(r"onTriggered\s*:\s*chatView\s*\.\s*web\s*\.\s*dismissLocalOwner\s*\(\s*\)", view)) != 1 \
+            or re.search(r"\blocalOwnerProblem\s*=(?!=)", view):
+        problems.append("ChatView.qml: Dismiss must call chatView.web.dismissLocalOwner(), never set the problem")
+    return problems
+
+
+def test_owner_pass_expires_and_ends_on_dismiss():
+    problems = _owner_pass_expiry_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_VIEW))
+    assert not problems, problems
+
+
+OWNER_PASS_MUTATIONS = [
+    (CHAT_WEB_VIEW, "property int ownerPassLifetime: 10000", "property int ownerPassLifetime: 600000"),
+    (CHAT_WEB_VIEW, "        view.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime\n", ""),
+    (CHAT_WEB_VIEW, "                    page.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime\n", ""),
+    (CHAT_WEB_VIEW, "                    if (Date.now() >= page.ownerPassExpires)\n                        page.ownerPass = \"\"\n", ""),
+    (CHAT_WEB_VIEW, "    function blankLocalViews() {\n        chatWeb.clearOwnerPasses()\n",
+     "    function blankLocalViews() {\n"),
+    (CHAT_WEB_VIEW, "    function dismissLocalOwner() {\n        chatWeb.clearOwnerPasses()\n",
+     "    function dismissLocalOwner() {\n"),
+    (CHAT_WEB_VIEW, "            views[index].ownerPass = \"\"\n", ""),
+    (CHAT_WEB_VIEW, "        interval: chatWeb.ownerPassLifetime\n", "        interval: 3600000\n"),
+    (CHAT_WEB_VIEW, "        ownerPassTimer.restart()\n", ""),
+    (CHAT_VIEW, "onTriggered: chatView.web.dismissLocalOwner()", "onTriggered: chatView.web.localOwnerProblem = \"\""),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), OWNER_PASS_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(OWNER_PASS_MUTATIONS)])
+def test_proof_owner_pass_rule_catches(path, old, new):
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    view = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    assert _owner_pass_expiry_problems(web, view)
+
+
+# N5 The sign-in window's title always names a host (ChatSites.overlayHost):
+# its own, or while it is blank the opener's. It is plain text and never the
+# bare, trusted-looking "Sign-in window".
+
+def _overlay_title_problems(web):
+    problems = []
+    if not re.search(r"ChatSites\s*\.\s*overlayHost\s*\(\s*\{\s*url\s*:\s*chatWeb\s*\.\s*overlayView\s*\.\s*url"
+                     r"\s*\.\s*toString\s*\(\s*\)\s*,\s*openerUrl\s*:\s*chatWeb\s*\.\s*overlayView\s*\.\s*openerUrl\s*\}", web):
+        problems.append("ChatWebView.overlayTitle must come from ChatSites.overlayHost({url, openerUrl})")
+    if len(re.findall(r"chatWeb\s*\.\s*openOverlay\s*\(\s*request\s*,\s*page\s*\.\s*site\s*,\s*"
+                      r"page\s*\.\s*url\s*\.\s*toString\s*\(\s*\)\s*\)", web)) != 1:
+        problems.append("onNewWindowRequested must hand the opener's address to openOverlay")
+    labels = [body for _, body in _blocks(web, TEXT_ELEMENT) if 'objectName: "overlayTitle"' in body]
+    if len(labels) != 1:
+        return problems + ["ChatWebView.qml: one overlayTitle label"]
+    label = labels[0]
+    if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(label))) != 1:
+        problems.append("the sign-in window title must be PlainText")
+    texts = re.findall(r'i18n\s*\(\s*"([^"]*)"', label)
+    if not texts or any("%1" not in text and "unknown" not in text for text in texts):
+        problems.append(f"every sign-in window title must name a host or say it is unknown: {texts}")
+    if re.search(r'i18n\s*\(\s*"Sign-in window"\s*\)', web):
+        problems.append('ChatWebView.qml: the bare "Sign-in window" title is gone')
+    return problems
+
+
+def test_sign_in_window_title_names_a_host():
+    problems = _overlay_title_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('? i18n("Sign-in window: %1", chatWeb.overlayTitle.host)', '? i18n("Sign-in window")'),
+    (": i18n(\"Window opened by an unknown page\")", ": i18n(\"Sign-in\")"),
+    ("chatWeb.openOverlay(request, page.site, page.url.toString())", "chatWeb.openOverlay(request, page.site, \"\")"),
+    ('                    objectName: "overlayTitle"\n                    Layout.fillWidth: true\n'
+     "                    textFormat: Text.PlainText\n",
+     '                    objectName: "overlayTitle"\n                    Layout.fillWidth: true\n'),
+    ("            openerUrl: chatWeb.overlayView.openerUrl\n", "            openerUrl: \"\"\n"),
+])
+def test_proof_overlay_title_rule_catches(old, new):
+    assert _overlay_title_problems(_mutated(CHAT_WEB_VIEW, old, new))
+
+
+# N2 HIDDEN_CHARS (OllamaChat.js) covers every listed hidden, control and
+# format character, keeps tab and line feed, is a /gu expression and
+# hexCode names astral code points (codePointAt).
+
+HIDDEN_REQUIRED = [
+    (0x0000, 0x0008), (0x000B, 0x001F), (0x007F, 0x009F), (0x00AD, 0x00AD), (0x034F, 0x034F),
+    (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180E, 0x180E), (0x200B, 0x200F),
+    (0x2028, 0x2029), (0x202A, 0x202E), (0x2060, 0x2064), (0x2066, 0x2069), (0x206A, 0x206F),
+    (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF9, 0xFFFB),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE007F), (0xE0100, 0xE01EF),
+]
+HIDDEN_KEPT = [0x09, 0x0A, 0x20, 0x41, 0xA0, 0xE9, 0x05D0, 0x0627, 0x2065, 0x1F600, 0x2764]
+
+
+def _js_class_to_python(parts):
+    out = []
+    for part in parts:
+        text = re.sub(r"\\u\{([0-9a-fA-F]{1,6})\}", lambda m: "\\U" + m.group(1).rjust(8, "0"), part)
+        if re.search(r"\\(?![uU])|\\u(?![0-9a-fA-F]{4})|\\U(?![0-9a-fA-F]{8})", text):
+            return None
+        out.append(text)
+    return "[" + "".join(out) + "]"
+
+
+def _hidden_regex_problems(js):
+    problems = []
+    ranges = re.search(r"\bvar\s+HIDDEN_RANGES\s*=\s*\[([^\]]*)\]", js)
+    built = re.findall(r'\bvar\s+HIDDEN_CHARS\s*=\s*new\s+RegExp\s*\(\s*"\["\s*\+\s*HIDDEN_RANGES\s*\.\s*join\s*\(\s*""\s*\)'
+                       r'\s*\+\s*"\]"\s*,\s*"([a-z]*)"\s*\)', js)
+    if not ranges or len(built) != 1 or len(re.findall(r"\bHIDDEN_CHARS\s*=", js)) != 1:
+        return ['OllamaChat.js: `var HIDDEN_CHARS = new RegExp("[" + HIDDEN_RANGES.join("") + "]", "gu")` once']
+    if sorted(built[0]) != ["g", "u"]:
+        problems.append(f'HIDDEN_CHARS flags must be "gu", not "{built[0]}"')
+    parts = re.findall(r'"((?:[^"\\]|\\.)*)"', ranges.group(1))
+    # Each JS string "\\u0000-\\u0008" holds the regex text \u0000-\u0008.
+    source = _js_class_to_python([part.replace("\\\\", "\\") for part in parts])
+    if source is None:
+        return problems + ["HIDDEN_RANGES may hold only \\uXXXX and \\u{X} escapes"]
+    pattern = re.compile(source)
+    for low, high in HIDDEN_REQUIRED:
+        missing = [point for point in range(low, high + 1) if not pattern.fullmatch(chr(point))]
+        if missing:
+            problems.append(f"HIDDEN_CHARS misses U+{missing[0]:04X} (range U+{low:04X}-U+{high:04X})")
+    for point in HIDDEN_KEPT:
+        if pattern.fullmatch(chr(point)):
+            problems.append(f"HIDDEN_CHARS must not mark U+{point:04X}")
+    hex_code = _function_body(js, "hexCode") or ""
+    if not re.search(r"\bcodePointAt\s*\(\s*0\s*\)", hex_code) or "charCodeAt" in hex_code:
+        problems.append("OllamaChat.hexCode must use codePointAt(0)")
+    reveal = _function_body(js, "revealHidden") or ""
+    if not re.search(r"\.\s*replace\s*\(\s*HIDDEN_CHARS\s*,", reveal):
+        problems.append("OllamaChat.revealHidden must replace HIDDEN_CHARS")
+    if not re.search(r"return\s+typeof\s+text\s*===\s*\"string\"\s*&&\s*revealHidden\s*\(\s*text\s*\)\s*!==\s*text",
+                     _function_body(js, "hasHidden") or ""):
+        problems.append("OllamaChat.hasHidden must be `revealHidden(text) !== text`")
+    return problems
+
+
+def test_hidden_chars_regex_covers_every_listed_range():
+    problems = _hidden_regex_problems(_read_code(OLLAMA_CHAT_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('"\\\\u000b-\\\\u001f"', '"\\\\u000b-\\\\u000c"'),            # drops CR and ESC
+    ('"\\\\u{e0000}-\\\\u{e007f}", ', ""),                         # drops the tag characters
+    ('"\\\\u0000-\\\\u0008"', '"\\\\u0000-\\\\u000a"'),            # marks tab and line feed
+    ('"\\\\u00ad", ', ""),
+    ('"\\\\u2028\\\\u2029", ', ""),
+    ('"\\\\u{e0100}-\\\\u{e01ef}"', '"\\\\u{e0100}-\\\\u{e01e0}"'),
+    ('HIDDEN_RANGES.join("") + "]", "gu")', 'HIDDEN_RANGES.join("") + "]", "g")'),
+    ("character.codePointAt(0)", "character.charCodeAt(0)"),
+    ("return typeof text === \"string\" && revealHidden(text) !== text",
+     "return typeof text === \"string\" && text.search(HIDDEN_CHARS) >= 0"),
+])
+def test_proof_hidden_chars_regex_rule_catches(old, new):
+    assert _hidden_regex_problems(_mutated(OLLAMA_CHAT_JS, old, new))
+
+
+# N3 Every helper the plasmoid starts runs as `python3 -P -m hearthside`
+# (-P: no working folder on the module path), RefreshGate.js included.
+
+def _helper_launch_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        for match in re.finditer(r"\bpython[0-9.]*\b|-m\s+hearthside\b|\bhearthside\s+--", code):
+            text = match.group(0)
+            if text.startswith("python"):
+                if not re.compile(r"python3 -P -m hearthside(?![\w.])").match(code, match.start()):
+                    problems.append(f"{name}:{_line_of(code, match.start())}: helper not started as "
+                                    "`python3 -P -m hearthside`")
+            elif text.startswith("-m"):
+                if code[max(0, match.start() - len("python3 -P ")):match.start()] != "python3 -P ":
+                    problems.append(f"{name}:{_line_of(code, match.start())}: `-m hearthside` without `python3 -P`")
+            elif not code[:match.start()].endswith("python3 -P -m "):
+                problems.append(f"{name}:{_line_of(code, match.start())}: hearthside started without "
+                                "`python3 -P -m`")
+    return problems
+
+
+def test_every_helper_launch_uses_python3_dash_p():
+    problems = _helper_launch_problems(_all_code())
+    assert not problems, problems
+
+
+REFRESH_GATE_JS = UI / "RefreshGate.js"
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (REFRESH_GATE_JS, " python3 -P -m hearthside --json", " python3 -m hearthside --json"),
+    (REFRESH_GATE_JS, " python3 -P -m hearthside --json", " python3 -P -m hearthside.cli --json"),
+    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"python -m hearthside --detect"'),
+    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"python3 -I -m hearthside --detect"'),
+    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"hearthside --detect"'),
+    (CHAT_STORAGE_JS, ' python3 -P -m hearthside"', ' /usr/bin/python3 -m hearthside"'),
+    (OLLAMA_CHAT_JS, " python3 -P -m hearthside --port-owner ", " python3 -m  hearthside --port-owner "),
+])
+def test_proof_helper_launch_rule_catches(path, old, new):
+    sources = _all_code()
+    sources[_rel(path)] = _mutated(path, old, new)
+    assert _helper_launch_problems(sources)

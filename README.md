@@ -56,7 +56,7 @@ plasmashell's memory.
   when Plasma restarts or you choose **Clear chat data**. Every site
   permission (microphone, camera, screen sharing, notifications, location,
   clipboard reading) is denied, downloads ask first, and outside links open
-  in your browser.
+  in your browser only after you confirm.
 - **Built-in Ollama chat** (optional, off by default): talk to the models of
   the Ollama server on this computer with a native chat — model picker,
   streaming replies, Stop, Copy and Clear. No browser engine, conversation in
@@ -276,11 +276,11 @@ fingerprint.
 
 The Chat tab keeps cookies, sessions, and site data in memory only, denies
 every site permission (microphone, camera, screen sharing, notifications,
-location, clipboard reading), asks before each download, opens outside links
-in your browser (which may keep them in its history), and never reads or
-scripts the pages. When a page moves to a site outside the one you chose, a
+location, clipboard reading), asks before each download, asks before opening
+an outside link in your browser (which may keep it in its history), and
+never reads or scripts the pages. When a page moves to a site outside the one you chose, a
 notice above it names the real host. Provider names, plans and errors, Ollama
-replies and download names are shown as plain text, with hidden direction
+replies and download names are shown as plain text, with hidden and control
 characters made visible. The Chat tab's engine is Qt WebEngine (Chromium):
 keep it updated and restart Plasma after it updates. Page console messages
 are discarded. Custom chat addresses are stored in plain text in your Plasma

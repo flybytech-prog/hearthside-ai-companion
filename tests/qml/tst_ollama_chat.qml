@@ -772,18 +772,72 @@ TestCase {
 
     // --- hidden characters (L3) ----------------------------------------------
 
+    // Every range of HIDDEN_CHARS: [first, last] code points, both ends and
+    // the middle checked.
+    readonly property var hiddenRanges: [
+        [0x0000, 0x0008], [0x000b, 0x001f], [0x007f, 0x009f], [0x00ad, 0x00ad],
+        [0x034f, 0x034f], [0x061c, 0x061c], [0x115f, 0x1160], [0x17b4, 0x17b5],
+        [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x2029], [0x202a, 0x202e],
+        [0x2060, 0x2064], [0x2066, 0x2069], [0x206a, 0x206f], [0x3164, 0x3164],
+        [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff9, 0xfffb],
+        [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe007f], [0xe0100, 0xe01ef]
+    ]
+
+    function marker(point) {
+        var code = point.toString(16).toUpperCase()
+        while (code.length < 4)
+            code = "0" + code
+        return "⟦U+" + code + "⟧"
+    }
+
     function test_revealHiddenMarksEveryHiddenCharacter() {
-        var hidden = [0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c,
-                      0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff]
-        for (var index = 0; index < hidden.length; index++) {
-            var text = "a" + String.fromCharCode(hidden[index]) + "b"
-            var code = hidden[index].toString(16).toUpperCase()
-            while (code.length < 4)
-                code = "0" + code
-            compare(OllamaChat.revealHidden(text), "a⟦U+" + code + "⟧b")
-            verify(OllamaChat.hasHidden(text))
-            verify(!OllamaChat.hasHidden(OllamaChat.revealHidden(text)))
+        for (var range = 0; range < hiddenRanges.length; range++) {
+            var first = hiddenRanges[range][0]
+            var last = hiddenRanges[range][1]
+            var points = [first, Math.floor((first + last) / 2), last]
+            for (var index = 0; index < points.length; index++) {
+                var text = "a" + String.fromCodePoint(points[index]) + "b"
+                compare(OllamaChat.revealHidden(text), "a" + marker(points[index]) + "b")
+                verify(OllamaChat.hasHidden(text), marker(points[index]))
+                verify(!OllamaChat.hasHidden(OllamaChat.revealHidden(text)))
+            }
         }
+    }
+
+    function test_revealHiddenNamedControls() {
+        // CR would act as Enter in a terminal, ESC starts escape sequences.
+        compare(OllamaChat.revealHidden("ls\r\nrm -rf ~"), "ls⟦U+000D⟧\nrm -rf ~")
+        compare(OllamaChat.revealHidden("\u001b[2Jok"), "⟦U+001B⟧[2Jok")
+        compare(OllamaChat.revealHidden("a\u0085b c d"), "a⟦U+0085⟧b⟦U+2028⟧c⟦U+2029⟧d")
+        compare(OllamaChat.revealHidden("pass­word"), "pass⟦U+00AD⟧word")
+        // Tag characters spell hidden ASCII ("hi"); each one is marked.
+        compare(OllamaChat.revealHidden("x\u{e0068}\u{e0069}\u{e007f}"),
+                "x⟦U+E0068⟧⟦U+E0069⟧⟦U+E007F⟧")
+        compare(OllamaChat.revealHidden("e\u{e0100}"), "e⟦U+E0100⟧")
+    }
+
+    function test_revealHiddenKeepsTabAndNewline() {
+        compare(OllamaChat.revealHidden("a\tb\nc"), "a\tb\nc")
+        verify(!OllamaChat.hasHidden("a\tb\nc"))
+        // Next to the hidden ranges, but visible.
+        var visible = [0x0020, 0x00a0, 0x00ac, 0x00ae, 0x034e, 0x0350, 0x200a, 0x2010,
+                       0x2065, 0x2070, 0xfdff, 0xfe10, 0xfffc, 0x1bc9f, 0x1bca4, 0x1d172,
+                       0x1d17b, 0xe0080, 0xe01f0]
+        for (var index = 0; index < visible.length; index++) {
+            var text = "a" + String.fromCodePoint(visible[index]) + "b"
+            compare(OllamaChat.revealHidden(text), text, marker(visible[index]))
+        }
+    }
+
+    // One U+FE0F right after an emoji only asks for its colour form.
+    function test_revealHiddenAllowsOneEmojiVariationSelector() {
+        compare(OllamaChat.revealHidden("I ❤️ it ✔️ 😀️"), "I ❤️ it ✔️ 😀️")
+        verify(!OllamaChat.hasHidden("❤️"))
+        compare(OllamaChat.revealHidden("❤️️"), "❤️⟦U+FE0F⟧")
+        compare(OllamaChat.revealHidden("a️b"), "a⟦U+FE0F⟧b")
+        compare(OllamaChat.revealHidden("️"), "⟦U+FE0F⟧")
+        compare(OllamaChat.revealHidden("❤︎"), "❤⟦U+FE0E⟧")
+        verify(OllamaChat.hasHidden("1️"))
     }
 
     function test_revealHiddenTrojanSource() {
@@ -795,7 +849,7 @@ TestCase {
     }
 
     function test_revealHiddenKeepsOrdinaryText() {
-        var text = "Hello é ü 日本 مرحبا שלום\n\t<b>&amp;</b>   ⁠ 😀"
+        var text = "Hello é ü 日本 مرحبا שלום\n\t<b>&amp;</b>   😀"
         compare(OllamaChat.revealHidden(text), text)
         verify(!OllamaChat.hasHidden(text))
         compare(OllamaChat.revealHidden(""), "")

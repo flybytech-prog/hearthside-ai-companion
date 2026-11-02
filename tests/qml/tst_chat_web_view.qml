@@ -14,9 +14,12 @@ TestCase {
     visible: true
     when: windowShown
 
-    // Plasma injects i18n(); a plain stand-in is enough here.
+    // Plasma injects i18n(); a stand-in that fills %1, %2...
     function i18n(text) {
-        return text
+        var result = text
+        for (var index = 1; index < arguments.length; index++)
+            result = result.replace("%" + index, String(arguments[index]))
+        return result
     }
 
     readonly property string home: "http://127.0.0.1:9/"
@@ -154,5 +157,129 @@ TestCase {
         waitForCheck(1)
         tryVerify(function () { return web.localOwnerProblem === "owner-unknown" }, 3000)
         compare(web.currentView, null)
+    }
+
+    // --- pass for "Send the form again" (N4) ----------------------------------
+
+    // A Local view after a good first check, with its home tried.
+    function makeLocalView() {
+        testCase.tried = []
+        var web = make()
+        waitForCheck(1)
+        answer(web, "self")
+        verify(web.currentView !== null)
+        watch(web.currentView)
+        waitForTry(testCase.home)
+        return web
+    }
+
+    // What localOwnerFinished gets after a checked form post.
+    function grantFormPass(web, url) {
+        web.ownerPending = { view: web.currentView, url: url, port: 9, form: true, create: false }
+        web.localOwnerFinished(9, "")
+        compare(web.localOwnerProblem, "resend")
+        compare(web.currentView.ownerPass, url)
+    }
+
+    function test_formPassExpires() {
+        var web = makeLocalView()
+        web.ownerPassLifetime = 200
+        grantFormPass(web, testCase.home + "form")
+        tryVerify(function () { return web.currentView.ownerPass === "" }, 3000)
+        compare(web.localOwnerProblem, "")
+    }
+
+    // Even if the timer is late, a stale pass doesn't count: a new check.
+    function test_staleFormPassIsNotUsed() {
+        var web = makeLocalView()
+        var next = testCase.home + "form"
+        grantFormPass(web, next)
+        web.currentView.ownerPassExpires = Date.now() - 1
+        web.currentView.url = next
+        waitForCheck(2)
+        wait(200)
+        compare(testCase.tried.indexOf(next), -1, "a stale pass let the load through")
+    }
+
+    function test_formPassEndsOnDismissAndOnAProblem() {
+        var web = makeLocalView()
+        grantFormPass(web, testCase.home + "form")
+        web.dismissLocalOwner()
+        compare(web.currentView.ownerPass, "")
+        compare(web.localOwnerProblem, "")
+
+        grantFormPass(web, testCase.home + "form")
+        web.ownerPending = { view: web.currentView, url: testCase.home + "x", port: 9, form: false, create: false }
+        web.localOwnerFinished(9, "other")
+        compare(web.localOwnerProblem, "other")
+        compare(web.currentView.ownerPass, "")
+    }
+
+    // --- open in browser prompt (N1) ------------------------------------------
+
+    function test_pageRequestsOnlyAsk() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.externalPromptGap = 100
+        web.askExternal("https://example.net/a?x=1")
+        compare(web.externalUrl, "https://example.net/a?x=1")
+        compare(web.externalHost, "example.net")
+        // One at a time: a second request while one waits is dropped.
+        web.askExternal("https://other.example/")
+        compare(web.externalUrl, "https://example.net/a?x=1")
+        compare(web.externalHost, "example.net")
+        web.clearExternal()
+        compare(web.externalUrl, "")
+        compare(web.externalHost, "")
+        // Rate limit: right after a prompt, requests are dropped.
+        web.askExternal("https://other.example/")
+        compare(web.externalUrl, "")
+        wait(150)
+        web.askExternal("https://other.example/")
+        compare(web.externalHost, "other.example")
+        web.clearExternal()
+        wait(150)
+        // Nothing that isn't https with a readable host.
+        web.askExternal("http://example.net/")
+        web.askExternal("https://ev%69l.example/")
+        web.askExternal("file:///etc/passwd")
+        web.askExternal("")
+        compare(web.externalUrl, "")
+        // Qt WebEngine hands over look-alike letters in their xn-- form,
+        // and the prompt names them that way; raw ones are dropped.
+        web.askExternal("https://сlaude.ai/")
+        compare(web.externalUrl, "")
+        web.askExternal("https://xn--laude-0ye.ai/")
+        compare(web.externalHost, "xn--laude-0ye.ai")
+        // Changing the site drops the prompt.
+        web.siteIds = ["local"]
+        web.siteId = "local"
+        compare(web.externalUrl, "")
+        // Open with nothing waiting opens nothing.
+        web.acceptExternal()
+        compare(web.externalUrl, "")
+    }
+
+    // --- sign-in window title (N5) --------------------------------------------
+
+    function test_blankSignInWindowNamesItsOpener() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        var title = findChild(web, "overlayTitle")
+        verify(title !== null)
+        compare(title.textFormat, Text.PlainText)
+        // The window is never loaded here; it stays blank.
+        web.openOverlay({ openIn: function (view) {} }, "local", testCase.home + "chat")
+        verify(web.overlayOpen)
+        compare(web.overlayTitle.kind, "opener")
+        compare(title.text, "Window opened by 127.0.0.1")
+        web.overlayView.url = "about:blank"
+        tryVerify(function () { return web.overlayView.url.toString() === "about:blank" }, 3000)
+        compare(title.text, "Window opened by 127.0.0.1")
+        web.closeOverlay()
+        web.openOverlay({ openIn: function (view) {} }, "local", "about:blank")
+        compare(title.text, "Window opened by an unknown page")
+        web.closeOverlay()
+        verify(!web.overlayOpen)
     }
 }

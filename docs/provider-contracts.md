@@ -211,7 +211,8 @@ Navigation in a site view (main frame unless noted):
   exactly that address. The Local view is not even created before such an
   answer. Anything else loads nothing, shows a message, and turns an open
   Local page into `about:blank`. A form post is not replayed after the check;
-  the user sends it again. Pure decisions: `ChatSites.localOwnerPort` and
+  the user sends it again. That pass expires after 10 seconds
+  (`ownerPassLifetime`) and is cleared on Dismiss and on any problem. Pure decisions: `ChatSites.localOwnerPort` and
   `ChatSites.localOwnerGate`; the check runs in `LocalOwnerCheck.qml`.
 - Exception for Local only: `http:` loads when the host is a loopback name
   (`localhost`, `127.0.0.1`, `[::1]`) and host plus port (80 when absent)
@@ -231,24 +232,34 @@ Navigation in a site view (main frame unless noted):
   can still reach this computer that way, directly or through names that
   resolve to it (such as `*.nip.io`), as in any browser. The same applies to
   the Local page's own subresources over `http:`.
-- A clicked link to a host outside the site and sign-in hosts is cancelled and
-  opened in the system browser.
+- A clicked link to a host outside the site and sign-in hosts is cancelled.
+  The widget then asks "Open <host> in your browser?" (plain text, host from
+  `ChatSites.displayHost`); only Open hands it to the system browser. One
+  prompt at a time; requests while one is shown or within 3 seconds after
+  the last one was shown or answered are dropped, as are addresses without
+  a readable host. `Qt.openUrlExternally` is called only by that Open and
+  by the toolbar's **Open in browser**.
 - Other `https:` navigations, such as sign-in redirects and form posts, stay
   in the view, so sign-in flows keep working. While the main frame is on a
   host outside the site, sign-in and custom hosts, a plain-text notice "You
   are on <host> — not <site>" with **Back to <site>** (home) stays above the
   page (`ChatSites.offSiteHost`). The host is ASCII: lower case, without user
   info or port, international labels in their `xn--` (punycode) form, at most
-  64 characters, shortened from the front.
+  64 characters, shortened from the front. An authority containing `\` has
+  no readable host (browsers read it as `/`), so the notice says "another
+  site".
 
 New windows requested by a page:
 
 - A popup dialog (`about:blank` or `https:`) or an `https:` window on one of
   the site's sign-in hosts opens in a sign-in overlay inside the popup, using
   the same profile as the site view, and closes when the page closes it.
+  Its plain-text title names its own host ("Sign-in window: <host>"), or
+  while it has none (`about:blank`, empty, written by a script) the opener's
+  ("Window opened by <host>", `ChatSites.overlayHost`).
 - Any other `https:` window, or a sign-in window opened from the overlay,
-  opens in the system browser only when you clicked to open it; windows a
-  page opens by itself are dropped.
+  gets the same "Open <host> in your browser?" prompt, and only when you
+  clicked to open it; windows a page opens by itself are dropped.
 - Everything else is blocked, including every `http:` window (Local too) and
   windows to this computer from any site except Local. A Local sign-in
   window that would start on this computer is dropped too, because it would

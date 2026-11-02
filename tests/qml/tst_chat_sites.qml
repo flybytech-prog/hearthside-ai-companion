@@ -827,6 +827,41 @@ TestCase {
         compare(off("https://accounts.google.com.evil/", "copilot"), { off: true, host: "accounts.google.com.evil" })
         // Unreadable host: still off, without a host.
         compare(off("https://ev%69l.example/"), { off: true, host: "" })
+        // "\" is read as "/" by browsers: never the host after it.
+        compare(off("https://evil.example\\@claude.ai/"), { off: true, host: "" })
+        compare(off("https://claude.ai\\x/"), { off: true, host: "" })
+    }
+
+    function test_displayHostRejectsBackslashes() {
+        compare(ChatSites.displayHost("https://evil.example\\@claude.ai/"), "")
+        compare(ChatSites.displayHost("https://evil.example\\claude.ai/"), "")
+        compare(ChatSites.displayHost("https://a\\b@claude.ai/"), "")
+        // A backslash after the host (in the path) changes nothing.
+        compare(ChatSites.displayHost("https://claude.ai/a\\b"), "claude.ai")
+    }
+
+    // N5: a sign-in window always names a host.
+    function test_overlayHost() {
+        compare(ChatSites.overlayHost({ url: "https://accounts.google.com/x", openerUrl: "https://claude.ai/" }),
+                { kind: "page", host: "accounts.google.com" })
+        compare(ChatSites.overlayHost({ url: "about:blank", openerUrl: "https://claude.ai/new" }),
+                { kind: "opener", host: "claude.ai" })
+        compare(ChatSites.overlayHost({ url: "", openerUrl: "https://Evil.Example./x" }),
+                { kind: "opener", host: "evil.example" })
+        compare(ChatSites.overlayHost({ url: "data:text/html,x", openerUrl: "https://сlaude.ai/" }),
+                { kind: "opener", host: "xn--laude-0ye.ai" })
+        compare(ChatSites.overlayHost({ url: "about:blank", openerUrl: "about:blank" }),
+                { kind: "unknown", host: "" })
+        compare(ChatSites.overlayHost({ url: "about:blank", openerUrl: "https://evil.example\\@claude.ai/" }),
+                { kind: "unknown", host: "" })
+        compare(ChatSites.overlayHost({}), { kind: "unknown", host: "" })
+        compare(ChatSites.overlayHost(undefined), { kind: "unknown", host: "" })
+        var long = ""
+        for (var index = 0; index < 20; index++)
+            long += "claude-ai-"
+        var result = ChatSites.overlayHost({ url: "about:blank", openerUrl: "https://" + long + ".evil.example/" })
+        compare(result.host.length, ChatSites.MAX_HOST_DISPLAY)
+        verify(result.host.slice(-13) === ".evil.example")
     }
 
     function test_offSiteHostIsShortenedFromTheFront() {

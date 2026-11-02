@@ -25,5 +25,5 @@ function usageCommand(runId, providerIds) {
     var run = Math.max(0, Math.floor(Number(runId) || 0))
     var ids = Array.isArray(providerIds) ? providerIds : []
     return "env HEARTHSIDE_RUN=" + run
-        + " python3 -m hearthside --json --providers=" + ids.join(",")
+        + " python3 -P -m hearthside --json --providers=" + ids.join(",")
 }

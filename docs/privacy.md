@@ -5,7 +5,7 @@ and that are detected as installed. Credentials are sent only to the matching
 provider's first-party OAuth and usage endpoints. The helper never follows
 HTTP redirects: a 3xx from a provider is reported as a failed request
 (`invalid-response`), so a token is never sent on to the redirect's address.
-The widget starts the helper as `python3 -P -m hearthside` where it can, so
+The widget always starts the helper as `python3 -P -m hearthside`, so
 Python doesn't load modules from Plasma's working folder.
 
 The helper does not print or log access tokens, refresh tokens, API keys,
@@ -277,7 +277,8 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   Retry button, and a Local page that was already open is replaced by an
   empty page, so it can't keep talking to the new listener. A form sent to
   the Local page is checked too; it can't be replayed, so after the check you
-  send it again. Windows a Local page opens on this computer are dropped,
+  send it again within 10 seconds. That one-time pass ends after 10 seconds,
+  on Dismiss and on any problem; later the form is checked again. Windows a Local page opens on this computer are dropped,
   since they would skip the check. The check cannot tell your own programs
   apart, and a listener could change in the milliseconds between the check
   and the load. Requests the page makes by itself (fetch, WebSocket) after it
@@ -344,20 +345,33 @@ none of the web profile rules above apply to it; these do:
 - **What is shown.** Replies and server error messages are shown as plain
   text only, so a reply containing HTML, Markdown images or links can't make
   the widget load anything. Fenced code blocks are shown in a monospace font.
-  Hidden direction-control characters (U+200E, U+200F, U+061C, U+202A–U+202E,
-  U+2066–U+2069) and zero-width characters (U+200B–U+200D, U+FEFF) in a reply
-  are shown as visible markers such as `⟦U+202E⟧`, with the note "This text
-  contains hidden direction characters". Such characters can make a command
-  look different from what it really is ("Trojan Source"). Emoji sequences and
-  right-to-left text that use them show the markers too.
+  Hidden and control characters in a reply are shown as visible markers such
+  as `⟦U+202E⟧`, with the note "This text contains hidden or control
+  characters": control characters (U+0000–U+001F except tab and line feed, so
+  carriage return and escape too; U+007F; U+0080–U+009F including U+0085),
+  line and paragraph separators (U+2028, U+2029), the soft hyphen (U+00AD),
+  U+034F, direction controls (U+061C, U+200E, U+200F, U+202A–U+202E,
+  U+2066–U+206F), zero-width and invisible characters (U+200B–U+200D,
+  U+2060–U+2064, U+FEFF, U+180E, U+17B4, U+17B5, the Hangul fillers U+115F,
+  U+1160, U+3164, U+FFA0), variation selectors (U+FE00–U+FE0F,
+  U+E0100–U+E01EF), interlinear annotation (U+FFF9–U+FFFB), shorthand and
+  musical format controls (U+1BCA0–U+1BCA3, U+1D173–U+1D17A) and tag
+  characters (U+E0000–U+E007F). Such characters can make a command look
+  different from what it really is ("Trojan Source"), and a carriage return
+  or escape can make a terminal act on it. One U+FE0F right after an emoji
+  (it only asks for the colour form) is left alone; emoji sequences joined
+  with U+200D and right-to-left text that use these characters show the
+  markers.
 - **Typing.** Spell checking is off in the message field, and it asks input
   methods not to learn or predict what you type (`ImhSensitiveData`,
   `ImhNoPredictiveText`); some input methods (for example CJK prediction) may
   offer fewer suggestions there.
 - **Copying.** The Copy buttons and Ctrl+C put text on the clipboard, where a
   clipboard manager such as Klipper may keep it (see below). They copy the
-  text as shown, with the markers, never the hidden characters themselves, so
-  what you paste into a terminal is exactly what you read.
+  text as shown, with the markers, never the characters listed above, so none
+  of them can hide in what you paste into a terminal. Characters that are
+  visible but look alike (such as Cyrillic `а` for Latin `a`) and combining
+  marks are not marked: read a command before you run it.
 
 ### Permissions and prompts
 
@@ -373,14 +387,25 @@ Downloads ask each time: **Save "name" to Downloads?** Save writes the file to
 your XDG Downloads folder; Cancel, or no answer within 60 seconds, discards it.
 "Save page" downloads are always refused. The name is shown as plain text,
 shortened, with hidden direction and zero-width characters as markers, so
-`invoice⟦U+202E⟧fdp.exe` can't pass for `invoiceexe.pdf`.
+`invoice⟦U+202E⟧fdp.exe` can't pass for `invoiceexe.pdf`. Long names are
+shortened in the middle, so the end with the real (last) extension always
+stays visible.
 
-Clicked links that leave the chat site open in your default browser. The
-widget hands the address to that browser, which may keep it in its history,
-and the address briefly appears in the browser's process arguments. Only
-links you click are handed over; windows a page opens by itself are dropped.
+A page never opens your browser by itself. When you click a link (or a
+window) that leaves the chat site, a prompt above the page asks **Open
+example.net in your browser?** with **Open** and **Cancel**; the host is plain
+ASCII text as in the off-site notice below. Only Open hands the address over.
+Only one prompt is shown at a time: further requests while it is shown, and
+for 3 seconds after it was shown or answered, are dropped, so a page can't
+pile up prompts. Windows a page opens by itself are dropped without a
+prompt. **Open in browser** in the toolbar, your own click, opens the
+current site's page directly. Your browser may keep an opened address in its
+history, and the address briefly appears in the browser's process arguments.
 Sign-in popups stay inside the widget, in a sign-in overlay that uses the same
-profile as the chat page (private in Off, the saved one in Encrypted). See [Provider contracts](provider-contracts.md#chat-tab) for the exact
+profile as the chat page (private in Off, the saved one in Encrypted). Its
+title always names a host: "Sign-in window: accounts.google.com", or while
+the window is still blank (`about:blank`, or text a page wrote into it)
+"Window opened by claude.ai", the host of the page that opened it. See [Provider contracts](provider-contracts.md#chat-tab) for the exact
 navigation rules.
 
 The widget has no address bar, and a page's scripts, redirects and forms may

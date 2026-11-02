@@ -20,6 +20,11 @@ import "ChatSites.js" as ChatSites
 // port belongs to this user or the system (LocalOwnerCheck): before the
 // Local view is created and before each of its main-frame navigations to
 // this computer. Anything else loads nothing and shows a message instead.
+//
+// A page never opens the system browser by itself: an address it hands over
+// (a clicked link off the site, a clicked window) only asks "Open <host> in
+// your browser?" in ChatView, one at a time; Open there or the toolbar's
+// Open in browser are the only ways out.
 Item {
     id: chatWeb
 
@@ -52,6 +57,14 @@ Item {
             ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls),
             chatWeb.activeView.url.toString())
 
+    // Title of the sign-in window: {kind: "page"|"opener"|"unknown", host}.
+    readonly property var overlayTitle: chatWeb.overlayView
+        ? ChatSites.overlayHost({
+            url: chatWeb.overlayView.url.toString(),
+            openerUrl: chatWeb.overlayView.openerUrl
+        })
+        : ({kind: "unknown", host: ""})
+
     // Off-site notice for the page shown: {off, host} from ChatSites.
     readonly property var offSite: chatWeb.activeView
         ? ChatSites.offSiteHost({
@@ -75,6 +88,17 @@ Item {
     // The address a good check before creating the Local view was made
     // for; handed to that view as its first pass.
     property string localCreatePass: ""
+    // How long a pass is good for (ms); overridable by tests only.
+    property int ownerPassLifetime: 10000
+
+    // A page's request to open an address in the system browser, waiting
+    // for Open or Cancel: the address and its ASCII host, "" when none.
+    property string externalUrl: ""
+    property string externalHost: ""
+    // Requests sooner than this (ms) after the last prompt was shown or
+    // answered are dropped; overridable by tests only.
+    property int externalPromptGap: 3000
+    property double externalQuietUntil: 0
 
     property bool dialogOpen: false
     property bool passkeyNotice: false
@@ -108,9 +132,40 @@ Item {
             chatWeb.currentView.url = url
     }
 
+    // The toolbar's Open in browser: the user's own click, for a page of
+    // the current site only.
     function openExternally() {
         if (chatWeb.canOpenExternally)
             Qt.openUrlExternally(chatWeb.activeView.url)
+    }
+
+    // A page wants url in the system browser: only asks. Dropped while
+    // another prompt waits, right after one, or without a readable host.
+    function askExternal(url) {
+        var now = Date.now()
+        if (chatWeb.externalUrl !== "" || now < chatWeb.externalQuietUntil
+                || !ChatSites.isHttpsUrl(url))
+            return
+        var host = ChatSites.shortHost(ChatSites.displayHost(url))
+        if (host === "")
+            return
+        chatWeb.externalQuietUntil = now + chatWeb.externalPromptGap
+        chatWeb.externalHost = host
+        chatWeb.externalUrl = url
+    }
+
+    // Open on the prompt: the user's answer, the only other way out.
+    function acceptExternal() {
+        var url = chatWeb.externalUrl
+        chatWeb.clearExternal()
+        if (ChatSites.isHttpsUrl(url))
+            Qt.openUrlExternally(url)
+    }
+
+    function clearExternal() {
+        chatWeb.externalUrl = ""
+        chatWeb.externalHost = ""
+        chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap
     }
 
     function focusView() {
@@ -157,6 +212,8 @@ Item {
         if (!view || chatWeb.viewList().indexOf(view) < 0)
             return
         view.ownerPass = pending.url
+        view.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime
+        ownerPassTimer.restart()
         // A form post can't be replayed; the user sends it again.
         if (pending.form) {
             chatWeb.localOwnerProblem = "resend"
@@ -165,11 +222,26 @@ Item {
         view.url = pending.url
     }
 
+    // Every pass ends: on any problem, on Dismiss and when it expires.
+    function clearOwnerPasses() {
+        ownerPassTimer.stop()
+        chatWeb.localCreatePass = ""
+        var views = chatWeb.viewList()
+        for (var index = 0; index < views.length; index++)
+            views[index].ownerPass = ""
+    }
+
+    // Dismiss on "Send the form again", or the pass for it expired.
+    function dismissLocalOwner() {
+        chatWeb.clearOwnerPasses()
+        chatWeb.localOwnerProblem = ""
+    }
+
     function blankLocalViews() {
+        chatWeb.clearOwnerPasses()
         var views = chatWeb.viewList()
         for (var index = 0; index < views.length; index++) {
             var view = views[index]
-            view.ownerPass = ""
             if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
                                            url: view.url.toString() }) > 0)
                 view.url = "about:blank"
@@ -248,11 +320,14 @@ Item {
         chatWeb.applyUserAgent(chatWeb.wantedUserAgent(null, ""))
     }
 
-    function openOverlay(request, siteId) {
+    // openerUrl: the address of the page that asked for the window; its host
+    // names a window that is still blank.
+    function openOverlay(request, siteId, openerUrl) {
         chatWeb.closeOverlay()
         var view = pageComponent.createObject(overlayContent, {
             site: siteId,
-            isOverlay: true
+            isOverlay: true,
+            openerUrl: String(openerUrl || "")
         })
         if (!view)
             return
@@ -386,6 +461,7 @@ Item {
     onCustomUrlsChanged: chatWeb.applyCustomUrls()
     onSiteIdChanged: {
         chatWeb.closeOverlay()
+        chatWeb.clearExternal()
         chatWeb.passkeyNotice = false
         chatWeb.syncViews()
     }
@@ -439,6 +515,18 @@ Item {
         onFinished: (port, problem) => chatWeb.localOwnerFinished(port, problem)
     }
 
+    // A "Send the form again" pass is good for ownerPassLifetime only.
+    Timer {
+        id: ownerPassTimer
+        interval: chatWeb.ownerPassLifetime
+        onTriggered: {
+            if (chatWeb.localOwnerProblem === "resend")
+                chatWeb.dismissLocalOwner()
+            else
+                chatWeb.clearOwnerPasses()
+        }
+    }
+
     Timer {
         id: downloadTimeout
         interval: 60000
@@ -466,6 +554,10 @@ Item {
             // Address a good owner check was just made for (Local only);
             // used up by the next main-frame navigation.
             property string ownerPass: ""
+            // Date.now() after which ownerPass no longer counts.
+            property double ownerPassExpires: 0
+            // Sign-in window only: the address of the page that opened it.
+            property string openerUrl: ""
 
             anchors.fill: parent
             visible: page.isOverlay || page.site === chatWeb.siteId
@@ -532,6 +624,8 @@ Item {
                     if (!request.isMainFrame)
                         return
                     var url = request.url.toString()
+                    if (Date.now() >= page.ownerPassExpires)
+                        page.ownerPass = ""
                     var gate = ChatSites.localOwnerGate({
                         url: url,
                         isMainFrame: request.isMainFrame,
@@ -552,7 +646,7 @@ Item {
                 }
                 request.reject()
                 if (verdict === "external")
-                    Qt.openUrlExternally(request.url)
+                    chatWeb.askExternal(request.url.toString())
             }
 
             onNewWindowRequested: (request) => {
@@ -570,12 +664,13 @@ Item {
                     return
                 // A sign-in window cannot open another overlay on top of itself.
                 if (verdict === "overlay" && !page.isOverlay)
-                    chatWeb.openOverlay(request, page.site)
-                // Only a click may hand an address to the system browser
-                // (external or nested sign-in); script-opened ones are dropped.
+                    chatWeb.openOverlay(request, page.site, page.url.toString())
+                // Only a click may ask to hand an address to the system
+                // browser (external or nested sign-in); script-opened ones
+                // are dropped.
                 else if (verdict !== "block" && request.userInitiated
                          && ChatSites.isHttpsUrl(url))
-                    Qt.openUrlExternally(url)
+                    chatWeb.askExternal(url)
             }
 
             // A main-frame load that needs the other user agent is stopped
@@ -628,6 +723,7 @@ Item {
                     return
                 if (page.site === "local") {
                     page.ownerPass = chatWeb.localCreatePass
+                    page.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime
                     chatWeb.localCreatePass = ""
                 }
                 page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)
@@ -665,10 +761,18 @@ Item {
                     Layout.preferredWidth: Kirigami.Units.iconSizes.small
                     Layout.preferredHeight: Kirigami.Units.iconSizes.small
                 }
+                // Always names a host: the window's own, or while it is
+                // still blank the host of the page that opened it.
                 PlasmaComponents.Label {
+                    objectName: "overlayTitle"
                     Layout.fillWidth: true
-                    text: i18n("Sign-in window")
-                    elide: Text.ElideRight
+                    textFormat: Text.PlainText
+                    elide: Text.ElideLeft
+                    text: chatWeb.overlayTitle.kind === "page"
+                        ? i18n("Sign-in window: %1", chatWeb.overlayTitle.host)
+                        : chatWeb.overlayTitle.kind === "opener"
+                            ? i18n("Window opened by %1", chatWeb.overlayTitle.host)
+                            : i18n("Window opened by an unknown page")
                 }
                 PlasmaComponents.ToolButton {
                     text: i18n("Close")

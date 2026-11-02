@@ -437,6 +437,41 @@ TestCase {
         verify(!message.actions[0].visible)
         message.actions[1].trigger()
         compare(view.web.localOwnerProblem, "")
+        // Dismiss also ends the pass for the form (N4).
+        compare(view.web.dismissals, 1)
+    }
+
+    // --- open in browser prompt (N1) -----------------------------------------
+
+    function test_externalPromptAsksBeforeOpening() {
+        var view = make({current: true, siteId: "claude", siteIds: ["claude"]})
+        tryVerify(function () { return view.web !== null })
+        var prompt = findChild(view, "externalPrompt")
+        var label = findChild(view, "externalText")
+        var open = findChild(view, "externalOpen")
+        var cancel = findChild(view, "externalCancel")
+        verify(!prompt.visible)
+        // ChatSites never yields such a host; the label must still show it literally.
+        var host = "<b>example.net</b>"
+        view.web.externalUrl = "https://example.net/"
+        view.web.externalHost = host
+        verify(prompt.visible)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.text, "Open " + host + " in your browser?")
+        compare(view.web.opened, 0)
+        cancel.clicked()
+        compare(view.web.cancelled, 1)
+        compare(view.web.opened, 0)
+        verify(!prompt.visible)
+        view.web.externalUrl = "https://example.net/"
+        view.web.externalHost = "example.net"
+        open.clicked()
+        compare(view.web.opened, 1)
+        verify(!prompt.visible)
+        // Never without a host to name.
+        view.web.externalUrl = "https://example.net/"
+        view.web.externalHost = ""
+        verify(!prompt.visible)
     }
 
     // --- off-site notice (L2) ------------------------------------------------
@@ -476,7 +511,37 @@ TestCase {
             long += "‮"
         var shown = view.plainName(long)
         verify(!/[‪-‮]/.test(shown), shown)
-        compare(shown.length, 58)
+        compare(shown.length, 60)
         compare(view.plainName("report.pdf"), "report.pdf")
+    }
+
+    // Long names are cut in the middle; the real last extension stays.
+    function test_downloadNamesKeepTheLastExtension() {
+        var view = make()
+        var padding = ""
+        for (var index = 0; index < 80; index++)
+            padding += "a"
+        var shown = view.plainName("invoice.pdf" + padding + ".exe")
+        compare(shown.length, 60)
+        verify(/^invoice\.pdfa+…a+\.exe$/.test(shown), shown)
+        // A hidden character just before the end stays visible too.
+        shown = view.plainName(padding + "‮gpj.exe")
+        verify(/…a*⟦U\+202E⟧gpj\.exe$/.test(shown), shown)
+        // A long extension is kept whole up to the limit.
+        var ext = "." + padding.slice(0, 40) + "x"
+        shown = view.plainName(padding + ext)
+        compare(shown.slice(-ext.length), ext)
+        compare(shown.length, 60)
+        // No name: the end stays.
+        shown = view.plainName(padding + "bcd")
+        compare(shown.slice(-3), "bcd")
+        compare(shown.indexOf("…"), 31)
+        // An emoji at a cut is never split into half a character.
+        var emoji = ""
+        for (index = 0; index < 40; index++)
+            emoji += "😀"
+        shown = view.plainName(emoji)
+        verify(!/[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(shown), shown)
+        verify(shown.indexOf("…") > 0)
     }
 }

@@ -446,7 +446,7 @@ ColumnLayout {
     }
 
     // Reply text as shown: paragraphs and code blocks, so that while a
-    // reply streams only its last block is laid out again. Hidden direction
+    // reply streams only its last block is laid out again. Hidden, control
     // and zero-width characters are shown as markers (OllamaChat.revealHidden),
     // so what is shown, selected and copied is the same text.
     function blocks(text) {
@@ -896,7 +896,7 @@ ColumnLayout {
                         wrapMode: Text.Wrap
                         color: Kirigami.Theme.neutralTextColor
                         font: Kirigami.Theme.smallFont
-                        text: i18n("This text contains hidden direction characters, shown as ⟦U+…⟧. Copy copies the marked text.")
+                        text: i18n("This text contains hidden or control characters, shown as ⟦U+…⟧. Copy copies the marked text.")
                     }
 
                     RowLayout {
