@@ -28,6 +28,10 @@ is `rate_limited` with a cooldown from `Retry-After`, and only a `4xx` grant
 error (or an explicit logout flag) reports the provider as signed out. This
 applies to Cursor, Antigravity, and Grok.
 
+The helper never follows HTTP redirects: a 3xx from a provider is reported as
+a failed request (`invalid-response`), never sent on to the `Location`
+address with the credentials.
+
 `Retry-After` accepts seconds or an HTTP date and defaults to five minutes
 when missing or unparseable. The resulting cooldown is clamped to between now
 and 24 hours from now.
@@ -158,8 +162,9 @@ The Chat tab is not a provider contract: it shows each provider's own website
 and never calls an API or reads the pages. The one exception is the built-in
 Ollama chat, which calls the local Ollama API (see
 [below](#built-in-ollama-chat)). It runs the helper only for Stay signed in
-(see [below](#stay-signed-in-helper)) and for the Ollama port check (see
-[below](#port-owner-helper)), never with chat data. Web sites, their home
+(see [below](#stay-signed-in-helper)) and for the port owner check of the
+Ollama chat and Local web UI (see [below](#port-owner-helper)), never with
+chat data. Web sites, their home
 pages and host lists live only in `plasmoid/contents/ui/ChatSites.js`. The
 navigation rules below are the same with Stay signed in Off or Encrypted.
 
@@ -199,6 +204,15 @@ Navigation in a site view (main frame unless noted):
 - Only `https:` main-frame pages load, plus `about:blank`. `http:`, `file:`,
   `data:`, `javascript:`, `view-source:`, `chrome:`, `qrc:`, other schemes, and
   malformed URLs (including user info in the host) are blocked.
+- Local only: every main-frame navigation to this computer (any scheme the
+  rules allow, port 80/443 when absent) first runs the
+  [port owner check](#port-owner-helper); the request is rejected and loads
+  only after the helper said `self` or `system`, as a one-time pass for
+  exactly that address. The Local view is not even created before such an
+  answer. Anything else loads nothing, shows a message, and turns an open
+  Local page into `about:blank`. A form post is not replayed after the check;
+  the user sends it again. Pure decisions: `ChatSites.localOwnerPort` and
+  `ChatSites.localOwnerGate`; the check runs in `LocalOwnerCheck.qml`.
 - Exception for Local only: `http:` loads when the host is a loopback name
   (`localhost`, `127.0.0.1`, `[::1]`) and host plus port (80 when absent)
   equal those of Local's address exactly. Any other port, loopback spelling or
@@ -220,7 +234,12 @@ Navigation in a site view (main frame unless noted):
 - A clicked link to a host outside the site and sign-in hosts is cancelled and
   opened in the system browser.
 - Other `https:` navigations, such as sign-in redirects and form posts, stay
-  in the view.
+  in the view, so sign-in flows keep working. While the main frame is on a
+  host outside the site, sign-in and custom hosts, a plain-text notice "You
+  are on <host> — not <site>" with **Back to <site>** (home) stays above the
+  page (`ChatSites.offSiteHost`). The host is ASCII: lower case, without user
+  info or port, international labels in their `xn--` (punycode) form, at most
+  64 characters, shortened from the front.
 
 New windows requested by a page:
 
@@ -231,7 +250,9 @@ New windows requested by a page:
   opens in the system browser only when you clicked to open it; windows a
   page opens by itself are dropped.
 - Everything else is blocked, including every `http:` window (Local too) and
-  windows to this computer from any site except Local.
+  windows to this computer from any site except Local. A Local sign-in
+  window that would start on this computer is dropped too, because it would
+  skip the port owner check.
 
 **Open in browser** is offered only for a page of the current site: an
 `https:` page (not on this computer, except for Local), or Local's own `http:`
@@ -351,7 +372,8 @@ For **Stay signed in → Encrypted** the plasmoid runs the helper for a few
 fixed jobs. These commands touch no credentials, make no network requests,
 and pass no chat data. The plasmoid builds them in
 `plasmoid/contents/ui/ChatStorage.js` from fixed words and integers only, as
-`env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -m hearthside ...`.
+`env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -P -m hearthside ...`
+(`-P`: Python doesn't put the working folder on the module path).
 `HEARTHSIDE_RUN` is a run counter and `HEARTHSIDE_APPLET` the widget id; together
 they keep command names unique across widgets and settings pages so replies are
 told apart. The helper ignores both.
@@ -474,10 +496,13 @@ else `mount-failed`; anything else `init-failed` (`create`), `mount-failed`
 
 Before the built-in Ollama chat loads the model list or sends a message, the
 plasmoid asks the helper who listens on the Ollama port, so a prompt never
-goes to another user's program that took the port while Ollama was down. The
-command is built in `plasmoid/contents/ui/OllamaChat.js` from integers only:
+goes to another user's program that took the port while Ollama was down.
+Local web UI runs the same check on its port before its page is created and
+before each main-frame navigation to this computer
+(`plasmoid/contents/ui/LocalOwnerCheck.qml`). The command is built only in
+`plasmoid/contents/ui/OllamaChat.js` (`ownerCommand`), from integers only:
 
-    env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -m hearthside --port-owner <port>
+    env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -P -m hearthside --port-owner <port>
 
 The env words only keep DataSource names unique (as for the Stay signed in
 helper); the helper ignores them. The command carries no prompt, model name,
@@ -510,7 +535,10 @@ Replies never contain uids, user names, inodes, or addresses. `<port>` is a
 plain decimal integer from 1 to 65535 (at most 5 digits; no sign, spaces, or
 underscores), and `--port-owner` cannot be combined with any other option;
 otherwise argparse exits 2 with a usage message on stderr and prints nothing on
-stdout. The plasmoid sends only for `self` or `system` and fails closed on
-everything else, including a non-zero exit or any other output (`bad-reply`).
+stdout. The plasmoid sends (or, for Local web UI, loads) only for `self` or `system`
+and fails closed on everything else, including a non-zero exit, any other
+output (`bad-reply`), or no answer within 15 seconds. For Local web UI, a
+server bound only to another loopback address (for example `127.0.0.2`) is
+not seen and so reads as `none`: nothing loads.
 The check cannot tell your own programs apart, and a listener could change in
 the milliseconds between the check and the request; see `docs/privacy.md`.

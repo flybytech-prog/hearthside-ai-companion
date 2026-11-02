@@ -694,12 +694,12 @@ TestCase {
 
     function test_ownerCommand() {
         compare(OllamaChat.ownerCommand(11434, 3, 12),
-                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -m hearthside --port-owner 11434")
+                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -P -m hearthside --port-owner 11434")
         compare(OllamaChat.ownerCommand(1, 0, 0),
-                "env HEARTHSIDE_RUN=0 HEARTHSIDE_APPLET=0 python3 -m hearthside --port-owner 1")
+                "env HEARTHSIDE_RUN=0 HEARTHSIDE_APPLET=0 python3 -P -m hearthside --port-owner 1")
         compare(OllamaChat.ownerCommand(65535, 2147483648, 2147483648),
                 "env HEARTHSIDE_RUN=2147483648 HEARTHSIDE_APPLET=2147483648"
-                + " python3 -m hearthside --port-owner 65535")
+                + " python3 -P -m hearthside --port-owner 65535")
     }
 
     function test_ownerCommandRejects() {
@@ -756,5 +756,51 @@ TestCase {
         compare(OllamaChat.trusted(""), false)
         compare(OllamaChat.trusted(undefined), false)
         compare(OllamaChat.trusted("SELF"), false)
+    }
+
+    function test_ownerProblem() {
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "self" }), "")
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "system" }), "")
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "none" }), "not-running")
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "other" }), "other")
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "SELF" }), "owner-unknown")
+        compare(OllamaChat.ownerProblem({ ok: false, error: "unreadable" }), "owner-unknown")
+        compare(OllamaChat.ownerProblem({ owner: "self" }), "owner-unknown")
+        compare(OllamaChat.ownerProblem(null), "owner-unknown")
+        compare(OllamaChat.ownerProblem(undefined), "owner-unknown")
+    }
+
+    // --- hidden characters (L3) ----------------------------------------------
+
+    function test_revealHiddenMarksEveryHiddenCharacter() {
+        var hidden = [0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c,
+                      0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff]
+        for (var index = 0; index < hidden.length; index++) {
+            var text = "a" + String.fromCharCode(hidden[index]) + "b"
+            var code = hidden[index].toString(16).toUpperCase()
+            while (code.length < 4)
+                code = "0" + code
+            compare(OllamaChat.revealHidden(text), "a⟦U+" + code + "⟧b")
+            verify(OllamaChat.hasHidden(text))
+            verify(!OllamaChat.hasHidden(OllamaChat.revealHidden(text)))
+        }
+    }
+
+    function test_revealHiddenTrojanSource() {
+        var line = "rm -rf ./build ‮⁦# safe⁩⁦ ~"
+        compare(OllamaChat.revealHidden(line), "rm -rf ./build ⟦U+202E⟧⟦U+2066⟧# safe⟦U+2069⟧⟦U+2066⟧ ~")
+        compare(OllamaChat.revealHidden("invoice‮fdp.exe"), "invoice⟦U+202E⟧fdp.exe")
+        // Called twice in a row it still only marks, never removes.
+        compare(OllamaChat.revealHidden(OllamaChat.revealHidden("x​y")), "x⟦U+200B⟧y")
+    }
+
+    function test_revealHiddenKeepsOrdinaryText() {
+        var text = "Hello é ü 日本 مرحبا שלום\n\t<b>&amp;</b>   ⁠ 😀"
+        compare(OllamaChat.revealHidden(text), text)
+        verify(!OllamaChat.hasHidden(text))
+        compare(OllamaChat.revealHidden(""), "")
+        compare(OllamaChat.revealHidden(undefined), "")
+        compare(OllamaChat.revealHidden(42), "")
+        verify(!OllamaChat.hasHidden(null))
     }
 }

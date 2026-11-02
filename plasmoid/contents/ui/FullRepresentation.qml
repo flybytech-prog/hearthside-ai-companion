@@ -160,6 +160,7 @@ PlasmaExtras.Representation {
                             }
                             PlasmaComponents.Label {
                                 Layout.fillWidth: true
+                                textFormat: Text.PlainText
                                 text: siteDelegate.modelData.name
                                 elide: Text.ElideRight
                             }
@@ -297,6 +298,7 @@ PlasmaExtras.Representation {
                 siteIds: root.chatWebSiteIds
                 siteId: root.chatWebSiteId
                 customUrls: root.chatCustomUrls
+                appletId: Math.max(0, root.chatAppletId)
                 // Only while the popup is open and a web site is shown, so no
                 // web engine starts early or for Ollama alone.
                 current: full.onChat && root.expanded && root.chatSiteId !== "ollama"
@@ -353,6 +355,7 @@ PlasmaExtras.Representation {
             }
             PlasmaComponents.Label {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: root.hasData
                     ? i18n("Updated %1", Qt.formatTime(root.lastUpdate, "HH:mm:ss"))
                     : i18n("Loading…")
@@ -361,6 +364,7 @@ PlasmaExtras.Representation {
                 elide: Text.ElideRight
             }
             PlasmaComponents.Label {
+                textFormat: Text.PlainText
                 text: root.usageMode === "used" ? i18n("Used") : i18n("Left")
                 opacity: 0.6
                 font: Kirigami.Theme.smallFont

@@ -437,6 +437,181 @@ function classifyNavigation(request) {
     return "block"
 }
 
+// --- Local web UI owner check -------------------------------------------------
+
+// The port whose owner the helper must vouch for (self or system) before
+// the main frame of a Local page goes to url: any address on this computer,
+// default port by scheme. 0 when no check applies (other sites, other hosts,
+// about:blank, unreadable addresses; those are blocked by classifyNavigation).
+function localOwnerPort(request) {
+    var info = request || {}
+    var site = effectiveSite(info.siteId, info.customUrls)
+    if (!site || site.local !== true)
+        return 0
+    var parsed = parseUrl(info.url)
+    if (parsed === null || parsed.host === ""
+            || (parsed.scheme !== "http" && parsed.scheme !== "https")
+            || !isLocalAddress(parsed.host))
+        return 0
+    if (parsed.port !== "")
+        return parseInt(parsed.port, 10)
+    return parsed.scheme === "https" ? 443 : 80
+}
+
+// "skip" | "go" | "check" for a navigation request: "check" means reject it
+// and ask the helper first. request.pass is the address a good check was
+// just made for; it is used up by this navigation whatever the result.
+// Subframes are not gated.
+function localOwnerGate(request) {
+    var info = request || {}
+    if (info.isMainFrame === false || localOwnerPort(info) === 0)
+        return "skip"
+    var url = info.url === undefined || info.url === null ? "" : String(info.url)
+    return typeof info.pass === "string" && info.pass !== "" && info.pass === url ? "go" : "check"
+}
+
+// --- Off-site notice ----------------------------------------------------------
+
+var MAX_HOST_DISPLAY = 64
+
+function punycodeDigit(digit) {
+    return String.fromCharCode(digit < 26 ? 97 + digit : 22 + digit)
+}
+
+function punycodeAdapt(delta, points, first) {
+    delta = first ? Math.floor(delta / 700) : Math.floor(delta / 2)
+    delta += Math.floor(delta / points)
+    var k = 0
+    while (delta > 455) {
+        delta = Math.floor(delta / 35)
+        k += 36
+    }
+    return k + Math.floor(36 * delta / (delta + 38))
+}
+
+// RFC 3492 encoding of one label's code points (without "xn--"); "" on overflow.
+function punycodeEncode(codePoints) {
+    var output = []
+    for (var index = 0; index < codePoints.length; index++) {
+        if (codePoints[index] < 128)
+            output.push(String.fromCharCode(codePoints[index]))
+    }
+    var basic = output.length
+    var handled = basic
+    if (basic > 0)
+        output.push("-")
+    var n = 128
+    var delta = 0
+    var bias = 72
+    while (handled < codePoints.length) {
+        var next = 0x10ffff + 1
+        for (index = 0; index < codePoints.length; index++) {
+            if (codePoints[index] >= n && codePoints[index] < next)
+                next = codePoints[index]
+        }
+        delta += (next - n) * (handled + 1)
+        if (delta > 0x7fffffff)
+            return ""
+        n = next
+        for (index = 0; index < codePoints.length; index++) {
+            var point = codePoints[index]
+            if (point < n)
+                delta++
+            if (point !== n)
+                continue
+            var q = delta
+            for (var k = 36; ; k += 36) {
+                var t = k <= bias ? 1 : (k >= bias + 26 ? 26 : k - bias)
+                if (q < t)
+                    break
+                output.push(punycodeDigit(t + (q - t) % (36 - t)))
+                q = Math.floor((q - t) / (36 - t))
+            }
+            output.push(punycodeDigit(q))
+            bias = punycodeAdapt(delta, handled + 1, handled === basic)
+            delta = 0
+            handled++
+        }
+        delta++
+        n++
+    }
+    return output.join("")
+}
+
+function codePointsOf(text) {
+    var points = []
+    for (var index = 0; index < text.length; index++) {
+        var code = text.charCodeAt(index)
+        if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+            var low = text.charCodeAt(index + 1)
+            if (low >= 0xdc00 && low <= 0xdfff) {
+                points.push((code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000)
+                index++
+                continue
+            }
+        }
+        points.push(code)
+    }
+    return points
+}
+
+// The host of an http(s) address as plain ASCII: lower case, without user
+// info, port or final dot; international labels as their "xn--" form, so
+// look-alike letters can't pass for the real name. "" when there is no
+// readable host.
+function displayHost(url) {
+    var text = String(url === undefined || url === null ? "" : url)
+    var match = /^https?:\/\/([^\/?#]*)/i.exec(text)
+    if (!match)
+        return ""
+    var authority = match[1]
+    authority = authority.slice(authority.lastIndexOf("@") + 1)
+    var host
+    if (authority.charAt(0) === "[") {
+        var end = authority.indexOf("]")
+        host = end > 0 ? authority.slice(0, end + 1).toLowerCase() : ""
+        return /^\[[0-9a-f:.]+\]$/.test(host) ? host : ""
+    }
+    host = authority.replace(/:[0-9]*$/, "").toLowerCase()
+    if (host.charAt(host.length - 1) === ".")
+        host = host.slice(0, -1)
+    if (host === "" || /[\u0000- %\\]/.test(host))
+        return ""
+    var labels = host.split(/[.。．｡]/)
+    for (var index = 0; index < labels.length; index++) {
+        var label = labels[index]
+        if (/^[\u0000-\u007f]*$/.test(label))
+            continue
+        var encoded = punycodeEncode(codePointsOf(label))
+        if (encoded === "")
+            return ""
+        labels[index] = "xn--" + encoded
+    }
+    host = labels.join(".")
+    return /^[a-z0-9_\-]+(?:\.[a-z0-9_\-]+)*$/.test(host) ? host : ""
+}
+
+// Long hosts keep their end, where the real domain is.
+function shortHost(host) {
+    var text = String(host || "")
+    return text.length > MAX_HOST_DISPLAY ? "…" + text.slice(-(MAX_HOST_DISPLAY - 1)) : text
+}
+
+// {off, host} for the page shown in a site's main frame: off when it is an
+// http(s) page on a host outside the site's own, sign-in and custom hosts.
+// host is shortHost(displayHost(url)), "" when unreadable (still off).
+function offSiteHost(request) {
+    var info = request || {}
+    var site = effectiveSite(info.siteId, info.customUrls)
+    var url = info.url === undefined || info.url === null ? "" : String(info.url)
+    if (!site || !/^https?:/i.test(url))
+        return { off: false, host: "" }
+    var host = displayHost(url)
+    if (host !== "" && knownHost(site, host))
+        return { off: false, host: "" }
+    return { off: true, host: shortHost(host) }
+}
+
 // "allow" | "block" for an embedded frame. Frames may load https from any
 // host and about:, blob:, data: or srcdoc content, but never this computer
 // unless the site is Local, and Local frames get plain http only for the

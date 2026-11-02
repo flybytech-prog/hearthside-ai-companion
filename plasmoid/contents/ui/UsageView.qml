@@ -7,6 +7,9 @@ import org.kde.kirigami as Kirigami
 import "SnapshotLogic.js" as SnapshotLogic
 
 // Usage tab body, moved verbatim from FullRepresentation.qml.
+// Names, plans, captions, errors and amounts come from the helper (and so
+// from provider servers): every label shows them as plain text only, never
+// as rich text that could load images or links.
 ColumnLayout {
     id: usage
 
@@ -29,7 +32,17 @@ ColumnLayout {
         visible: !root.hasData && root.lastError !== ""
         iconName: "network-disconnect"
         text: i18n("Couldn't load usage")
-        explanation: root.lastError
+
+        // Instead of `explanation`, whose label reads rich text.
+        PlasmaComponents.Label {
+            Layout.fillWidth: true
+            visible: text !== ""
+            textFormat: Text.PlainText
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            opacity: 0.75
+            text: root.lastError
+        }
     }
 
     PlasmaExtras.PlaceholderMessage {
@@ -102,11 +115,13 @@ ColumnLayout {
                         Kirigami.Heading {
                             Layout.fillWidth: true
                             level: 3
+                            textFormat: Text.PlainText
                             text: providerSection.modelData.display_name
                             elide: Text.ElideRight
                         }
                         PlasmaComponents.Label {
                             visible: !!providerSection.modelData.plan
+                            textFormat: Text.PlainText
                             text: providerSection.modelData.plan || ""
                             opacity: 0.65
                             elide: Text.ElideRight
@@ -120,14 +135,46 @@ ColumnLayout {
                         }
                     }
 
-                    Kirigami.InlineMessage {
+                    // Like a Kirigami.InlineMessage, whose label reads rich text.
+                    Rectangle {
+                        id: failureBox
+                        readonly property bool warning: providerSection.modelData.status === "stale"
+                            || providerSection.modelData.status === "rate_limited"
                         Layout.fillWidth: true
                         visible: providerSection.modelData.status !== "ok"
-                        type: providerSection.modelData.status === "stale"
-                            || providerSection.modelData.status === "rate_limited"
-                            ? Kirigami.MessageType.Warning
-                            : Kirigami.MessageType.Error
-                        text: usage.failureText(providerSection.modelData, usage.nowMs)
+                        implicitHeight: failureRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+                        radius: Kirigami.Units.cornerRadius
+                        color: failureBox.warning
+                            ? Kirigami.Theme.neutralBackgroundColor
+                            : Kirigami.Theme.negativeBackgroundColor
+                        border.width: 1
+                        border.color: failureBox.warning
+                            ? Kirigami.Theme.neutralTextColor
+                            : Kirigami.Theme.negativeTextColor
+
+                        RowLayout {
+                            id: failureRow
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                margins: Kirigami.Units.smallSpacing
+                            }
+                            spacing: Kirigami.Units.smallSpacing
+
+                            Kirigami.Icon {
+                                source: failureBox.warning ? "data-warning" : "data-error"
+                                Layout.alignment: Qt.AlignTop
+                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            }
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                text: usage.failureText(providerSection.modelData, usage.nowMs)
+                            }
+                        }
                     }
 
                     GridLayout {
@@ -171,11 +218,13 @@ ColumnLayout {
                                         Layout.fillWidth: true
                                         PlasmaComponents.Label {
                                             Layout.fillWidth: true
+                                            textFormat: Text.PlainText
                                             text: quotaCard.modelData.caption
                                             opacity: 0.72
                                             elide: Text.ElideRight
                                         }
                                         PlasmaComponents.Label {
+                                            textFormat: Text.PlainText
                                             text: Math.round(root.displayedPercent(
                                                 Number(quotaCard.modelData.used_percent)
                                             )) + "%"
@@ -225,6 +274,7 @@ ColumnLayout {
 
                                     PlasmaComponents.Label {
                                         visible: text !== ""
+                                        textFormat: Text.PlainText
                                         text: usage.relativeReset(
                                             quotaCard.modelData.resets_at,
                                             usage.nowMs
@@ -263,12 +313,14 @@ ColumnLayout {
                                     margins: Kirigami.Units.largeSpacing
                                 }
                                 PlasmaComponents.Label {
+                                    textFormat: Text.PlainText
                                     text: usage.billingTitle(
                                         providerSection.modelData.billing_usage
                                     )
                                     opacity: 0.72
                                 }
                                 PlasmaComponents.Label {
+                                    textFormat: Text.PlainText
                                     text: usage.billingValue(
                                         providerSection.modelData.billing_usage
                                     )

@@ -72,7 +72,7 @@ function nextRun(run) {
 function helperPrefix(run, applet) {
     if (validInt(run) < 0 || validInt(applet) < 0)
         return ""
-    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet + " python3 -m hearthside"
+    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet + " python3 -P -m hearthside"
 }
 
 // op "prepare" needs a generation; op "remove" keeps generation `keep` when it

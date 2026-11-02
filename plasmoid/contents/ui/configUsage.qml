@@ -63,7 +63,7 @@ KCM.ScrollViewKCM {
     property string statusMessage: ""
     property bool checkingProviders: false
     property bool detecting: false
-    readonly property string detectCommand: "python3 -m hearthside --detect"
+    readonly property string detectCommand: "python3 -P -m hearthside --detect"
 
     function parseList(value, fallback) {
         try {
@@ -159,7 +159,7 @@ KCM.ScrollViewKCM {
             return Catalog.byId(providerId) !== null
         })
         providerSource.connectSource(
-            "python3 -m hearthside --json --providers=" + safe.join(",")
+            "python3 -P -m hearthside --json --providers=" + safe.join(",")
         )
     }
 
@@ -369,6 +369,7 @@ KCM.ScrollViewKCM {
             QQC2.Label {
                 visible: page.statusMessage !== ""
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: page.statusMessage
                 wrapMode: Text.WordWrap
                 opacity: 0.72

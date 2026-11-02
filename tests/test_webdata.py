@@ -483,17 +483,20 @@ def test_purge_output_never_contains_a_path(data, capsys, no_mounts, tmp_path):
 INSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
 
 
-# install.sh runs `python3 -m hearthside`. This python3 is a shim that points the helper
+# install.sh runs `python3 -P -m hearthside`. This python3 is a shim that points the helper
 # at a fake mountinfo and a fake default runtime dir before running it, so the script
 # never reads the real /proc/self/mountinfo or /run/user/<uid> (the test must pass even
-# while the user's real folder is unlocked).
+# while the user's real folder is unlocked). It refuses (exit 98) a call without -P, so
+# the script cannot regress to importing modules from the working folder.
 PYTHON_SHIM = """#!/bin/sh
-exec {python} -c '
+exec {python} -P -c '
 import os, runpy, sys
+if sys.argv[1:4] != ["-P", "-m", "hearthside"]:
+    sys.exit(98)
 from hearthside.core import vault
 vault.MOUNTINFO = os.environ["TEST_MOUNTINFO"]
 vault.DEFAULT_RUNTIME = os.environ["TEST_DEFAULT_RUNTIME"]
-sys.argv = ["hearthside", *sys.argv[3:]]
+sys.argv = ["hearthside", *sys.argv[4:]]
 runpy.run_module("hearthside", run_name="__main__", alter_sys=True)
 ' "$@"
 """

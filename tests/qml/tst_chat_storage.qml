@@ -49,11 +49,11 @@ TestCase {
 
     function test_vaultCommands() {
         compare(ChatStorage.vaultCommand("status", 3, 12),
-                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -m hearthside --vault status")
+                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -P -m hearthside --vault status")
         var ops = ["status", "create", "unlock", "lock", "change-passphrase", "destroy"]
         for (var index = 0; index < ops.length; index++)
             compare(ChatStorage.vaultCommand(ops[index], 1, 0),
-                    "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=0 python3 -m hearthside --vault " + ops[index])
+                    "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=0 python3 -P -m hearthside --vault " + ops[index])
     }
 
     function test_vaultCommandRejectsAnythingElse() {
@@ -92,13 +92,13 @@ TestCase {
 
     function test_webDataCommands() {
         compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -m hearthside --web-data prepare --store encrypted --applet 5 --generation 2")
+                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data prepare --store encrypted --applet 5 --generation 2")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, 2, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -m hearthside --web-data remove --store encrypted --applet 5 --keep 2")
+                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5 --keep 2")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, null, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -m hearthside --web-data remove --store encrypted --applet 5")
+                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, undefined, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -m hearthside --web-data remove --store encrypted --applet 5")
+                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5")
     }
 
     function test_webDataCommandRejectsAnythingElse() {

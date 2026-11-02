@@ -768,6 +768,8 @@ PlasmoidItem {
     Plasmoid.icon: Qt.resolvedUrl("../images/hearthside.svg")
     Plasmoid.busy: root.usageShown && !root.hasData && root.lastError === ""
     toolTipMainText: i18n("Hearthside")
+    // Provider names, plans and helper errors: never rich text.
+    toolTipTextFormat: Text.PlainText
     toolTipSubText: {
         if (!root.usageShown || !root.tooltipShowsUsage)
             return ""

@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import org.kde.kirigami as Kirigami
 import "../../plasmoid/contents/ui"
 
 // ChatView with a stub web view: when the web view starts and with which
@@ -12,9 +13,12 @@ TestCase {
     visible: true
     when: windowShown
 
-    // Plasma injects i18n(); a plain stand-in is enough here.
+    // Plasma injects i18n(); a stand-in that fills %1, %2...
     function i18n(text) {
-        return text
+        var result = text
+        for (var index = 1; index < arguments.length; index++)
+            result = result.replace("%" + index, String(arguments[index]))
+        return result
     }
 
     property var requests: []
@@ -401,5 +405,78 @@ TestCase {
         var card = findChild(view, "storageCard")
         verify(card.visible)
         compare(card.message, "Locked automatically.")
+    }
+
+    // --- Local owner check messages (M2) -------------------------------------
+
+    function test_localOwnerMessages() {
+        var view = make({current: true, siteId: "local", siteIds: ["local", "claude"]})
+        tryVerify(function () { return view.web !== null })
+        var message = findChild(view, "localOwnerMessage")
+        verify(!message.visible)
+        view.web.localOwnerPort = 3000
+        view.web.localOwnerProblem = "other"
+        verify(message.visible)
+        compare(message.text, "Another user's program is using port 3000. Hearthside won't load anything from it.")
+        compare(view.localOwnerText("other", 3000).indexOf("localhost"), -1)
+        compare(view.localOwnerText("owner-unknown", 3000),
+                "Couldn't check which program is using port 3000. Nothing was loaded.")
+        compare(view.localOwnerText("not-running", 3000),
+                "Nothing is using port 3000. Is your local chat server running?")
+        compare(view.localOwnerText("anything else", 3000), view.localOwnerText("owner-unknown", 3000))
+        compare(view.localOwnerText("", 3000), "")
+        compare(message.type, Kirigami.MessageType.Error)
+        message.actions[0].trigger()
+        compare(view.web.retries, 1)
+        // Shown for the Local site only.
+        view.siteId = "claude"
+        verify(!message.visible)
+        view.siteId = "local"
+        view.web.localOwnerProblem = "resend"
+        compare(message.type, Kirigami.MessageType.Information)
+        verify(!message.actions[0].visible)
+        message.actions[1].trigger()
+        compare(view.web.localOwnerProblem, "")
+    }
+
+    // --- off-site notice (L2) ------------------------------------------------
+
+    function test_offSiteNoticeShowsTheHostAsPlainText() {
+        var view = make({current: true, siteId: "claude", siteIds: ["claude"]})
+        tryVerify(function () { return view.web !== null })
+        var notice = findChild(view, "offSiteNotice")
+        var label = findChild(view, "offSiteText")
+        var back = findChild(view, "offSiteBack")
+        verify(!notice.visible)
+        view.web.activeSiteName = "Claude"
+        // ChatSites never yields such a host; the label must still show it literally.
+        var host = "<img src=\"http://127.0.0.1:9/x\"><b>claude.ai</b>"
+        view.web.offSite = {off: true, host: host}
+        verify(notice.visible)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.text, "You are on " + host + " — not Claude")
+        compare(back.text, "Back to Claude")
+        back.clicked()
+        compare(view.web.homes, 1)
+        view.web.offSite = {off: true, host: ""}
+        compare(label.text, "You are on another site — not Claude")
+        view.web.offSite = {off: false, host: ""}
+        verify(!notice.visible)
+    }
+
+    // --- download names (L3) -------------------------------------------------
+
+    function test_downloadNamesRevealHiddenCharacters() {
+        var view = make()
+        compare(view.plainName("invoice‮fdp.exe"), "invoice⟦U+202E⟧fdp.exe")
+        compare(view.plainName("a​b⁦c﻿"), "a⟦U+200B⟧b⟦U+2066⟧c⟦U+FEFF⟧")
+        compare(view.plainName("<b>x</b>&.txt"), "&lt;b&gt;x&lt;/b&gt;&amp;.txt")
+        var long = ""
+        for (var index = 0; index < 70; index++)
+            long += "‮"
+        var shown = view.plainName(long)
+        verify(!/[‪-‮]/.test(shown), shown)
+        compare(shown.length, 58)
+        compare(view.plainName("report.pdf"), "report.pdf")
     }
 }

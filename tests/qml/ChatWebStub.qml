@@ -18,10 +18,19 @@ Item {
     property bool passkeyNotice: false
     property bool pageCrashed: false
     property bool pageFailed: false
+    property int appletId: 0
+    property var offSite: ({off: false, host: ""})
+    property string activeSiteName: ""
+    property string localOwnerProblem: ""
+    property int localOwnerPort: 0
+    property bool localOwnerChecking: false
+    property int retries: 0
+    property int homes: 0
 
     function goBack() {}
     function reload() {}
-    function home() {}
+    function home() { homes++ }
+    function retryLocalOwner() { retries++ }
     function openExternally() {}
     function focusView() {}
     function cancelDownload() {}

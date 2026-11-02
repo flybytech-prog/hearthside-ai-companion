@@ -837,7 +837,7 @@ def test_proof_full_representation_ready_binding_is_caught():
 
 def test_proof_helper_flag_outside_chat_storage_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
-                    "    function x() { return \"python3 -m hearthside --vault status\" }\n    function chatNext() {")
+                    "    function x() { return \"python3 -P -m hearthside --vault status\" }\n    function chatNext() {")
     assert _helper_flag_offenders({"main.qml": code})
 
 
@@ -1634,7 +1634,7 @@ var DEFAULT_ADDRESS = "http://127.0.0.1:11434"
 
 function ownerCommand(port, run, applet) {
     return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet
-        + " python3 -m hearthside --port-owner " + port
+        + " python3 -P -m hearthside --port-owner " + port
 }
 """
 
@@ -2019,7 +2019,7 @@ def test_proof_ollama_key_with_a_different_default_is_caught():
 
 OWNER_COMMAND = (
     r'"env HEARTHSIDE_RUN="\s*\+\s*\w+\s*\+\s*" HEARTHSIDE_APPLET="\s*\+\s*\w+\s*'
-    r'\+\s*" python3 -m hearthside --port-owner "\s*\+\s*\w+'
+    r'\+\s*" python3 -P -m hearthside --port-owner "\s*\+\s*\w+'
 )
 OTHER_HELPER_FLAGS = ("--json", "--providers", "--catalog", "--detect") + HELPER_FLAGS
 
@@ -2034,10 +2034,10 @@ def _port_owner_flag_problems(sources):
         if name.endswith("OllamaChat.js"):
             if len(_hits(r"--port-owner", code)) != 1 or len(re.findall(OWNER_COMMAND, code)) != 1:
                 problems.append(f"{name}: --port-owner once, as `\"env HEARTHSIDE_RUN=\" + run + "
-                                "\" HEARTHSIDE_APPLET=\" + applet + \" python3 -m hearthside --port-owner \" + port`")
+                                "\" HEARTHSIDE_APPLET=\" + applet + \" python3 -P -m hearthside --port-owner \" + port`")
             problems += [f"{name}:{line} {flag}" for flag in OTHER_HELPER_FLAGS
                          for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)]
-        if name.endswith("OllamaChatView.qml"):
+        if name.endswith(("OllamaChatView.qml", "LocalOwnerCheck.qml")):
             problems += [f"{name}:{line} stderr" for line in _hits(r"\bstderr\b", code)]
     return problems
 
@@ -2049,7 +2049,7 @@ def test_port_owner_command_is_built_only_by_ollama_chat_js():
 
 
 @pytest.mark.parametrize("target,old,new", [
-    ("js", " python3 -m hearthside --port-owner ", " python3 -m hearthside --port-owner --json "),
+    ("js", " python3 -P -m hearthside --port-owner ", " python3 -P -m hearthside --port-owner --json "),
     ("js", '" HEARTHSIDE_APPLET=" + applet\n', '""\n'),
     ("js", "--port-owner", "--port-owne"),
 ])
@@ -2059,7 +2059,7 @@ def test_proof_port_owner_command_rule_catches(target, old, new):
 
 
 @pytest.mark.parametrize("snippet", [
-    '    readonly property string cmd: "python3 -m hearthside --port-owner 11434"',
+    '    readonly property string cmd: "python3 -P -m hearthside --port-owner 11434"',
     '    function f(data) { return data["stderr"] }',
 ])
 def test_proof_port_owner_view_rule_catches(snippet):
@@ -2068,7 +2068,7 @@ def test_proof_port_owner_view_rule_catches(snippet):
 
 def test_proof_port_owner_flag_in_main_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
-                    "    function x() { return \"python3 -m hearthside --port-owner 1\" }\n    function chatNext() {")
+                    "    function x() { return \"python3 -P -m hearthside --port-owner 1\" }\n    function chatNext() {")
     assert _port_owner_flag_problems({"main.qml": code})
 
 
@@ -2123,6 +2123,11 @@ def test_proof_storage_rule_catches(name, snippet):
 # P9 The test seams are set only by tests.
 
 SEAMS = ("createRequest", "runOwnerCheck")
+# The files that declare each seam (once, as `property var <seam>: ...`).
+SEAM_OWNERS = {
+    "createRequest": ("OllamaChatView.qml",),
+    "runOwnerCheck": ("OllamaChatView.qml", "LocalOwnerCheck.qml"),
+}
 
 
 def _seam_problems(sources, view_present):
@@ -2132,7 +2137,7 @@ def _seam_problems(sources, view_present):
             problems += [f"{name}:{line} {seam} assigned" for line in _hits(rf"\b{seam}\s*=(?!=)", code)]
             declarations = _hits(rf"(?m)^[ \t]*property\s+var\s+{seam}\s*:", code)
             bindings = _hits(rf"(?<![\w.]){seam}\s*:", code)
-            if not name.endswith("OllamaChatView.qml"):
+            if not name.endswith(SEAM_OWNERS[seam]):
                 problems += [f"{name}:{line} {seam} bound" for line in bindings]
             elif bindings != declarations or len(declarations) != 1:
                 problems.append(f"{name}: {seam} must be declared once (`property var {seam}: ...`) "
@@ -2154,6 +2159,8 @@ def test_ollama_test_seams_are_never_set_in_the_plasmoid():
     ("FullRepresentation.qml", "OllamaChatView { createRequest: function () { return null } }"),
     ("FullRepresentation.qml", "ollamaView.runOwnerCheck = function (c) {}"),
     ("main.qml", "Component.onCompleted: view.createRequest = null"),
+    ("ChatWebView.qml", "LocalOwnerCheck { runOwnerCheck: function (c) {} }"),
+    ("LocalOwnerCheck.qml", "    property var createRequest: null"),
 ])
 def test_proof_seam_rule_catches_outside_the_view(name, snippet):
     assert _seam_problems({name: _strip_comments(snippet)}, view_present=False)
@@ -2445,3 +2452,369 @@ def test_proof_owner_gate_rule_catches(old, new):
 ])
 def test_proof_owner_gate_rule_catches_insertions(snippet):
     assert _owner_gate_problems(_inserted_view(snippet))
+
+
+# --- security audit 2026-11-02 ---------------------------------------------------------
+
+USAGE_VIEW = UI / "UsageView.qml"
+CONFIG_USAGE = UI / "configUsage.qml"
+LOCAL_OWNER_CHECK = UI / "LocalOwnerCheck.qml"
+
+# L1 Helper and provider text (names, plans, captions, errors, amounts) is
+# shown as plain text only: AutoText would load <img src=...> from a provider
+# reply. Every text element in these files either shows one fixed i18n
+# literal or sets `textFormat: Text.PlainText`. Kirigami.InlineMessage and
+# PlaceholderMessage read their text as rich text and expose no textFormat,
+# so their `text:`/`explanation:` may only be fixed literals.
+
+HELPER_TEXT_FILES = (USAGE_VIEW, CONFIG_USAGE, FULL_REPRESENTATION)
+MESSAGE_ELEMENT = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:InlineMessage|PlaceholderMessage)\s*\{"
+HELPER_TEXT_BANS = {name: RICH_TEXT_BANS[name] for name in (
+    "RichText", "StyledText", "MarkdownText", "AutoText", "onLinkActivated", "linkActivated",
+    "non-plain textFormat")}
+
+
+def _literal_binding(top, key):
+    return re.search(rf'(?:^|[\n;])\s*{key}\s*:\s*i18n\(\s*"[^"]*"\s*\)\s*(?=;|\n|$)', top)
+
+
+def _helper_text_problems(code):
+    problems = []
+    for start, body in _blocks(code, TEXT_ELEMENT):
+        top = _top_level(body)
+        if not re.search(r"(?:^|[\n;])\s*text\s*:", top) or _literal_binding(top, "text"):
+            continue
+        if len(re.findall(PLAIN_TEXT_FORMAT, top)) != 1:
+            problems.append(f"line {_line_of(code, start)}: text element showing data without "
+                            "`textFormat: Text.PlainText`")
+    for start, body in _blocks(code, MESSAGE_ELEMENT):
+        top = _top_level(body)
+        for key in ("text", "explanation"):
+            if re.search(rf"(?:^|[\n;])\s*{key}\s*:", top) and not _literal_binding(top, key):
+                problems.append(f"line {_line_of(code, start)}: {key} of a message element "
+                                "(rich text) must be a fixed i18n literal")
+    for name, pattern in HELPER_TEXT_BANS.items():
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"{name} is forbidden (lines {lines})")
+    return problems
+
+
+def _tooltip_format_problems(code):
+    if len(_hits(r"(?m)^    toolTipTextFormat\s*:\s*Text\s*\.\s*PlainText\s*$", code)) != 1:
+        return ["main.qml must set `toolTipTextFormat: Text.PlainText` once on the PlasmoidItem"]
+    return []
+
+
+@pytest.mark.parametrize("path", HELPER_TEXT_FILES, ids=lambda path: path.name)
+def test_helper_text_is_shown_as_plain_text(path):
+    code = _read_code(path)
+    assert list(_blocks(code, TEXT_ELEMENT)), f"{_rel(path)}: no text elements found"
+    problems = _helper_text_problems(code)
+    assert not problems, f"{_rel(path)}: {problems}"
+
+
+def test_tooltip_is_plain_text():
+    assert not _tooltip_format_problems(_read_code(MAIN_QML))
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.plan",
+     "text: providerSection.modelData.plan"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.plan",
+     "textFormat: Text.StyledText\n                            text: providerSection.modelData.plan"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.display_name",
+     "text: providerSection.modelData.display_name"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                                wrapMode: Text.Wrap\n"
+                 "                                text: usage.failureText(",
+     "wrapMode: Text.Wrap\n                                text: usage.failureText("),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                                            text: quotaCard.modelData.caption",
+     "text: quotaCard.modelData.caption"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                                    text: usage.billingValue(",
+     "text: usage.billingValue("),
+    (USAGE_VIEW, '        text: i18n("Couldn\'t load usage")\n',
+     '        text: i18n("Couldn\'t load usage")\n        explanation: root.lastError\n'),
+    (USAGE_VIEW, "                    // Like a Kirigami.InlineMessage, whose label reads rich text.\n",
+     "                    Kirigami.InlineMessage { text: usage.failureText(providerSection.modelData, 0) }\n"),
+    (CONFIG_USAGE, "textFormat: Text.PlainText\n                            text: page.providerStatus(",
+     "text: page.providerStatus("),
+    (FULL_REPRESENTATION, "textFormat: Text.PlainText\n                                text: siteDelegate.modelData.name",
+     "text: siteDelegate.modelData.name"),
+])
+def test_proof_helper_text_rule_catches(path, old, new):
+    assert _helper_text_problems(_mutated(path, old, new))
+
+
+@pytest.mark.parametrize("new", ["", "    toolTipTextFormat: Text.AutoText\n"])
+def test_proof_tooltip_format_rule_catches(new):
+    code = _mutated(MAIN_QML, "    toolTipTextFormat: Text.PlainText\n", new)
+    assert _tooltip_format_problems(code)
+
+
+# M2 Local web UI pages on this computer load only after the helper's port
+# owner check said self or system: the Local view is created only after a
+# good check, every main-frame navigation of a Local page to this computer is
+# rejected unless it carries the one-shot pass of a good check for exactly its
+# address, and a bad answer passes nothing. LocalOwnerCheck.qml runs the
+# check with OllamaChat.ownerCommand (the --port-owner literal stays in
+# OllamaChat.js, see P7) and reads stdout only.
+
+NAV_HANDLER = r"\bonNavigationRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{"
+OWNER_FINISHED_HANDLER = (
+    r"(?m)^\s*onFinished\s*:\s*\(\s*port\s*,\s*problem\s*\)\s*=>\s*"
+    r"chatWeb\s*\.\s*localOwnerFinished\s*\(\s*port\s*,\s*problem\s*\)\s*$"
+)
+
+
+def _function_body(code, name):
+    bodies = [body for _, body in _blocks(code, rf"\bfunction\s+{name}\s*\([^)]*\)\s*\{{")]
+    return bodies[0] if len(bodies) == 1 else None
+
+
+def _local_gate_problems(web, check):
+    problems = []
+    handlers = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(handlers) != 1:
+        return [f"ChatWebView.qml: expected one onNavigationRequested handler, found {len(handlers)}"]
+    nav = handlers[0]
+    gate = re.search(r"ChatSites\s*\.\s*localOwnerGate\s*\(\s*\{([^}]*)\}\s*\)", nav)
+    if len(re.findall(r"\blocalOwnerGate\s*\(", nav)) != 1 or not gate:
+        problems.append("onNavigationRequested must call ChatSites.localOwnerGate({...}) once")
+    else:
+        fields = gate.group(1)
+        for field in (r"url\s*:\s*url\b", r"siteId\s*:\s*page\s*\.\s*site\b",
+                      r"pass\s*:\s*page\s*\.\s*ownerPass\b", r"customUrls\s*:\s*chatWeb\s*\.\s*customUrls\b"):
+            if not re.search(field, fields):
+                problems.append(f"localOwnerGate argument needs `{field}`")
+        rest = nav[gate.end():]
+        check_branch = re.search(r'if\s*\(\s*gate\s*===\s*"check"\s*\)\s*\{\s*request\s*\.\s*reject\s*\(\s*\)\s*'
+                                 r'chatWeb\s*\.\s*checkLocalOwner\s*\(\s*page\s*,\s*url\s*,[^;]*?\breturn\b', rest, re.S)
+        agent = re.search(r"page\s*\.\s*checkUserAgent\s*\(\s*request\s*\)", rest)
+        if not check_branch or not agent or check_branch.start() > agent.start():
+            problems.append('a "check" gate must reject the request and run checkLocalOwner(page, url, ...) '
+                            "before anything else lets the navigation go on")
+        if re.search(r"\.\s*checkUserAgent\s*\(", nav[:gate.start()]):
+            problems.append("checkUserAgent must come after the owner gate")
+    # The pass is only ever handed out after a good check.
+    for match in re.finditer(r"\bownerPass\s*=(?!=)\s*([^\n;]*)", web):
+        value = match.group(1).strip()
+        if value in ('""', "chatWeb.localCreatePass", "pending.url"):
+            continue
+        problems.append(f"line {_line_of(web, match.start())}: ownerPass may only be set to \"\", "
+                        "chatWeb.localCreatePass or pending.url")
+    finished = _function_body(web, "localOwnerFinished")
+    if finished is None:
+        problems.append("`function localOwnerFinished(` must be defined once")
+    else:
+        bad = re.search(r'if\s*\(\s*problem\s*!==\s*""\s*\)\s*\{[^{}]*\breturn\b[^{}]*\}', finished)
+        grants = [m.start() for m in re.finditer(
+            r"\bownerPass\s*=\s*pending\.url|\blocalCreatePass\s*=\s*pending\.url|visitedSites\s*\.\s*append"
+            r"|\bview\s*\.\s*url\s*=", finished)]
+        if not bad or not grants or min(grants) < bad.end():
+            problems.append('localOwnerFinished must return on `if (problem !== "")` before it creates, '
+                            "passes or loads anything")
+    for match in re.finditer(r"\bownerPass\s*=\s*pending\.url|\blocalCreatePass\s*=(?!=)(?!\s*"")", web):
+        if finished is None or web.find(finished) > match.start() or match.start() > web.find(finished) + len(finished):
+            problems.append(f"line {_line_of(web, match.start())}: a pass is granted outside localOwnerFinished")
+    sync = _function_body(web, "syncViews") or ""
+    appends = len(re.findall(r"visitedSites\s*\.\s*append\s*\(", web))
+    guarded = re.search(r"ChatSites\s*\.\s*localOwnerPort\s*\([^)]*\)\s*===\s*0\s*\)\s*"
+                        r"visitedSites\s*\.\s*append\s*\(", sync)
+    if appends != 2 or not guarded or len(re.findall(r"visitedSites\s*\.\s*append\s*\(", sync)) != 1:
+        problems.append("visitedSites.append only in syncViews behind `localOwnerPort(...) === 0` "
+                        "and in localOwnerFinished")
+    if len(_hits(OWNER_FINISHED_HANDLER, web)) != 1 or len(re.findall(r"\blocalOwnerFinished\s*\(", web)) != 2:
+        problems.append("localOwnerFinished is reached only from "
+                        "`onFinished: (port, problem) => chatWeb.localOwnerFinished(port, problem)`")
+    windows = [body for _, body in _blocks(web, r"\bonNewWindowRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{")]
+    if len(windows) != 1 or not re.search(r'verdict\s*===\s*"overlay"\s*&&\s*ChatSites\s*\.\s*localOwnerPort\s*\(',
+                                          windows[0]):
+        problems.append("onNewWindowRequested must drop Local windows that start on this computer")
+    # LocalOwnerCheck.qml
+    blanked = _strip_comments(check, blank_strings=True)
+    if len(_hits(r"(?m)^[ \t]*property\s+var\s+runOwnerCheck\s*:\s*function\s*\(\s*command\s*\)\s*\{\s*"
+                 r"ownerSource\s*\.\s*connectSource\s*\(\s*command\s*\)\s*;?\s*\}\s*$", check)) != 1 \
+            or len(_hits(r"\bconnectSource\s*\(", blanked)) != 1:
+        problems.append("LocalOwnerCheck.qml: runOwnerCheck must default to "
+                        "`function (command) { ownerSource.connectSource(command) }`, the only connectSource")
+    if len(re.findall(r'ownerCheck\s*\.\s*ownerDone\s*\(\s*source\s*,\s*OllamaChat\s*\.\s*parseOwnerReply\s*\(\s*'
+                      r'data\s*\[\s*"exit code"\s*\]\s*,\s*data\s*\[\s*"stdout"\s*\]\s*\)\s*\)', check)) != 1 \
+            or len(re.findall(r"\bownerDone\s*\(", check)) != 2:
+        problems.append("LocalOwnerCheck.qml: ownerDone only from onNewData with parseOwnerReply(exit code, stdout)")
+    if len(re.findall(r"\bOllamaChat\s*\.\s*ownerCommand\s*\(", check)) != 1:
+        problems.append("LocalOwnerCheck.qml: the command comes from OllamaChat.ownerCommand, once")
+    good = 0
+    for match in re.finditer(r"\bownerCheck\s*\.\s*finished\s*\(([^\n]*)\)\s*$", check, re.M):
+        args = match.group(1)
+        if re.fullmatch(r"\s*ownerCheck\s*\.\s*port\s*,\s*OllamaChat\s*\.\s*ownerProblem\s*\(\s*reply\s*\)\s*", args):
+            good += 1
+        elif not re.fullmatch(r'\s*(?:ownerCheck\s*\.\s*)?port\s*,\s*"owner-unknown"\s*', args):
+            problems.append(f"LocalOwnerCheck.qml:{_line_of(check, match.start())}: finished() other than "
+                            'OllamaChat.ownerProblem(reply) or "owner-unknown"')
+    if good != 1 or len(re.findall(r"\bfinished\s*\(", blanked)) != len(re.findall(
+            r"\bownerCheck\s*\.\s*finished\s*\(", blanked)) + 1:
+        problems.append("LocalOwnerCheck.qml: finished(port, OllamaChat.ownerProblem(reply)) exactly once")
+    return problems
+
+
+def _ollama_owner_problem_problems(js):
+    body = _function_body(js, "ownerProblem")
+    if body is None:
+        return ["OllamaChat.js: `function ownerProblem(` must be defined once"]
+    if re.findall(r'return\s+""', body) or len(re.findall(r'""', body)) != 1 \
+            or not re.search(r'return\s+trusted\s*\(\s*reply\s*\.\s*owner\s*\)\s*\?\s*""\s*:\s*"owner-unknown"', body):
+        return ['OllamaChat.ownerProblem may return "" only through trusted(reply.owner)']
+    return []
+
+
+def test_local_web_ui_loads_only_after_a_good_owner_check():
+    problems = _local_gate_problems(_read_code(CHAT_WEB_VIEW), _read_code(LOCAL_OWNER_CHECK))
+    problems += _ollama_owner_problem_problems(_read_code(OLLAMA_CHAT_JS))
+    assert not problems, problems
+
+
+LOCAL_GATE_MUTATIONS = [
+    (CHAT_WEB_VIEW, 'if (gate === "check") {', "if (false) {"),
+    (CHAT_WEB_VIEW, "pass: page.ownerPass", "pass: url"),
+    (CHAT_WEB_VIEW, "                    if (gate !== \"skip\")\n                        page.ownerPass = \"\"\n",
+     "                    page.ownerPass = url\n"),
+    (CHAT_WEB_VIEW, "                    var url = request.url.toString()\n",
+     "                    var url = request.url.toString()\n                    page.checkUserAgent(request)\n"),
+    (CHAT_WEB_VIEW, '        if (problem !== "") {', '        if (problem === "other") {'),
+    (CHAT_WEB_VIEW, "                                           url: home }) === 0)\n",
+     "                                           url: home }) >= 0)\n"),
+    (CHAT_WEB_VIEW, "onFinished: (port, problem) => chatWeb.localOwnerFinished(port, problem)",
+     'onFinished: (port, problem) => chatWeb.localOwnerFinished(port, "")'),
+    (CHAT_WEB_VIEW, "    function retryLocalOwner() {\n",
+     "    function retryLocalOwner() {\n        chatWeb.localOwnerFinished(chatWeb.localOwnerPort, \"\")\n"),
+    (CHAT_WEB_VIEW, "    function retryLocalOwner() {\n",
+     "    function retryLocalOwner() {\n        visitedSites.append({ site: \"local\" })\n"),
+    (CHAT_WEB_VIEW, "                if (verdict === \"overlay\" && ChatSites.localOwnerPort({",
+     "                if (false && ChatSites.localOwnerPort({"),
+    (LOCAL_OWNER_CHECK, 'ownerCheck.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))',
+     'ownerCheck.ownerDone(source, { ok: true, owner: "self" })'),
+    (LOCAL_OWNER_CHECK, 'ownerCheck.finished(ownerCheck.port, "owner-unknown")', 'ownerCheck.finished(ownerCheck.port, "")'),
+    (LOCAL_OWNER_CHECK, "ownerCheck.finished(ownerCheck.port, OllamaChat.ownerProblem(reply))",
+     'ownerCheck.finished(ownerCheck.port, "")'),
+    (LOCAL_OWNER_CHECK, "function (command) { ownerSource.connectSource(command) }",
+     'function (command) { ownerCheck.ownerDone(command, { ok: true, owner: "self" }) }'),
+    (LOCAL_OWNER_CHECK, "OllamaChat.ownerCommand(port,", '"python3 -P -m hearthside --port-owner " + port + ('),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), LOCAL_GATE_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(LOCAL_GATE_MUTATIONS)])
+def test_proof_local_gate_rule_catches(path, old, new):
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    check = _mutated(path, old, new) if path == LOCAL_OWNER_CHECK else _read_code(LOCAL_OWNER_CHECK)
+    assert _local_gate_problems(web, check) or _port_owner_flag_problems({"LocalOwnerCheck.qml": check})
+
+
+def test_proof_local_owner_check_stderr_is_caught():
+    check = _mutated(LOCAL_OWNER_CHECK, '            ownerSource.disconnectSource(source)\n',
+                     '            ownerSource.disconnectSource(source)\n            var e = data["stderr"]\n')
+    assert _port_owner_flag_problems({"LocalOwnerCheck.qml": check})
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('return trusted(reply.owner) ? "" : "owner-unknown"', 'return ""'),
+    ('    if (reply.owner === "other")\n        return "other"\n', '    if (reply.owner === "other")\n        return ""\n'),
+])
+def test_proof_owner_problem_rule_catches(old, new):
+    assert _ollama_owner_problem_problems(_mutated(OLLAMA_CHAT_JS, old, new))
+
+
+# L2 A page that left its site shows a persistent notice with the host, as
+# plain text, and a way home. The host comes from ChatSites.offSiteHost
+# (ASCII only), and is never put into a rich-text message element.
+
+def _off_site_problems(web, view):
+    problems = []
+    if len(re.findall(r"ChatSites\s*\.\s*offSiteHost\s*\(\s*\{[^}]*url\s*:\s*chatWeb\s*\.\s*activeView\s*\.\s*url"
+                      r"\s*\.\s*toString\s*\(\s*\)", web)) != 1:
+        problems.append("ChatWebView.offSite must come from ChatSites.offSiteHost({... url: activeView.url})")
+    labels = [(start, body) for start, body in _blocks(view, TEXT_ELEMENT) if re.search(r"\binfo\s*\.\s*host\b", body)]
+    if not labels:
+        problems.append("ChatView.qml: no label shows the off-site host")
+    for start, body in labels:
+        if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(body))) != 1:
+            problems.append(f"ChatView.qml:{_line_of(view, start)}: the off-site host must be PlainText")
+    for start, body in _blocks(view, MESSAGE_ELEMENT):
+        if re.search(r"\binfo\s*\.\s*host\b|\boffSite\b", body):
+            problems.append(f"ChatView.qml:{_line_of(view, start)}: the off-site host in a rich-text message")
+    notices = [body for _, body in _blocks(view, r"(?<![\w.])Rectangle\s*\{") if 'objectName: "offSiteNotice"' in body]
+    if len(notices) != 1 or not re.search(r"onClicked\s*:\s*chatView\s*\.\s*home\s*\(\s*\)", notices[0]) \
+            or not re.search(r"visible\s*:[^\n]*\binfo\s*\.\s*off\s*===\s*true", notices[0]):
+        problems.append("ChatView.qml: one offSiteNotice, shown while info.off, with a Back (home) button")
+    return problems
+
+
+def test_off_site_notice_shows_the_host_as_plain_text():
+    problems = _off_site_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_VIEW))
+    assert not problems, problems
+
+
+OFF_SITE_LABEL = "                textFormat: Text.PlainText\n                wrapMode: Text.Wrap\n"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (OFF_SITE_LABEL, "                wrapMode: Text.Wrap\n"),
+    (OFF_SITE_LABEL, "                textFormat: Text.StyledText\n                wrapMode: Text.Wrap\n"),
+    ("                onClicked: chatView.home()\n            }\n        }\n    }",
+     "                onClicked: {}\n            }\n        }\n    }"),
+    ("    Kirigami.InlineMessage {\n        Layout.fillWidth: true\n        visible: !!chatView.web && chatView.web.pendingDownloadName",
+     "    Kirigami.InlineMessage { text: offSiteNotice.info.host }\n"
+     "    Kirigami.InlineMessage {\n        Layout.fillWidth: true\n        visible: !!chatView.web && chatView.web.pendingDownloadName"),
+    ("visible: !!chatView.web && info.off === true", "visible: !!chatView.web"),
+])
+def test_proof_off_site_rule_catches(old, new):
+    assert _off_site_problems(_read_code(CHAT_WEB_VIEW), _mutated(CHAT_VIEW, old, new))
+
+
+def test_proof_off_site_source_rule_catches():
+    web = _mutated(CHAT_WEB_VIEW, "url: chatWeb.activeView.url.toString()\n        })",
+                   "url: \"\"\n        })")
+    assert _off_site_problems(web, _read_code(CHAT_VIEW))
+
+
+# L3 Hidden direction and zero-width characters in Ollama replies and in
+# download names are shown as visible markers (OllamaChat.revealHidden), and
+# Copy copies the marked text that is shown, never the hidden characters.
+
+def _hidden_chars_problems(ollama_view, chat_view):
+    problems = []
+    blocks = _function_body(ollama_view, "blocks") or ""
+    if len(re.findall(r"\bOllamaChat\s*\.\s*revealHidden\s*\(", blocks)) != 2 \
+            or re.search(r"result\s*\.\s*push\s*\(\s*parts\s*\[", blocks):
+        problems.append("OllamaChatView.blocks must pass every code block and paragraph through revealHidden")
+    for match in re.finditer(r"\bcopyText\s*\(([^\n]*)\)\s*$", ollama_view, re.M):
+        args = match.group(1).strip()
+        if args in ("segment.content", "OllamaChat.revealHidden(message.body)") or args == "text":
+            continue
+        problems.append(f"OllamaChatView.qml:{_line_of(ollama_view, match.start())}: copyText({args}) "
+                        "must copy revealed text")
+    if 'objectName: "hiddenCharsNote"' not in ollama_view:
+        problems.append("OllamaChatView.qml: a reply with hidden characters needs its note")
+    name = _function_body(chat_view, "plainName") or ""
+    if not re.search(r"var\s+text\s*=\s*OllamaChat\s*\.\s*revealHidden\s*\(", name):
+        problems.append("ChatView.plainName must start with OllamaChat.revealHidden")
+    return problems
+
+
+def test_hidden_characters_are_shown_and_copied_marked():
+    problems = _hidden_chars_problems(_read_code(OLLAMA_CHAT_VIEW), _read_code(CHAT_VIEW))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (OLLAMA_CHAT_VIEW, "onClicked: ollamaView.copyText(OllamaChat.revealHidden(message.body))",
+     "onClicked: ollamaView.copyText(message.body)"),
+    (OLLAMA_CHAT_VIEW, "text: OllamaChat.revealHidden(parts[index].text),", "text: parts[index].text,"),
+    (OLLAMA_CHAT_VIEW, 'text: OllamaChat.revealHidden(paragraph), lang: ""', 'text: paragraph, lang: ""'),
+    (OLLAMA_CHAT_VIEW, 'objectName: "hiddenCharsNote"', 'objectName: "note"'),
+    (CHAT_VIEW, "var text = OllamaChat.revealHidden(String(name || \"\"))", "var text = String(name || \"\")"),
+])
+def test_proof_hidden_chars_rule_catches(path, old, new):
+    ollama = _mutated(path, old, new) if path == OLLAMA_CHAT_VIEW else _read_code(OLLAMA_CHAT_VIEW)
+    chat = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    assert _hidden_chars_problems(ollama, chat)

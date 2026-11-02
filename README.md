@@ -128,6 +128,8 @@ starts with Plasma while it remains on a panel.
   [Open WebUI](https://github.com/open-webui/open-webui) on top of Ollama:
   `docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui ghcr.io/open-webui/open-webui:main`
   (or `open-webui serve`, which listens on port 8080; set that address below).
+  As for Ollama, the page loads only when the program on that port belongs
+  to you or to the system, never to another user.
 - **Custom addresses**: under **Settings → Chat → Show advanced settings**
   each site can open a different address, for example a self-hosted
   instance. Leave a field empty to use the built-in address. Addresses must
@@ -276,7 +278,11 @@ The Chat tab keeps cookies, sessions, and site data in memory only, denies
 every site permission (microphone, camera, screen sharing, notifications,
 location, clipboard reading), asks before each download, opens outside links
 in your browser (which may keep them in its history), and never reads or
-scripts the pages. Page console messages
+scripts the pages. When a page moves to a site outside the one you chose, a
+notice above it names the real host. Provider names, plans and errors, Ollama
+replies and download names are shown as plain text, with hidden direction
+characters made visible. The Chat tab's engine is Qt WebEngine (Chromium):
+keep it updated and restart Plasma after it updates. Page console messages
 are discarded. Custom chat addresses are stored in plain text in your Plasma
 configuration file. With Stay signed in, sign-ins and site data are saved
 only in your encrypted folder; while it is unlocked, programs running as you

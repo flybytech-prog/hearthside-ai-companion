@@ -385,6 +385,33 @@ function serverErrorText(raw) {
         .trim()
 }
 
+// --- Hidden characters ------------------------------------------------------
+
+// Direction controls (U+200E/F, U+061C, U+202A-E, U+2066-9) and zero-width
+// characters (U+200B-D, U+FEFF) change how text looks without being seen,
+// so a copied command could differ from the one on screen. Each one is
+// shown as a visible marker such as ⟦U+202E⟧ instead.
+var HIDDEN_CHARS = /[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
+function hexCode(character) {
+    var hex = character.charCodeAt(0).toString(16).toUpperCase()
+    while (hex.length < 4)
+        hex = "0" + hex
+    return "U+" + hex
+}
+
+function revealHidden(text) {
+    if (typeof text !== "string")
+        return ""
+    return text.replace(HIDDEN_CHARS, function (character) {
+        return "\u27e6" + hexCode(character) + "\u27e7"
+    })
+}
+
+function hasHidden(text) {
+    return typeof text === "string" && text.search(HIDDEN_CHARS) >= 0
+}
+
 // --- Reply layout -----------------------------------------------------------
 
 // [{kind: "text"|"code", text, lang}] split on ``` fence lines. A fence that
@@ -442,7 +469,7 @@ function ownerCommand(port, run, applet) {
             || validInt(run) < 0 || validInt(applet) < 0)
         return ""
     return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet
-        + " python3 -m hearthside --port-owner " + port
+        + " python3 -P -m hearthside --port-owner " + port
 }
 
 function parseOwnerReply(exitCode, stdout) {
@@ -462,4 +489,16 @@ function parseOwnerReply(exitCode, stdout) {
 // Whether prompts may go to the program that owns the port.
 function trusted(owner) {
     return owner === "self" || owner === "system"
+}
+
+// The problem code for a parsed owner reply; "" only for self or system.
+// Fails closed: anything else is a problem.
+function ownerProblem(reply) {
+    if (!reply || reply.ok !== true)
+        return "owner-unknown"
+    if (reply.owner === "none")
+        return "not-running"
+    if (reply.owner === "other")
+        return "other"
+    return trusted(reply.owner) ? "" : "owner-unknown"
 }

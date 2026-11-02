@@ -27,7 +27,10 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Required command not found: python3" >&2
         exit 1
     fi
-    if ! reply=$(cd -- "$project_directory/src" && PYTHONDONTWRITEBYTECODE=1 python3 -m hearthside --web-data purge </dev/null); then
+    # -P (Python 3.11+, which Hearthside requires) keeps the working folder off
+    # sys.path, so a stray json.py there is never imported; PYTHONPATH points
+    # at this checkout instead.
+    if ! reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthside --web-data purge </dev/null); then
         echo "Could not run the Hearthside helper. Nothing was deleted." >&2
         exit 1
     fi
@@ -222,7 +225,7 @@ if [ "$restart_plasma" = true ]; then
     fi
 fi
 
-version=$(python3 -m hearthside --version)
+version=$(python3 -P -m hearthside --version)
 echo "Hearthside ${version} installed."
 if [ -n "$optional_notes" ]; then
     echo "Optional features not available yet:"

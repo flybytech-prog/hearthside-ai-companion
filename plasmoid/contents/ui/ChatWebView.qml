@@ -15,6 +15,11 @@ import "ChatSites.js" as ChatSites
 // memory). Both are fixed for the item's lifetime: ChatView recreates it
 // instead of changing them (a live switch crashes Qt WebEngine).
 // Pages are never read or scripted, and their console output is dropped.
+//
+// Local web UI pages on this computer load only after the helper said the
+// port belongs to this user or the system (LocalOwnerCheck): before the
+// Local view is created and before each of its main-frame navigations to
+// this computer. Anything else loads nothing and shows a message instead.
 Item {
     id: chatWeb
 
@@ -30,6 +35,8 @@ Item {
     // Validated {siteId: url} custom addresses; set before siteId so the
     // first load already uses them.
     property var customUrls: ({})
+    // Only makes the owner check's helper source name unique.
+    property int appletId: 0
 
     property var currentView: null
     readonly property bool overlayOpen: chatWeb.overlayView !== null
@@ -44,6 +51,30 @@ Item {
         && ChatSites.isPageUrl(
             ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls),
             chatWeb.activeView.url.toString())
+
+    // Off-site notice for the page shown: {off, host} from ChatSites.
+    readonly property var offSite: chatWeb.activeView
+        ? ChatSites.offSiteHost({
+            siteId: chatWeb.activeView.site,
+            customUrls: chatWeb.customUrls,
+            url: chatWeb.activeView.url.toString()
+        })
+        : ({off: false, host: ""})
+    readonly property string activeSiteName: {
+        var site = chatWeb.activeView ? ChatSites.byId(chatWeb.activeView.site) : null
+        return site ? site.name : ""
+    }
+
+    // Local web UI owner check. Problem codes as OllamaChat.ownerProblem,
+    // plus "resend" after a checked form post; port is the one checked.
+    property string localOwnerProblem: ""
+    property int localOwnerPort: 0
+    readonly property bool localOwnerChecking: localOwner.busy
+    // What waits for the check: {view, url, form, create}, or null.
+    property var ownerPending: null
+    // The address a good check before creating the Local view was made
+    // for; handed to that view as its first pass.
+    property string localCreatePass: ""
 
     property bool dialogOpen: false
     property bool passkeyNotice: false
@@ -85,6 +116,73 @@ Item {
     function focusView() {
         if (chatWeb.activeView)
             chatWeb.activeView.forceActiveFocus()
+    }
+
+    // A Local main-frame navigation (or creating the Local view, view null)
+    // waits for the owner check; the request itself was already rejected.
+    function checkLocalOwner(view, url, form, create) {
+        var port = ChatSites.localOwnerPort({ siteId: "local", customUrls: chatWeb.customUrls, url: url })
+        // A late answer of an earlier check must not count for this one.
+        localOwner.cancel()
+        chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create }
+        chatWeb.localOwnerPort = port
+        // Never from inside the navigation request itself.
+        Qt.callLater(function () {
+            if (chatWeb.ownerPending && chatWeb.ownerPending.url === url)
+                localOwner.start(port)
+        })
+    }
+
+    function localOwnerFinished(port, problem) {
+        var pending = chatWeb.ownerPending
+        if (!pending || pending.port !== port)
+            return
+        chatWeb.ownerPending = null
+        if (problem !== "") {
+            // Fail closed: nothing from this computer stays on screen, so a
+            // page loaded earlier can't keep talking to the new listener.
+            chatWeb.localOwnerProblem = problem
+            chatWeb.blankLocalViews()
+            return
+        }
+        chatWeb.localOwnerProblem = ""
+        if (pending.create) {
+            if (chatWeb.siteIds.indexOf("local") < 0 || chatWeb.viewFor("local") !== null)
+                return
+            chatWeb.localCreatePass = pending.url
+            visitedSites.append({ site: "local" })
+            return
+        }
+        var view = pending.view
+        if (!view || chatWeb.viewList().indexOf(view) < 0)
+            return
+        view.ownerPass = pending.url
+        // A form post can't be replayed; the user sends it again.
+        if (pending.form) {
+            chatWeb.localOwnerProblem = "resend"
+            return
+        }
+        view.url = pending.url
+    }
+
+    function blankLocalViews() {
+        var views = chatWeb.viewList()
+        for (var index = 0; index < views.length; index++) {
+            var view = views[index]
+            view.ownerPass = ""
+            if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
+                                           url: view.url.toString() }) > 0)
+                view.url = "about:blank"
+        }
+    }
+
+    // Retry after a problem: create the Local view again, or go home.
+    function retryLocalOwner() {
+        chatWeb.localOwnerProblem = ""
+        if (chatWeb.viewFor("local") === null)
+            chatWeb.syncViews()
+        else if (chatWeb.siteId === "local")
+            chatWeb.home()
     }
 
     function closeOverlay() {
@@ -247,10 +345,22 @@ Item {
         }
         if (chatWeb.overlayView && chatWeb.siteIds.indexOf(chatWeb.overlayView.site) < 0)
             chatWeb.closeOverlay()
+        if (chatWeb.ownerPending && chatWeb.ownerPending.create
+                && chatWeb.siteIds.indexOf("local") < 0) {
+            localOwner.cancel()
+            chatWeb.ownerPending = null
+        }
         // Append only: existing views keep their page and are never reloaded.
+        // A Local view on this computer is created only after the owner check.
         if (chatWeb.siteIds.indexOf(chatWeb.siteId) >= 0
-                && chatWeb.viewFor(chatWeb.siteId) === null)
-            visitedSites.append({ site: chatWeb.siteId })
+                && chatWeb.viewFor(chatWeb.siteId) === null) {
+            var home = ChatSites.homeUrl(chatWeb.siteId, chatWeb.customUrls)
+            if (ChatSites.localOwnerPort({ siteId: chatWeb.siteId, customUrls: chatWeb.customUrls,
+                                           url: home }) === 0)
+                visitedSites.append({ site: chatWeb.siteId })
+            else if (!(chatWeb.ownerPending && chatWeb.ownerPending.create))
+                chatWeb.checkLocalOwner(null, home, false, true)
+        }
         chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId)
     }
 
@@ -289,6 +399,7 @@ Item {
     }
 
     Component.onDestruction: {
+        localOwner.cancel()
         chatWeb.cancelDownload()
         if (uploadDialog.request)
             chatWeb.finishUpload(false)
@@ -321,6 +432,13 @@ Item {
         }
     }
 
+    LocalOwnerCheck {
+        id: localOwner
+        objectName: "localOwnerCheck"
+        appletId: chatWeb.appletId
+        onFinished: (port, problem) => chatWeb.localOwnerFinished(port, problem)
+    }
+
     Timer {
         id: downloadTimeout
         interval: 60000
@@ -345,6 +463,9 @@ Item {
             property bool crashed: false
             // Address re-requested once after a user agent switch.
             property string userAgentRetry: ""
+            // Address a good owner check was just made for (Local only);
+            // used up by the next main-frame navigation.
+            property string ownerPass: ""
 
             anchors.fill: parent
             visible: page.isOverlay || page.site === chatWeb.siteId
@@ -408,8 +529,25 @@ Item {
                     customUrls: chatWeb.customUrls
                 })
                 if (verdict === "allow") {
-                    if (request.isMainFrame)
-                        page.checkUserAgent(request)
+                    if (!request.isMainFrame)
+                        return
+                    var url = request.url.toString()
+                    var gate = ChatSites.localOwnerGate({
+                        url: url,
+                        isMainFrame: request.isMainFrame,
+                        siteId: page.site,
+                        customUrls: chatWeb.customUrls,
+                        pass: page.ownerPass
+                    })
+                    if (gate !== "skip")
+                        page.ownerPass = ""
+                    if (gate === "check") {
+                        request.reject()
+                        chatWeb.checkLocalOwner(page, url, request.navigationType
+                            === WebEngineNavigationRequest.FormSubmittedNavigation, false)
+                        return
+                    }
+                    page.checkUserAgent(request)
                     return
                 }
                 request.reject()
@@ -425,6 +563,11 @@ Item {
                     siteId: page.site,
                     customUrls: chatWeb.customUrls
                 })
+                // A Local window starting on this computer would skip the
+                // owner check: dropped.
+                if (verdict === "overlay" && ChatSites.localOwnerPort({
+                        siteId: page.site, customUrls: chatWeb.customUrls, url: url }) > 0)
+                    return
                 // A sign-in window cannot open another overlay on top of itself.
                 if (verdict === "overlay" && !page.isOverlay)
                     chatWeb.openOverlay(request, page.site)
@@ -483,6 +626,10 @@ Item {
             Component.onCompleted: {
                 if (page.isOverlay)
                     return
+                if (page.site === "local") {
+                    page.ownerPass = chatWeb.localCreatePass
+                    chatWeb.localCreatePass = ""
+                }
                 page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)
                 if (page.homeUrl !== "")
                     page.url = page.homeUrl

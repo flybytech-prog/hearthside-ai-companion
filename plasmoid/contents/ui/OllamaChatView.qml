@@ -446,20 +446,23 @@ ColumnLayout {
     }
 
     // Reply text as shown: paragraphs and code blocks, so that while a
-    // reply streams only its last block is laid out again.
+    // reply streams only its last block is laid out again. Hidden direction
+    // and zero-width characters are shown as markers (OllamaChat.revealHidden),
+    // so what is shown, selected and copied is the same text.
     function blocks(text) {
         var result = []
         var parts = OllamaChat.segments(text)
         for (var index = 0; index < parts.length; index++) {
             if (parts[index].kind === "code") {
-                result.push(parts[index])
+                result.push({ kind: "code", text: OllamaChat.revealHidden(parts[index].text),
+                              lang: parts[index].lang })
                 continue
             }
             var paragraphs = parts[index].text.split(/\n(?:[ \t]*\n)+/)
             for (var inner = 0; inner < paragraphs.length; inner++) {
                 var paragraph = paragraphs[inner].replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "")
                 if (paragraph.trim() !== "")
-                    result.push({ kind: "text", text: paragraph, lang: "" })
+                    result.push({ kind: "text", text: OllamaChat.revealHidden(paragraph), lang: "" })
             }
         }
         return result
@@ -885,6 +888,17 @@ ColumnLayout {
                         }
                     }
 
+                    PlasmaComponents.Label {
+                        objectName: "hiddenCharsNote"
+                        Layout.fillWidth: true
+                        visible: !message.mine && OllamaChat.hasHidden(message.body)
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        color: Kirigami.Theme.neutralTextColor
+                        font: Kirigami.Theme.smallFont
+                        text: i18n("This text contains hidden direction characters, shown as ⟦U+…⟧. Copy copies the marked text.")
+                    }
+
                     RowLayout {
                         visible: !message.mine
                         spacing: Kirigami.Units.smallSpacing
@@ -921,7 +935,9 @@ ColumnLayout {
                             icon.name: "edit-copy"
                             display: QQC2.AbstractButton.IconOnly
                             text: i18n("Copy reply")
-                            onClicked: ollamaView.copyText(message.body)
+                            // The marked text, as shown: hidden characters never
+                            // reach the clipboard.
+                            onClicked: ollamaView.copyText(OllamaChat.revealHidden(message.body))
                             QQC2.ToolTip.text: text
                             QQC2.ToolTip.visible: hovered
                         }

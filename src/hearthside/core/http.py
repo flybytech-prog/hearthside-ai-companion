@@ -21,6 +21,34 @@ class HttpResponse:
         return self.headers.get(name.lower())
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the 3xx comes back to the caller as a response.
+
+    urllib's default handler copies every request header except Content-Length
+    and Content-Type (so Authorization too) to the redirect target, on any host
+    and over plain http. No provider endpoint needs redirects, so a 3xx is
+    returned like any other non-2xx status, and the providers classify it as a
+    failed request.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+    def _refuse(self, req, fp, code, msg, headers):
+        # Returning None hands the 3xx to HTTPDefaultErrorHandler, which raises
+        # HTTPError; http_request turns that into an HttpResponse. The Location
+        # header is never parsed.
+        return None
+
+    http_error_301 = http_error_302 = http_error_303 = _refuse
+    http_error_307 = http_error_308 = _refuse
+
+
+# Same handlers as urlopen's default opener (proxies from the environment,
+# https), with the redirect handler replaced.
+_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
 class HttpError(Exception):
     def __init__(self, status: int, message: str = ""):
         super().__init__(f"HTTP {status}: {message}")
@@ -37,7 +65,7 @@ def http_request(
 ) -> HttpResponse:
     req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return HttpResponse(status=resp.status, body=resp.read(),
                                 headers={k.lower(): v for k, v in resp.headers.items()})
     except urllib.error.HTTPError as e:

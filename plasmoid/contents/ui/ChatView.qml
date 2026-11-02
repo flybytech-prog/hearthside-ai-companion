@@ -5,6 +5,7 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
 import "ChatStorage.js" as ChatStorage
+import "OllamaChat.js" as OllamaChat
 
 // Chat tab body. Qt WebEngine is only reached through the Loader below, so
 // the widget keeps working (with a hint) when the module is missing, and no
@@ -23,6 +24,8 @@ ColumnLayout {
     property var customUrls: ({})
     // True while the Chat tab is shown in the open popup.
     property bool current: false
+    // Only makes the Local owner check's helper source name unique.
+    property int appletId: 0
 
     // Saved sign-ins, all runtime state owned by main.qml.
     property string storageMode: "memory"
@@ -222,9 +225,11 @@ ColumnLayout {
         chatView.focusLater()
     }
 
-    // Untrusted file names are shown as plain text, shortened.
+    // Untrusted file names are shown as plain text, shortened, with hidden
+    // direction and zero-width characters made visible (⟦U+202E⟧), so
+    // "invoice⟦U+202E⟧fdp.exe" can't pass for a PDF.
     function plainName(name) {
-        var text = String(name || "")
+        var text = OllamaChat.revealHidden(String(name || ""))
         if (text.length > 60)
             text = text.slice(0, 57) + "…"
         return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -275,6 +280,22 @@ ColumnLayout {
             return ""
         default:
             return i18n("Something went wrong with the encrypted folder.")
+        }
+    }
+
+    // Fixed texts only; the Local address is never shown, only its port.
+    function localOwnerText(code, port) {
+        switch (code) {
+        case "":
+            return ""
+        case "other":
+            return i18n("Another user's program is using port %1. Hearthside won't load anything from it.", port)
+        case "not-running":
+            return i18n("Nothing is using port %1. Is your local chat server running?", port)
+        case "resend":
+            return i18n("Checked the program on port %1. Send the form again.", port)
+        default:
+            return i18n("Couldn't check which program is using port %1. Nothing was loaded.", port)
         }
     }
 
@@ -387,6 +408,83 @@ ColumnLayout {
     }
 
     Kirigami.InlineMessage {
+        id: localOwnerMessage
+        objectName: "localOwnerMessage"
+        Layout.fillWidth: true
+        readonly property string code: chatView.web ? chatView.web.localOwnerProblem : ""
+        visible: chatView.localSite && code !== ""
+        type: code === "resend" ? Kirigami.MessageType.Information
+            : code === "not-running" ? Kirigami.MessageType.Warning
+            : Kirigami.MessageType.Error
+        text: chatView.localOwnerText(code, chatView.web ? chatView.web.localOwnerPort : 0)
+        actions: [
+            Kirigami.Action {
+                visible: localOwnerMessage.code !== "resend"
+                text: i18n("Retry")
+                icon.name: "view-refresh"
+                onTriggered: chatView.web.retryLocalOwner()
+            },
+            Kirigami.Action {
+                visible: localOwnerMessage.code === "resend"
+                text: i18n("Dismiss")
+                icon.name: "dialog-close"
+                onTriggered: chatView.web.localOwnerProblem = ""
+            }
+        ]
+    }
+
+    // The page has left the site: a script, redirect or form took it to a
+    // host outside the site's own, sign-in and custom hosts. The host is
+    // ASCII only (look-alike letters show as xn--) and plain text.
+    Rectangle {
+        id: offSiteNotice
+        objectName: "offSiteNotice"
+        Layout.fillWidth: true
+        readonly property var info: chatView.web ? chatView.web.offSite : ({off: false, host: ""})
+        visible: !!chatView.web && info.off === true
+        implicitHeight: offSiteRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+        color: Kirigami.Theme.neutralBackgroundColor
+        border.color: Kirigami.Theme.neutralTextColor
+        border.width: 1
+        radius: Kirigami.Units.cornerRadius
+
+        RowLayout {
+            id: offSiteRow
+            anchors {
+                left: parent.left
+                right: parent.right
+                verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.largeSpacing
+                rightMargin: Kirigami.Units.smallSpacing
+            }
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Icon {
+                source: "security-medium"
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            }
+            PlasmaComponents.Label {
+                objectName: "offSiteText"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: offSiteNotice.info.host !== ""
+                    ? i18n("You are on %1 — not %2", offSiteNotice.info.host,
+                        chatView.web ? chatView.web.activeSiteName : "")
+                    : i18n("You are on another site — not %1",
+                        chatView.web ? chatView.web.activeSiteName : "")
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "offSiteBack"
+                icon.name: "go-home"
+                text: i18n("Back to %1", chatView.web ? chatView.web.activeSiteName : "")
+                onClicked: chatView.home()
+            }
+        }
+    }
+
+    Kirigami.InlineMessage {
         Layout.fillWidth: true
         visible: !!chatView.web && chatView.web.pendingDownloadName !== ""
         type: Kirigami.MessageType.Information
@@ -464,6 +562,7 @@ ColumnLayout {
             active: false
             onLoaded: {
                 // customUrls first: the first page load must already use them.
+                webLoader.item.appletId = Qt.binding(function () { return chatView.appletId })
                 webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })

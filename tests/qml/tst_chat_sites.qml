@@ -714,4 +714,129 @@ TestCase {
         // Compact never goes below the popup minimums.
         compare(ChatSites.popupSize("usage", 10, 0, 0, 0.8), {width: 184, height: 224})
     }
+
+    // --- Local web UI owner check (M2) --------------------------------------
+
+    function test_localOwnerPort() {
+        var port = function (url, siteId, customUrls) {
+            return ChatSites.localOwnerPort({ siteId: siteId === undefined ? "local" : siteId,
+                                              customUrls: customUrls, url: url })
+        }
+        compare(port("http://localhost:3000/"), 3000)
+        compare(port("http://127.0.0.1:8080/c/1"), 8080)
+        compare(port("http://[::1]:5/"), 5)
+        compare(port("http://localhost/"), 80)
+        compare(port("https://localhost/"), 443)
+        compare(port("https://127.0.0.1:8443/"), 8443)
+        // Every spelling of this computer counts, not just the http ones.
+        compare(port("https://foo.localhost:9000/"), 9000)
+        compare(port("https://127.1:9001/"), 9001)
+        compare(port("https://0x7f000001:9002/"), 9002)
+        // Not this computer, not Local, or nothing to check.
+        compare(port("https://example.com/"), 0)
+        compare(port("https://example.com:3000/"), 0)
+        compare(port("about:blank"), 0)
+        compare(port("data:text/html,x"), 0)
+        compare(port("http://user@localhost:3000/"), 0)
+        compare(port(""), 0)
+        compare(port(undefined), 0)
+        compare(port("http://localhost:3000/", "claude"), 0)
+        compare(port("http://localhost:3000/", "nope"), 0)
+        compare(ChatSites.localOwnerPort(undefined), 0)
+    }
+
+    function test_localOwnerGate() {
+        var gate = function (url, pass, isMainFrame, siteId) {
+            return ChatSites.localOwnerGate({ siteId: siteId === undefined ? "local" : siteId,
+                                              url: url, pass: pass, isMainFrame: isMainFrame })
+        }
+        compare(gate("http://localhost:3000/", ""), "check")
+        compare(gate("http://localhost:3000/", undefined), "check")
+        compare(gate("http://localhost:3000/", "http://localhost:3000/"), "go")
+        // A pass is for exactly one address.
+        compare(gate("http://localhost:3000/x", "http://localhost:3000/"), "check")
+        compare(gate("https://localhost:3001/", "http://localhost:3000/"), "check")
+        // Missing frame info is the main frame.
+        compare(gate("http://localhost:3000/", "", undefined), "check")
+        compare(gate("http://localhost:3000/", "", false), "skip")
+        compare(gate("https://example.com/", ""), "skip")
+        compare(gate("about:blank", ""), "skip")
+        compare(gate("http://localhost:3000/", "", true, "claude"), "skip")
+        compare(ChatSites.localOwnerGate(undefined), "skip")
+    }
+
+    // --- off-site notice (L2) ------------------------------------------------
+
+    function test_punycode() {
+        // RFC 3492 / IDNA samples.
+        compare(ChatSites.displayHost("https://bücher.example/"), "xn--bcher-kva.example")
+        compare(ChatSites.displayHost("https://münchen.de/"), "xn--mnchen-3ya.de")
+        compare(ChatSites.displayHost("https://пример.рф/"), "xn--e1afmkfd.xn--p1ai")
+        compare(ChatSites.displayHost("https://例え.テスト/"), "xn--r8jz45g.xn--zckzah")
+        // Cyrillic look-alike of "apple": never shown as Latin letters.
+        compare(ChatSites.displayHost("https://аррӏе.com/"), "xn--80ak6aa92e.com")
+        compare(ChatSites.displayHost("https://😀.example/"), "xn--e28h.example")
+    }
+
+    function test_displayHost() {
+        compare(ChatSites.displayHost("https://Claude.AI./new"), "claude.ai")
+        compare(ChatSites.displayHost("https://user:pw@evil.example:8443/x"), "evil.example")
+        compare(ChatSites.displayHost("http://[::1]:3000/"), "[::1]")
+        compare(ChatSites.displayHost("https://BÜCHER.example/"), "xn--bcher-kva.example")
+        compare(ChatSites.displayHost("https://a。b.example/"), "a.b.example")
+        compare(ChatSites.displayHost("https://<img src=x>/"), "")
+        compare(ChatSites.displayHost("https://ev%69l.example/"), "")
+        compare(ChatSites.displayHost("https://a b/"), "")
+        compare(ChatSites.displayHost("https://[x]/"), "")
+        compare(ChatSites.displayHost("about:blank"), "")
+        compare(ChatSites.displayHost("data:text/html,x"), "")
+        compare(ChatSites.displayHost(undefined), "")
+    }
+
+    function off(url, siteId, customUrls) {
+        return ChatSites.offSiteHost({ siteId: siteId === undefined ? "claude" : siteId,
+                                       customUrls: customUrls, url: url })
+    }
+
+    function test_offSiteHostKnownHostsAreOnSite() {
+        compare(off("https://claude.ai/new"), { off: false, host: "" })
+        compare(off("https://www.anthropic.com/"), { off: false, host: "" })
+        // Sign-in hosts are part of the site: OAuth flows show no notice.
+        compare(off("https://accounts.google.com/o/oauth2"), { off: false, host: "" })
+        compare(off("https://appleid.apple.com/auth"), { off: false, host: "" })
+        compare(off("https://login.microsoftonline.com/x", "chatgpt"), { off: false, host: "" })
+        compare(off("https://auth.openai.com/log-in", "chatgpt"), { off: false, host: "" })
+        compare(off("http://localhost:3000/", "local"), { off: false, host: "" })
+        // A custom address adds its exact host.
+        compare(off("https://chat.example.org/", "claude", { claude: "https://chat.example.org/" }),
+                { off: false, host: "" })
+        // Nothing to say about blank or non-web pages.
+        compare(off("about:blank"), { off: false, host: "" })
+        compare(off(""), { off: false, host: "" })
+        compare(off("data:text/html,x"), { off: false, host: "" })
+    }
+
+    function test_offSiteHostElsewhere() {
+        compare(off("https://claude.ai.evil.example/login"), { off: true, host: "claude.ai.evil.example" })
+        compare(off("https://evilclaude.ai/"), { off: true, host: "evilclaude.ai" })
+        compare(off("https://сlaude.ai/"), { off: true, host: "xn--laude-0ye.ai" })
+        compare(off("https://sub.chat.example.org/", "claude", { claude: "https://chat.example.org/" }),
+                { off: true, host: "sub.chat.example.org" })
+        compare(off("https://example.com/", "local"), { off: true, host: "example.com" })
+        compare(off("https://accounts.google.com/", "copilot", {}), { off: false, host: "" })
+        compare(off("https://accounts.google.com.evil/", "copilot"), { off: true, host: "accounts.google.com.evil" })
+        // Unreadable host: still off, without a host.
+        compare(off("https://ev%69l.example/"), { off: true, host: "" })
+    }
+
+    function test_offSiteHostIsShortenedFromTheFront() {
+        var long = ""
+        for (var index = 0; index < 20; index++)
+            long += "claude-ai-"
+        var result = off("https://" + long + ".evil.example/")
+        compare(result.off, true)
+        compare(result.host.length, ChatSites.MAX_HOST_DISPLAY)
+        compare(result.host.charAt(0), "…")
+        verify(result.host.slice(-13) === ".evil.example")
+    }
 }

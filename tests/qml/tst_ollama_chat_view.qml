@@ -202,7 +202,7 @@ TestCase {
         var wrapper = make({ shown: true })
         var view = wrapper.view
         compare(testCase.ownerCommands.length, 1)
-        verify(/^env HEARTHSIDE_RUN=\d+ HEARTHSIDE_APPLET=7 python3 -m hearthside --port-owner 11434$/
+        verify(/^env HEARTHSIDE_RUN=\d+ HEARTHSIDE_APPLET=7 python3 -P -m hearthside --port-owner 11434$/
                .test(testCase.ownerCommands[0]), testCase.ownerCommands[0])
         // Nothing goes to the port before the owner is known.
         compare(testCase.requests.length, 0)
@@ -909,5 +909,81 @@ TestCase {
         // The user's message, the reply text and the code block.
         verify(marked >= 3, "found " + marked)
         verify(formatted > marked, "found " + formatted)
+    }
+
+    // --- hidden direction characters are shown and copied as markers ----------
+
+    TextEdit {
+        id: pasteTarget
+        visible: false
+        textFormat: TextEdit.PlainText
+    }
+
+    // The shown item with this objectName (each message has its own).
+    function named(view, name) {
+        var items = []
+        collect(view, items)
+        for (var index = 0; index < items.length; index++) {
+            if (items[index].objectName === name && items[index].visible)
+                return items[index]
+        }
+        return null
+    }
+
+    function pasted() {
+        pasteTarget.text = ""
+        pasteTarget.paste()
+        return pasteTarget.text
+    }
+
+    function test_hiddenCharactersAreShownAndCopiedMarked() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var request = sendText(view, "How do I clean?")
+        request.chunk(piece("Run:\n```sh\nrm -rf ./build ‮⁦# keep ~⁩\n```\nDone​."))
+        request.chunk(line({ done: true }))
+        wait(50)
+        var items = []
+        collect(view, items)
+        var shownCode = null
+        for (var index = 0; index < items.length; index++) {
+            var text = items[index].text
+            if (typeof text !== "string")
+                continue
+            verify(!/[‪-‮⁦-⁩​-‏]/.test(text), "raw hidden character shown: " + text)
+            if (text.indexOf("rm -rf") >= 0 && items[index].textFormat !== undefined)
+                shownCode = text
+        }
+        compare(shownCode, "rm -rf ./build ⟦U+202E⟧⟦U+2066⟧# keep ~⟦U+2069⟧")
+        var note = named(view, "hiddenCharsNote")
+        verify(note !== null && note.visible)
+        compare(note.textFormat, Text.PlainText)
+
+        var copyCode = null
+        var copyReply = null
+        for (index = 0; index < items.length; index++) {
+            if (!items[index].visible || !items[index].clicked)
+                continue
+            if (items[index].text === "Copy code")
+                copyCode = items[index]
+            if (items[index].text === "Copy reply")
+                copyReply = items[index]
+        }
+        verify(copyCode !== null && copyReply !== null)
+        copyCode.clicked()
+        compare(pasted(), shownCode)
+        copyReply.clicked()
+        compare(pasted(), "Run:\n```sh\n" + shownCode + "\n```\nDone⟦U+200B⟧.")
+    }
+
+    function test_ordinaryReplyHasNoNote() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var request = sendText(view, "Hi")
+        request.chunk(piece("Hello é 日本 שלום"))
+        request.chunk(line({ done: true }))
+        wait(50)
+        var note = named(view, "hiddenCharsNote")
+        compare(note, null)
     }
 }
