@@ -301,6 +301,14 @@ python3 -m compileall -q src
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml
 ```
 
+## Credits
+
+Hearthside began as a fork of
+[AI Usage for KDE](https://github.com/burakgon/ai-usage-kde-widget) by Burak
+([@burakgon](https://github.com/burakgon)), whose usage-meter widget and helper
+are the foundation of the Usage tab. Thank you! The original MIT copyright
+notice is kept in [LICENSE](LICENSE).
+
 ## License
 
 [MIT](LICENSE)
