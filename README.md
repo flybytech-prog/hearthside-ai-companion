@@ -1,76 +1,103 @@
 <div align="center">
 
+<img src="assets/hearthside.svg" alt="Hearthside icon: a heart-shaped fireplace with a lit flame" width="96">
+
 # Hearthside — your AI companion
 
-**Usage meters and AI chats, right in your Plasma panel.**
+**Chat with AI, privately, right from your KDE Plasma panel — and keep an eye on your AI subscriptions.**
 
 [![KDE Plasma 6](https://img.shields.io/badge/KDE%20Plasma-6-1d99f3?logo=kde&logoColor=white)](https://kde.org/plasma-desktop/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 ![stdlib only](https://img.shields.io/badge/deps-stdlib%20only-44cc11)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-<br>
-
-<img src="docs/preview.png" alt="Hearthside popup opening upward from its icon in the bottom KDE Plasma panel" width="1100">
-
 </div>
 
-Hearthside is a KDE Plasma 6 companion for your AI coding subscriptions. It
-sits in the panel, shows how much of each plan you have left, and opens quick
-chats with AI websites in its popup. Usage meters cover the same seven
-providers supported by the macOS AI Usage menubar app:
+Hearthside sits in your Plasma panel as a small heart-shaped fireplace. Click
+it and a popup opens with two tabs:
 
-- Claude Code
-- Codex
-- Cursor
-- Antigravity
-- GitHub Copilot
-- Devin
-- Grok
+- **Chat** — use Claude, ChatGPT, Grok, Gemini, GitHub Copilot, Microsoft
+  Copilot, a local web UI, or a built-in chat with your own **Ollama** models,
+  without opening a browser. Private by default: nothing is saved to disk.
+- **Usage** — how much of each AI coding plan you have left (Claude Code,
+  Codex, Cursor, Antigravity, GitHub Copilot, Devin, Grok), with reset times.
 
-It shows each available quota, plan, reset time, extra usage or credits in
-its popup, with **Left** and **Used** display modes. The panel shows only the
-Hearthside icon; hover over it for a short usage summary.
+Security comes first: sign-ins live in memory unless you choose an
+**encrypted, passphrase-protected** folder, and the Ollama chat never leaves
+plasmashell's memory.
+
+## Screenshots
+
+<table>
+<tr>
+<td align="center"><img src="docs/chat.png" alt="Chat tab showing ChatGPT inside the Hearthside popup" width="400"><br><sub>Chat sites in the popup</sub></td>
+<td align="center"><img src="docs/ollama.png" alt="Built-in Ollama chat with the llama3 model" width="400"><br><sub>Built-in Ollama chat</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/chat-locked.png" alt="Locked encrypted sign-ins card with Unlock and private-session buttons" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
+<td align="center"><img src="docs/usage.png" alt="Usage tab with Claude Code session and weekly meters" width="400"><br><sub>Usage meters</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/settings-general.png" alt="Settings, General page: popup, usage and privacy options" width="400"><br><sub>Settings → General</sub></td>
+<td align="center"><img src="docs/settings-chat.png" alt="Settings, Chat page: the list of chat sites" width="400"><br><sub>Settings → Chat</sub></td>
+</tr>
+</table>
 
 ## Features
 
+### Chat
+
+- **Chat sites in the popup**: pick Claude, ChatGPT, Grok, Gemini, GitHub
+  Copilot, Microsoft Copilot or Local web UI (Open WebUI) from a dropdown and
+  use the site right there. Choose which sites appear under **Settings →
+  Chat**.
+- **Private by default**: pages run in an in-memory browser profile. You sign
+  in on each site normally; nothing is saved to disk, and you are signed out
+  when Plasma restarts or you choose **Clear chat data**. Every site
+  permission (microphone, camera, screen sharing, notifications, location,
+  clipboard reading) is denied, downloads ask first, and outside links open
+  in your browser.
+- **Built-in Ollama chat** (optional, off by default): talk to the models of
+  the Ollama server on this computer with a native chat — model picker,
+  streaming replies, Stop, Copy and Clear. No browser engine, conversation in
+  memory only.
+- **Stay signed in** (optional, off by default): keep chat sign-ins across
+  Plasma restarts in an encrypted folder protected by a passphrase you choose
+  (made with gocryptfs). Unlock it once per Plasma session from the Chat tab,
+  or use a private session instead. **Lock** it any time from the toolbar, or
+  let **Lock automatically** do it after 1 minute to 24 hours of not using
+  Chat. If you forget the passphrase, the saved sign-ins are lost; there is no
+  recovery. A new sign-in is saved within about 30 seconds, and at once when
+  you lock: lock or wait half a minute after signing in before restarting
+  Plasma or logging out.
+- **Google sign-in** works on Google's sign-in page (Hearthside presents
+  itself as Firefox there only, because Google refuses embedded browsers).
+- **Keep open / Minimize**: the popup closes when you click elsewhere unless
+  you turn on **Keep the popup open when clicking elsewhere**; the **Minimize**
+  button hides it with chat pages, sign-ins and the Ollama conversation
+  intact.
+
+### Usage
+
+- Shows each available quota, plan, reset time, extra usage or credits, with
+  **Left** and **Used** display modes; hover over the panel icon for a short
+  summary.
 - Detects installed tools through the Plasma login environment, CLI names, and
-  Linux/XDG data locations.
-- Contacts only providers that are both installed and tracked.
+  Linux/XDG data locations, and contacts only providers that are both
+  installed and tracked.
 - Keeps successful readings in Plasma session memory when a temporary or
   rate-limit error occurs; usage history is never written to disk.
 - Refreshes rotating OAuth credentials back to their exact source with
-  compare-before-write protection.
-- Uses Linux Secret Service through `secret-tool` without placing secrets in
-  process arguments.
-- Uses Plasma's standard configuration dialog and starts with Plasma while it
-  remains on a panel. Settings has three pages of its own: **General** (popup,
-  usage display and privacy), **AI Usage** (providers) and **Chat** (sites and
-  addresses); Plasma adds **Keyboard Shortcuts** and **About**. Longer
-  explanations sit behind the small **?** buttons.
-- **Chat** tab, the first tab in the popup (the usage view is second): pick Claude, ChatGPT, Grok,
-  Gemini (best effort), GitHub Copilot, Microsoft Copilot, or Local web UI
-  (Open WebUI) from a dropdown and use the site right in the popup.
-  It runs in a private, in-memory browser profile: you sign in on each site
-  normally, nothing is saved to disk, and you are signed out when Plasma
-  restarts or you choose **Clear chat data**. Choose the sites under
-  **Settings → Chat**; Local web UI is off until you turn it on.
-- The popup closes when you click elsewhere, unless you turn on **Keep the
-  popup open when clicking elsewhere** under **Settings → General**. The
-  **Minimize** button in the Chat toolbar and on the Usage tab hides it either
-  way; chat pages, sign-ins and the Ollama conversation stay as they were.
-- **Ollama** (optional, off by default): a built-in chat with the models of
-  the Ollama server on this computer, in the same dropdown. It needs no web
-  browser engine; the conversation stays in memory only.
-- **Stay signed in** (optional, off by default): keep your chat sign-ins
-  across Plasma restarts in an encrypted folder protected by a passphrase you
-  choose (made with gocryptfs). You unlock it once per Plasma session from the
-  Chat tab, or use a private session instead. If you forget the passphrase,
-  the saved sign-ins are lost; there is no recovery. **Lock automatically**
-  can lock the folder after 1 minute to 24 hours of not using Chat (Never by
-  default). A new sign-in is saved within about 30 seconds, and at once when
-  you lock: lock or wait half a minute after signing in before restarting
-  Plasma or logging out.
+  compare-before-write protection, and uses Linux Secret Service through
+  `secret-tool` without placing secrets in process arguments.
+
+### Settings
+
+Plasma's standard configuration dialog with three pages of its own —
+**General** (popup, usage display and privacy), **AI Usage** (providers) and
+**Chat** (sites and addresses) — plus Plasma's **Keyboard Shortcuts** and
+**About**. Longer explanations sit behind the small **?** buttons. Hearthside
+starts with Plasma while it remains on a panel.
 
 ### Chat sites
 
@@ -137,13 +164,11 @@ Hearthside icon; hover over it for a short usage summary.
 Fresh installs open on Chat, show both tabs at Normal size, track all
 providers, display usage left, and refresh every five minutes.
 
-## Configure every provider
+## Configure usage providers
 
-Track only the tools you use, and choose which metrics of each provider the
-panel icon's tooltip shows (its default metric, such as Weekly, when none is
-checked).
-
-<img src="docs/settings.png" alt="Hearthside settings on KDE Plasma showing controls for Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, Devin, and Grok" width="1100">
+Under **Settings → AI Usage**, track only the tools you use, and choose which
+metrics of each provider the panel icon's tooltip shows (its default metric,
+such as Weekly, when none is checked).
 
 ## Install
 
@@ -151,9 +176,15 @@ checked).
 ./scripts/install.sh --restart-plasma
 ```
 
-The script removes the old AI Usage widget, helper, and cache if they are
+The script first checks what Hearthside needs. When you run it in a terminal
+on Arch, it offers (y/N) to install anything missing with `sudo pacman`:
+required Qt/KDE modules, Qt WebEngine for the Chat tab, and gocryptfs,
+kdialog and fuse3 for Stay signed in; otherwise it prints the command to run.
+Ollama is only described, since you choose the build for your graphics card.
+It then removes the old AI Usage widget, helper, and cache if they are
 present, installs the dependency-free Python helper into the user Python site,
-installs or upgrades the plasmoid, and optionally reloads Plasma.
+installs or upgrades the plasmoid and the colour app icon, and optionally
+reloads Plasma.
 
 Then right-click the panel, choose **Add Widgets…**, search for **Hearthside**,
 and add it. The first launch opens Settings once.
@@ -266,7 +297,7 @@ source .venv/bin/activate
 python -m pip install -e ".[test]"
 QT_QPA_PLATFORM=offscreen python -m pytest
 python3 -m compileall -q src
-qmllint plasmoid/contents/ui/*.qml
+/usr/lib/qt6/bin/qmllint plasmoid/contents/ui/*.qml
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml
 ```
 
