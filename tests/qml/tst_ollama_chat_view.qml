@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import org.kde.kirigami as Kirigami
 import "../../plasmoid/contents/ui"
 
 // OllamaChatView with a fake XMLHttpRequest (createRequest) and a fake port
@@ -1109,7 +1110,7 @@ TestCase {
 
         // The user scrolls up: a new chunk doesn't move them.
         mouseWheel(list, 50, 50, 0, 600)
-        tryVerify(function () { return !atBottom(list) && !list.moving })
+        tryVerify(function () { return !atBottom(list) && !view.transcriptHeld })
         wait(50)
         var kept = list.contentY
         var height = list.contentHeight
@@ -1121,7 +1122,7 @@ TestCase {
 
         // The user scrolls back to the bottom: it follows again.
         mouseWheel(list, 50, 50, 0, -6000)
-        tryVerify(function () { return atBottom(list) && !list.moving })
+        tryVerify(function () { return atBottom(list) && !view.transcriptHeld })
         tryVerify(function () { return view.followTranscript })
         height = list.contentHeight
         request.chunk(piece(paragraphs(85, 5)))
@@ -1161,7 +1162,7 @@ TestCase {
 
         // Shown after scrolling up; the label is fixed text.
         mouseWheel(list, 50, 50, 0, 600)
-        tryVerify(function () { return !list.moving && view.showBackToBottom })
+        tryVerify(function () { return !view.transcriptHeld && view.showBackToBottom })
         tryVerify(function () { return button.visible && button.opacity === 1 })
         compare(button.text, "New messages")
         compare(button.focusPolicy, Qt.NoFocus)
@@ -1185,7 +1186,7 @@ TestCase {
         // Done replying: the plain label.
         request.chunk(line({ done: true, done_reason: "stop", message: { role: "assistant", content: "" } }))
         mouseWheel(list, 50, 50, 0, 600)
-        tryVerify(function () { return !list.moving && button.visible })
+        tryVerify(function () { return !view.transcriptHeld && button.visible })
         compare(button.text, "Back to bottom")
     }
 
@@ -1231,5 +1232,86 @@ TestCase {
         list.contentY = list.originY - list.topMargin
         wait(100)
         compare(headerIsClean(wrapper.header), "")
+    }
+
+    // --- wheel in Plasma's desktop style (bugs A and B) ---------------------
+    // Also run with QT_QUICK_CONTROLS_STYLE=org.kde.desktop: there the
+    // style's ScrollView brings its own Kirigami.WheelHandler.
+
+    function tallReply(view, list) {
+        var request = sendText(view, "Tell me a long story")
+        var grown = 0
+        for (var chunk = 0; chunk < 6; chunk++) {
+            request.chunk(piece(paragraphs(chunk * 10, 10)))
+            tryVerify(function () { return list.contentHeight > grown }, 2000)
+            grown = list.contentHeight
+        }
+        tryVerify(function () { return atBottom(list) }, 2000)
+        return request
+    }
+
+    // A: scrolling up with the wheel while the reply streams stays up.
+    function test_wheelUpWhileStreamingStaysUp() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var list = findChild(view, "transcript")
+        var request = tallReply(view, list)
+        mouseWheel(list, 50, 50, 0, 240)
+        // Chunks keep arriving during and after the smooth scroll.
+        request.chunk(piece(paragraphs(60, 3)))
+        request.chunk(piece(paragraphs(63, 3)))
+        tryVerify(function () { return !view.transcriptHeld })
+        verify(!atBottom(list))
+        verify(!view.followTranscript)
+        var kept = list.contentY
+        for (var chunk = 0; chunk < 4; chunk++) {
+            var height = list.contentHeight
+            request.chunk(piece(paragraphs(70 + chunk * 4, 4)))
+            tryVerify(function () { return list.contentHeight > height }, 2000)
+            wait(50)
+            fuzzyCompare(list.contentY, kept, 1)
+        }
+        verify(view.showBackToBottom)
+        tryVerify(function () { return findChild(view, "backToBottom").visible })
+        // Wheel back down to the end: following again.
+        mouseWheel(list, 50, 50, 0, -12000)
+        tryVerify(function () { return !view.transcriptHeld })
+        tryVerify(function () { return atBottom(list) && view.followTranscript })
+    }
+
+    // B: Ctrl+wheel zooms and never scrolls, even with something to scroll.
+    function test_ctrlWheelZoomsInsteadOfScrolling() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var list = findChild(view, "transcript")
+        tallReply(view, list)
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !view.transcriptHeld })
+        var asked = []
+        view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        var y = list.contentY
+        mouseWheel(list, 50, 50, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        mouseWheel(list, 50, 50, 0, -120, Qt.NoButton, Qt.ControlModifier)
+        wait(Kirigami.Units.longDuration * 3)
+        compare(asked, [1, -1])
+        fuzzyCompare(list.contentY, y, 1)
+
+        // The message box: long enough to scroll inside.
+        var field = input(view)
+        field.text = paragraphs(0, 40)
+        var flick = field.parent
+        while (flick && flick.contentY === undefined)
+            flick = flick.parent
+        verify(flick !== null)
+        tryVerify(function () { return flick.contentHeight > flick.height })
+        flick.contentY = 0
+        mouseWheel(field, 10, 10, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        wait(Kirigami.Units.longDuration * 3)
+        compare(asked, [1, -1, 1])
+        compare(flick.contentY, 0)
+        // A plain wheel still scrolls it.
+        mouseWheel(field, 10, 10, 0, -240)
+        tryVerify(function () { return flick.contentY > 0 }, 2000)
+        compare(asked.length, 3)
     }
 }

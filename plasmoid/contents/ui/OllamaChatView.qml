@@ -81,7 +81,7 @@ ColumnLayout {
     // The user is moving the transcript (drag, flick, wheel, scroll bar):
     // it is never pinned meanwhile.
     readonly property bool transcriptHeld: transcriptView.moving
-        || transcriptScroll.QQC2.ScrollBar.vertical.pressed
+        || transcriptBar.pressed || wheelSettle.running
     // A message was sent while the transcript was held.
     property bool sentWhileHeld: false
     // Scrolled up away from the newest text: Back to bottom is offered.
@@ -167,6 +167,16 @@ ColumnLayout {
         ollamaView.followTranscript = ollamaView.sentWhileHeld || ollamaView.transcriptAtBottom()
         ollamaView.sentWhileHeld = false
         ollamaView.pinTranscript()
+    }
+
+    // A wheel scroll by the user. Up stops following at once; either way
+    // nothing is pinned until the smooth scroll has settled, then
+    // transcriptReleased decides from where it ended.
+    function transcriptWheeled(wheel) {
+        var delta = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.pixelDelta.y
+        if (delta > 0)
+            ollamaView.followTranscript = false
+        wheelSettle.restart()
     }
 
     // Back to bottom: jump down and follow again.
@@ -760,6 +770,14 @@ ColumnLayout {
         id: transcript
     }
 
+    // Kirigami's smooth wheel scroll takes about a long duration; the
+    // user's wheel scroll counts as held until it is done.
+    Timer {
+        id: wheelSettle
+        interval: Kirigami.Units.longDuration * 2
+        repeat: false
+    }
+
     Shortcut {
         sequences: [StandardKey.ZoomIn, "Ctrl+="]
         enabled: ollamaView.current
@@ -869,211 +887,225 @@ ColumnLayout {
         // Keeps the transcript and Back to bottom inside this area.
         clip: true
 
-        QQC2.ScrollView {
-            id: transcriptScroll
+        // A plain ListView with its own Kirigami.WheelHandler, not a
+        // QQC2.ScrollView: in Plasma's desktop style the ScrollView adds a
+        // WheelHandler of its own that scrolls without moving the list (so
+        // a wheel scroll never counted as the user's) and may swallow
+        // Ctrl+wheel. With one handler every wheel event is seen here first.
+        ListView {
+            id: transcriptView
+            objectName: "transcript"
             anchors.fill: parent
-            // Text wraps; the side margins made the content a few pixels wider
-            // than the view, which showed a stray horizontal scroll bar.
-            QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+            model: transcript
+            spacing: Kirigami.Units.largeSpacing
+            topMargin: Kirigami.Units.largeSpacing
+            bottomMargin: Kirigami.Units.largeSpacing
+            leftMargin: Kirigami.Units.largeSpacing
+            // Room for the scroll bar while it is shown.
+            rightMargin: Kirigami.Units.largeSpacing
+                + (transcriptBar.visible ? transcriptBar.width : 0)
+            reuseItems: false
+            // A Flickable doesn't clip by itself: messages scrolled past
+            // the top would paint over the popup's header and tabs.
+            clip: true
 
-            ListView {
-                id: transcriptView
-                objectName: "transcript"
-                model: transcript
-                spacing: Kirigami.Units.largeSpacing
-                topMargin: Kirigami.Units.largeSpacing
-                bottomMargin: Kirigami.Units.largeSpacing
-                leftMargin: Kirigami.Units.largeSpacing
-                rightMargin: Kirigami.Units.largeSpacing
-                reuseItems: false
-                // A Flickable doesn't clip by itself: messages scrolled past
-                // the top would paint over the popup's header and tabs.
-                clip: true
+            onContentHeightChanged: {
+                if (ollamaView.followTranscript)
+                    Qt.callLater(ollamaView.pinTranscript)
+            }
+            onHeightChanged: {
+                if (ollamaView.followTranscript)
+                    Qt.callLater(ollamaView.pinTranscript)
+            }
 
-                onContentHeightChanged: {
-                    if (ollamaView.followTranscript)
-                        Qt.callLater(ollamaView.pinTranscript)
+            QQC2.ScrollBar.vertical: QQC2.ScrollBar {
+                id: transcriptBar
+                objectName: "transcriptBar"
+            }
+
+            // Smooth wheel scrolling as elsewhere in Plasma. Ctrl+wheel
+            // zooms and never scrolls; any other wheel is the user's own
+            // scroll (see transcriptWheeled).
+            Kirigami.WheelHandler {
+                objectName: "transcriptWheel"
+                target: transcriptView
+                onWheel: (wheel) => {
+                    if (wheel.modifiers & Qt.ControlModifier) {
+                        wheel.accepted = true
+                        ollamaView.wheelZoom(wheel)
+                    } else {
+                        ollamaView.transcriptWheeled(wheel)
+                    }
                 }
-                onHeightChanged: {
-                    if (ollamaView.followTranscript)
-                        Qt.callLater(ollamaView.pinTranscript)
-                }
+            }
 
-                WheelHandler {
-                    objectName: "transcriptWheelZoom"
-                    target: null
-                    acceptedModifiers: Qt.ControlModifier
-                    onWheel: (wheel) => ollamaView.wheelZoom(wheel)
-                }
+            delegate: ColumnLayout {
+                id: message
+                required property int index
+                required property string author
+                required property string body
+                required property string phase
+                readonly property bool mine: message.author === "user"
+                // Text widths are set directly, never from a layout pass:
+                // wrapping long text at width 0 first would stall.
+                readonly property real textWidth: Math.max(Kirigami.Units.gridUnit * 10, message.width)
 
-                delegate: ColumnLayout {
-                    id: message
-                    required property int index
-                    required property string author
-                    required property string body
-                    required property string phase
-                    readonly property bool mine: message.author === "user"
-                    // Text widths are set directly, never from a layout pass:
-                    // wrapping long text at width 0 first would stall.
-                    readonly property real textWidth: Math.max(Kirigami.Units.gridUnit * 10, message.width)
+                width: ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin
+                spacing: Kirigami.Units.smallSpacing
 
-                    width: ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin
-                    spacing: Kirigami.Units.smallSpacing
-
-                    // Updates the reply's blocks in place: unchanged blocks
-                    // keep their item and layout while the reply grows.
-                    function syncBlocks() {
-                        var wanted = message.mine ? [] : ollamaView.blocks(message.body)
-                        for (var index = 0; index < wanted.length; index++) {
-                            if (index >= blockModel.count) {
-                                blockModel.append({ kind: wanted[index].kind, content: wanted[index].text })
-                                continue
-                            }
-                            var shown = blockModel.get(index)
-                            if (shown.kind !== wanted[index].kind)
-                                blockModel.setProperty(index, "kind", wanted[index].kind)
-                            if (shown.content !== wanted[index].text)
-                                blockModel.setProperty(index, "content", wanted[index].text)
+                // Updates the reply's blocks in place: unchanged blocks
+                // keep their item and layout while the reply grows.
+                function syncBlocks() {
+                    var wanted = message.mine ? [] : ollamaView.blocks(message.body)
+                    for (var index = 0; index < wanted.length; index++) {
+                        if (index >= blockModel.count) {
+                            blockModel.append({ kind: wanted[index].kind, content: wanted[index].text })
+                            continue
                         }
-                        if (blockModel.count > wanted.length)
-                            blockModel.remove(wanted.length, blockModel.count - wanted.length)
+                        var shown = blockModel.get(index)
+                        if (shown.kind !== wanted[index].kind)
+                            blockModel.setProperty(index, "kind", wanted[index].kind)
+                        if (shown.content !== wanted[index].text)
+                            blockModel.setProperty(index, "content", wanted[index].text)
                     }
+                    if (blockModel.count > wanted.length)
+                        blockModel.remove(wanted.length, blockModel.count - wanted.length)
+                }
 
-                    onBodyChanged: message.syncBlocks()
-                    Component.onCompleted: message.syncBlocks()
+                onBodyChanged: message.syncBlocks()
+                Component.onCompleted: message.syncBlocks()
 
-                    ListModel {
-                        id: blockModel
+                ListModel {
+                    id: blockModel
+                }
+
+                // The user's message, right-aligned in a tinted bubble.
+                Rectangle {
+                    Layout.alignment: Qt.AlignRight
+                    Layout.preferredWidth: userText.width + Kirigami.Units.largeSpacing * 2
+                    Layout.preferredHeight: userText.height + Kirigami.Units.smallSpacing * 2
+                    visible: message.mine
+                    radius: Kirigami.Units.smallSpacing
+                    color: Qt.alpha(Kirigami.Theme.highlightColor, 0.18)
+
+                    TextEdit {
+                        id: userText
+                        x: Kirigami.Units.largeSpacing
+                        y: Kirigami.Units.smallSpacing
+                        width: Math.min(userText.implicitWidth,
+                            Math.round(message.textWidth * 0.85) - Kirigami.Units.largeSpacing * 2)
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: ollamaView.wrapFor(message.body)
+                        textFormat: TextEdit.PlainText
+                        color: Kirigami.Theme.textColor
+                        selectionColor: Kirigami.Theme.highlightColor
+                        selectedTextColor: Kirigami.Theme.highlightedTextColor
+                        font: ollamaView.bodyFont
+                        text: message.mine ? message.body : ""
                     }
+                }
 
-                    // The user's message, right-aligned in a tinted bubble.
-                    Rectangle {
-                        Layout.alignment: Qt.AlignRight
-                        Layout.preferredWidth: userText.width + Kirigami.Units.largeSpacing * 2
-                        Layout.preferredHeight: userText.height + Kirigami.Units.smallSpacing * 2
-                        visible: message.mine
+                // The reply: plain text, fenced code blocks in monospace.
+                Repeater {
+                    model: blockModel
+
+                    delegate: Rectangle {
+                        id: segment
+                        required property string kind
+                        required property string content
+                        readonly property bool code: segment.kind === "code"
+                        readonly property real padding: segment.code ? Kirigami.Units.smallSpacing : 0
+
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: segmentText.height + segment.padding * 2
                         radius: Kirigami.Units.smallSpacing
-                        color: Qt.alpha(Kirigami.Theme.highlightColor, 0.18)
+                        color: segment.code
+                            ? Kirigami.Theme.alternateBackgroundColor
+                            : "transparent"
 
                         TextEdit {
-                            id: userText
-                            x: Kirigami.Units.largeSpacing
-                            y: Kirigami.Units.smallSpacing
-                            width: Math.min(userText.implicitWidth,
-                                Math.round(message.textWidth * 0.85) - Kirigami.Units.largeSpacing * 2)
+                            id: segmentText
+                            x: segment.padding
+                            y: segment.padding
+                            width: message.textWidth - segment.padding * 2 - (segment.code
+                                ? Kirigami.Units.iconSizes.medium + Kirigami.Units.smallSpacing : 0)
                             readOnly: true
                             selectByMouse: true
-                            wrapMode: ollamaView.wrapFor(message.body)
+                            wrapMode: ollamaView.wrapFor(segment.content)
                             textFormat: TextEdit.PlainText
                             color: Kirigami.Theme.textColor
                             selectionColor: Kirigami.Theme.highlightColor
                             selectedTextColor: Kirigami.Theme.highlightedTextColor
-                            font: ollamaView.bodyFont
-                            text: message.mine ? message.body : ""
-                        }
-                    }
-
-                    // The reply: plain text, fenced code blocks in monospace.
-                    Repeater {
-                        model: blockModel
-
-                        delegate: Rectangle {
-                            id: segment
-                            required property string kind
-                            required property string content
-                            readonly property bool code: segment.kind === "code"
-                            readonly property real padding: segment.code ? Kirigami.Units.smallSpacing : 0
-
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: segmentText.height + segment.padding * 2
-                            radius: Kirigami.Units.smallSpacing
-                            color: segment.code
-                                ? Kirigami.Theme.alternateBackgroundColor
-                                : "transparent"
-
-                            TextEdit {
-                                id: segmentText
-                                x: segment.padding
-                                y: segment.padding
-                                width: message.textWidth - segment.padding * 2 - (segment.code
-                                    ? Kirigami.Units.iconSizes.medium + Kirigami.Units.smallSpacing : 0)
-                                readOnly: true
-                                selectByMouse: true
-                                wrapMode: ollamaView.wrapFor(segment.content)
-                                textFormat: TextEdit.PlainText
-                                color: Kirigami.Theme.textColor
-                                selectionColor: Kirigami.Theme.highlightColor
-                                selectedTextColor: Kirigami.Theme.highlightedTextColor
-                                font: segment.code ? ollamaView.codeFont : ollamaView.bodyFont
-                                text: segment.content
-                            }
-                            PlasmaComponents.ToolButton {
-                                anchors.top: parent.top
-                                anchors.right: parent.right
-                                visible: segment.code
-                                icon.name: "edit-copy"
-                                display: QQC2.AbstractButton.IconOnly
-                                text: i18n("Copy code")
-                                onClicked: ollamaView.copyText(segment.content)
-                                QQC2.ToolTip.text: text
-                                QQC2.ToolTip.visible: hovered
-                            }
-                        }
-                    }
-
-                    PlasmaComponents.Label {
-                        objectName: "hiddenCharsNote"
-                        Layout.fillWidth: true
-                        visible: !message.mine && OllamaChat.hasHidden(message.body)
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        color: Kirigami.Theme.neutralTextColor
-                        font: Kirigami.Theme.smallFont
-                        text: i18n("This text contains hidden or control characters, shown as ⟦U+…⟧. Copy copies the marked text.")
-                    }
-
-                    RowLayout {
-                        visible: !message.mine
-                        spacing: Kirigami.Units.smallSpacing
-
-                        PlasmaComponents.BusyIndicator {
-                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
-                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                            visible: message.phase === "waiting" || message.phase === "thinking"
-                            running: visible
-                        }
-                        PlasmaComponents.Label {
-                            textFormat: Text.PlainText
-                            opacity: 0.7
-                            font: Kirigami.Theme.smallFont
-                            visible: text !== ""
-                            text: {
-                                switch (message.phase) {
-                                case "thinking":
-                                    return i18n("Thinking…")
-                                case "stopped":
-                                    return i18n("(stopped)")
-                                case "cut":
-                                    return i18n("Reply cut off (too long).")
-                                case "failed":
-                                    return i18n("(incomplete)")
-                                default:
-                                    return ""
-                                }
-                            }
+                            font: segment.code ? ollamaView.codeFont : ollamaView.bodyFont
+                            text: segment.content
                         }
                         PlasmaComponents.ToolButton {
-                            visible: message.body !== "" && message.phase !== "waiting"
-                                && message.phase !== "streaming" && message.phase !== "thinking"
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            visible: segment.code
                             icon.name: "edit-copy"
                             display: QQC2.AbstractButton.IconOnly
-                            text: i18n("Copy reply")
-                            // The marked text, as shown: hidden characters never
-                            // reach the clipboard.
-                            onClicked: ollamaView.copyText(OllamaChat.revealHidden(message.body))
+                            text: i18n("Copy code")
+                            onClicked: ollamaView.copyText(segment.content)
                             QQC2.ToolTip.text: text
                             QQC2.ToolTip.visible: hovered
                         }
+                    }
+                }
+
+                PlasmaComponents.Label {
+                    objectName: "hiddenCharsNote"
+                    Layout.fillWidth: true
+                    visible: !message.mine && OllamaChat.hasHidden(message.body)
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: Kirigami.Theme.neutralTextColor
+                    font: Kirigami.Theme.smallFont
+                    text: i18n("This text contains hidden or control characters, shown as ⟦U+…⟧. Copy copies the marked text.")
+                }
+
+                RowLayout {
+                    visible: !message.mine
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents.BusyIndicator {
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        visible: message.phase === "waiting" || message.phase === "thinking"
+                        running: visible
+                    }
+                    PlasmaComponents.Label {
+                        textFormat: Text.PlainText
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        visible: text !== ""
+                        text: {
+                            switch (message.phase) {
+                            case "thinking":
+                                return i18n("Thinking…")
+                            case "stopped":
+                                return i18n("(stopped)")
+                            case "cut":
+                                return i18n("Reply cut off (too long).")
+                            case "failed":
+                                return i18n("(incomplete)")
+                            default:
+                                return ""
+                            }
+                        }
+                    }
+                    PlasmaComponents.ToolButton {
+                        visible: message.body !== "" && message.phase !== "waiting"
+                            && message.phase !== "streaming" && message.phase !== "thinking"
+                        icon.name: "edit-copy"
+                        display: QQC2.AbstractButton.IconOnly
+                        text: i18n("Copy reply")
+                        // The marked text, as shown: hidden characters never
+                        // reach the clipboard.
+                        onClicked: ollamaView.copyText(OllamaChat.revealHidden(message.body))
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
                     }
                 }
             }
@@ -1206,6 +1238,7 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
         QQC2.ScrollView {
+            id: inputScroll
             objectName: "inputScroll"
             Layout.fillWidth: true
             Layout.maximumHeight: Kirigami.Units.gridUnit * 8
@@ -1225,12 +1258,6 @@ ColumnLayout {
                 inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhSensitiveData
                 placeholderText: i18n("Message (Enter sends, Shift+Enter adds a line)")
                 Accessible.name: i18n("Message to Ollama")
-                WheelHandler {
-                    objectName: "inputWheelZoom"
-                    target: null
-                    acceptedModifiers: Qt.ControlModifier
-                    onWheel: (wheel) => ollamaView.wheelZoom(wheel)
-                }
                 Keys.onPressed: (event) => {
                     if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                             && !(event.modifiers & Qt.ShiftModifier)) {
@@ -1238,6 +1265,21 @@ ColumnLayout {
                         ollamaView.send()
                     }
                 }
+            }
+        }
+        // Above the message box and its style's own wheel handling, so
+        // Ctrl+wheel always zooms; any other wheel passes on and scrolls.
+        // It takes no clicks, hover or focus.
+        Item {
+            parent: inputScroll
+            anchors.fill: parent
+            z: 10
+
+            WheelHandler {
+                objectName: "inputWheelZoom"
+                target: null
+                acceptedModifiers: Qt.ControlModifier
+                onWheel: (wheel) => ollamaView.wheelZoom(wheel)
             }
         }
         PlasmaComponents.Button {
