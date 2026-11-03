@@ -1,0 +1,11 @@
+[Global]
+IconName=hearthside
+Comment=Hearthside
+
+[Event/usageLow]
+Name=Plan running low
+Action=Popup
+
+[Event/usageReset]
+Name=Plan reset
+Action=Popup

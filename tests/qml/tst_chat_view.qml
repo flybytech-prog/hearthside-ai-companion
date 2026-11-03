@@ -544,4 +544,31 @@ TestCase {
         verify(!/[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(shown), shown)
         verify(shown.indexOf("…") > 0)
     }
+
+    // --- zoom keys (Ctrl+= / Ctrl+- / Ctrl+0) --------------------------------
+
+    function test_zoomKeysAskForTheSiteShown() {
+        testCase.shownAtCreation = true
+        var view = make({zoomMap: {claude: 1.25}})
+        var asked = []
+        view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        tryVerify(function () { return view.web !== null })
+        // The web view gets the zoom map and follows it.
+        compare(view.web.zoomMap, {claude: 1.25})
+        view.zoomMap = {claude: 1.5}
+        compare(view.web.zoomMap, {claude: 1.5})
+        keyClick(Qt.Key_Equal, Qt.ControlModifier)
+        keyClick(Qt.Key_Minus, Qt.ControlModifier)
+        keyClick(Qt.Key_0, Qt.ControlModifier)
+        compare(asked, [1, -1, 0])
+    }
+
+    function test_zoomKeysOnlyWhileShown() {
+        var view = make({current: false})
+        var asked = []
+        view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        keyClick(Qt.Key_Equal, Qt.ControlModifier)
+        keyClick(Qt.Key_0, Qt.ControlModifier)
+        compare(asked, [])
+    }
 }

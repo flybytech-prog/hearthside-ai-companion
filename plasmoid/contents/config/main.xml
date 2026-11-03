@@ -62,5 +62,20 @@
         <entry name="tooltipShowsUsage" type="Bool">
             <default>true</default>
         </entry>
+        <entry name="shortcutOpens" type="String">
+            <default>popup</default>
+        </entry>
+        <entry name="chatSiteZoom" type="String">
+            <default>{}</default>
+        </entry>
+        <entry name="alertLowEnabled" type="Bool">
+            <default>false</default>
+        </entry>
+        <entry name="alertLowPercent" type="Int">
+            <default>20</default>
+        </entry>
+        <entry name="alertResetEnabled" type="Bool">
+            <default>false</default>
+        </entry>
     </group>
 </kcfg>

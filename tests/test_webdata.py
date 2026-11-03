@@ -571,6 +571,49 @@ def test_install_script_refuses_while_the_fake_mountinfo_shows_a_mount(tmp_path,
     assert (share / "vault").is_dir()
 
 
+def _notifyrc(tmp_path):
+    path = tmp_path / "home" / ".local" / "share" / "knotifications6" / "hearthside.notifyrc"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[Global]\n")
+    return path
+
+
+@pytest.mark.parametrize("with_vault", [True, False])
+def test_install_script_uninstall_web_data_removes_the_notifyrc(tmp_path, _private_runtime_dir, with_vault):
+    if with_vault:
+        (tmp_path / "home" / ".local" / "share" / "hearthside" / "vault").mkdir(parents=True)
+    notifyrc = _notifyrc(tmp_path)
+    neighbour = notifyrc.parent / "plasma_workspace.notifyrc"
+    neighbour.write_text("keep")
+    completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir)
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert not notifyrc.exists()
+    assert neighbour.read_text() == "keep"
+
+
+def test_install_script_uninstall_web_data_removes_a_notifyrc_symlink_not_its_target(tmp_path, _private_runtime_dir):
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    link = _notifyrc(tmp_path)
+    link.unlink()
+    link.symlink_to(target)
+    completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir)
+    assert completed.returncode == 0
+    assert not link.is_symlink() and target.read_text() == "keep"
+
+
+def test_install_script_keeps_the_notifyrc_when_it_deletes_nothing(tmp_path, _private_runtime_dir):
+    share = tmp_path / "home" / ".local" / "share" / "hearthside"
+    (share / "vault").mkdir(parents=True)
+    notifyrc = _notifyrc(tmp_path)
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    line = (f"901 30 0:99 / {mountpoint} rw,nosuid,nodev shared:1 - fuse.gocryptfs "
+            f"{share / 'vault'} rw,user_id={os.getuid()},group_id={os.getgid()}\n")
+    completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir, mountinfo=line)
+    assert completed.returncode == 1 and "Nothing was deleted" in completed.stderr
+    assert notifyrc.read_text() == "[Global]\n"
+
+
 def test_install_script_refuses_symlinked_web_data(tmp_path, _private_runtime_dir):
     target = tmp_path / "target"
     target.mkdir()

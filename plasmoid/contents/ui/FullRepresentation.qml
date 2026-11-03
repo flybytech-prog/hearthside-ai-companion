@@ -7,6 +7,7 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
 import "ChatSites.js" as ChatSites
+import "SettingsLogic.js" as SettingsLogic
 
 PlasmaExtras.Representation {
     id: full
@@ -37,6 +38,10 @@ PlasmaExtras.Representation {
                 ollamaView.focusLater()
             else if (root.expanded && full.onChat)
                 chatView.focusLater()
+        }
+        // The keyboard shortcut opened Ollama's message box.
+        function onOllamaFocusRequested() {
+            ollamaView.focusLater()
         }
         // A hidden Chat tab keeps no web view or saved sign-ins open.
         function onChatShownChanged() {
@@ -289,6 +294,8 @@ PlasmaExtras.Representation {
 
     contentItem: StackLayout {
         currentIndex: full.onChat ? 0 : 1
+        // No tab's content paints over the header and its tab bar.
+        clip: true
 
         StackLayout {
             currentIndex: root.chatSiteId === "ollama" ? 1 : 0
@@ -311,7 +318,10 @@ PlasmaExtras.Representation {
                 storageNotice: root.chatStorageNotice
                 autoLockMinutes: root.chatAutoLockMinutes
                 storageBusy: root.chatStorageBusy || root.chatDialogOpen
+                zoomMap: root.chatZoom
                 onStorageRequest: (action) => root.chatStorageRequest(action)
+                onZoomRequested: (direction) => root.stepSiteZoom(chatView.siteId, direction)
+                onSiteZoomRequested: (siteId, factor) => root.setSiteZoom(siteId, factor)
             }
 
             OllamaChatView {
@@ -320,6 +330,8 @@ PlasmaExtras.Representation {
                 siteEnabled: root.chatShown && root.chatSiteIds.indexOf("ollama") >= 0
                 address: root.chatOllamaAddress
                 appletId: Math.max(0, root.chatAppletId)
+                textScale: SettingsLogic.zoomFor(root.chatZoom, "ollama")
+                onZoomRequested: (direction) => root.stepSiteZoom("ollama", direction)
             }
         }
 

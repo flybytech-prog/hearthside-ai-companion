@@ -115,6 +115,36 @@ TestCase {
         }
     }
 
+    // Like the popup: a header with the tabs above the view.
+    Component {
+        id: headedComponent
+        Column {
+            id: headed
+            property alias view: chat
+            property alias header: tabs
+            property bool shown: false
+            anchors.fill: parent
+
+            Rectangle {
+                id: tabs
+                width: parent.width
+                height: 60
+                color: "#ff00ff"
+            }
+            OllamaChatView {
+                id: chat
+                width: parent.width
+                height: parent.height - tabs.height
+                current: headed.shown
+                siteEnabled: true
+                appletId: 7
+                renderInterval: 0
+                createRequest: function () { return testCase.newFake() }
+                runOwnerCheck: function (command) { testCase.ownerAsked(chat, command) }
+            }
+        }
+    }
+
     function init() {
         testCase.requests = []
         testCase.ownerCommands = []
@@ -122,8 +152,8 @@ TestCase {
         testCase.escapeAtParent = 0
     }
 
-    function make(properties) {
-        var wrapper = createTemporaryObject(wrapperComponent, testCase, properties || {})
+    function make(properties, component) {
+        var wrapper = createTemporaryObject(component || wrapperComponent, testCase, properties || {})
         verify(wrapper !== null)
         return wrapper
     }
@@ -141,8 +171,8 @@ TestCase {
     ]
 
     // Shown → owner check → version → tags, answered with models.
-    function ready(models) {
-        var wrapper = make({ shown: true })
+    function ready(models, component) {
+        var wrapper = make({ shown: true }, component)
         var view = wrapper.view
         compare(testCase.requests.length, 1)
         compare(testCase.requests[0].url, "http://127.0.0.1:11434/api/version")
@@ -878,7 +908,7 @@ TestCase {
 
     // Every text the view sets on a control itself (never server text).
     property var fixedTexts: ["", "Clear this conversation?", "Clear", "Cancel", "Copy reply",
-        "Copy code", "Retry", "Reload models", "Send", "Stop",
+        "Copy code", "Retry", "Reload models", "Send", "Stop", "Back to bottom", "New messages",
         "Message (Enter sends, Shift+Enter adds a line)"]
 
     function test_everyShownTextIsPlain() {
@@ -985,5 +1015,221 @@ TestCase {
         wait(50)
         var note = named(view, "hiddenCharsNote")
         compare(note, null)
+    }
+
+    // --- text size (Ctrl+= / Ctrl+- / Ctrl+0) -------------------------------
+
+    function test_zoomKeysOnlyWhileShown() {
+        var wrapper = make({ shown: false })
+        var asked = []
+        wrapper.view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        keyClick(Qt.Key_Equal, Qt.ControlModifier)
+        compare(asked, [])
+        wrapper.shown = true
+        keyClick(Qt.Key_Equal, Qt.ControlModifier)
+        keyClick(Qt.Key_Minus, Qt.ControlModifier)
+        keyClick(Qt.Key_0, Qt.ControlModifier)
+        compare(asked, [1, -1, 0])
+    }
+
+    function test_textScaleSizesTranscriptAndInput() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var field = input(view)
+        var base = field.font.pointSize > 0 ? field.font.pointSize : field.font.pixelSize
+        verify(base > 0)
+        view.textScale = 1.5
+        var scaled = field.font.pointSize > 0 ? field.font.pointSize : field.font.pixelSize
+        fuzzyCompare(scaled, base * 1.5, 1)
+        compare(view.bodyFont.family, field.font.family)
+        verify((view.codeFont.pointSize > 0 ? view.codeFont.pointSize : view.codeFont.pixelSize) > base)
+        view.textScale = 1.0
+        compare(field.font.pointSize > 0 ? field.font.pointSize : field.font.pixelSize, base)
+    }
+
+    function test_ctrlWheelStepsTextScale() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var asked = []
+        view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        var transcript = findChild(view, "transcript")
+        var field = input(view)
+        mouseWheel(transcript, 50, 50, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        mouseWheel(transcript, 50, 50, 0, -120, Qt.NoButton, Qt.ControlModifier)
+        mouseWheel(field, 10, 10, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        compare(asked, [1, -1, 1])
+        // Touchpad-sized moves add up to one step.
+        mouseWheel(field, 10, 10, 0, 60, Qt.NoButton, Qt.ControlModifier)
+        compare(asked.length, 3)
+        mouseWheel(field, 10, 10, 0, 60, Qt.NoButton, Qt.ControlModifier)
+        compare(asked, [1, -1, 1, 1])
+        // A plain wheel scrolls and never zooms.
+        mouseWheel(transcript, 50, 50, 0, 120)
+        mouseWheel(field, 10, 10, 0, -120)
+        compare(asked.length, 4)
+    }
+
+    function test_ctrlWheelOnlyWhileShown() {
+        var wrapper = make({ shown: false })
+        var asked = []
+        wrapper.view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        mouseWheel(findChild(wrapper.view, "transcript"), 50, 50, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        compare(asked, [])
+    }
+
+    // --- the transcript follows the reply -----------------------------------
+
+    function atBottom(list) {
+        var end = list.originY + list.contentHeight + list.bottomMargin - list.height
+        return list.contentY >= end - 2
+    }
+
+    function paragraphs(from, count) {
+        var text = ""
+        for (var index = from; index < from + count; index++)
+            text += "Paragraph " + index + " of a reply that streams in.\n\n"
+        return text
+    }
+
+    function test_transcriptFollowsTheReply() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var list = findChild(view, "transcript")
+        var request = sendText(view, "Tell me a long story")
+        // Each chunk: wait for its layout (the height grows), then check.
+        var grown = 0
+        for (var chunk = 0; chunk < 8; chunk++) {
+            request.chunk(piece(paragraphs(chunk * 10, 10)))
+            tryVerify(function () { return list.contentHeight > grown }, 2000, "chunk " + chunk + " not laid out")
+            grown = list.contentHeight
+            tryVerify(function () { return atBottom(list) }, 2000, "not at the bottom after chunk " + chunk)
+        }
+        verify(list.contentHeight > list.height * 2,
+               "the transcript must be taller than the view: " + list.contentHeight + " / " + list.height)
+
+        // The user scrolls up: a new chunk doesn't move them.
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !atBottom(list) && !list.moving })
+        wait(50)
+        var kept = list.contentY
+        var height = list.contentHeight
+        request.chunk(piece(paragraphs(80, 5)))
+        tryVerify(function () { return list.contentHeight > height })
+        wait(100)
+        fuzzyCompare(list.contentY, kept, 1)
+        verify(!view.followTranscript)
+
+        // The user scrolls back to the bottom: it follows again.
+        mouseWheel(list, 50, 50, 0, -6000)
+        tryVerify(function () { return atBottom(list) && !list.moving })
+        tryVerify(function () { return view.followTranscript })
+        height = list.contentHeight
+        request.chunk(piece(paragraphs(85, 5)))
+        tryVerify(function () { return list.contentHeight > height })
+        tryVerify(function () { return atBottom(list) }, 2000)
+        request.chunk(line({ done: true, done_reason: "stop", message: { role: "assistant", content: "" } }))
+        verify(!view.generating)
+
+        // Scrolled up, then a new message: sending always jumps down.
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !atBottom(list) })
+        var second = sendText(view, "And then?")
+        tryVerify(function () { return atBottom(list) }, 2000)
+        height = list.contentHeight
+        second.chunk(piece(paragraphs(100, 6)))
+        tryVerify(function () { return list.contentHeight > height })
+        tryVerify(function () { return atBottom(list) }, 2000)
+    }
+
+    function test_backToBottom() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var list = findChild(view, "transcript")
+        var button = findChild(view, "backToBottom")
+        verify(button !== null)
+        var request = sendText(view, "Tell me a long story")
+        var grown = 0
+        for (var chunk = 0; chunk < 6; chunk++) {
+            request.chunk(piece(paragraphs(chunk * 10, 10)))
+            tryVerify(function () { return list.contentHeight > grown }, 2000)
+            grown = list.contentHeight
+        }
+        tryVerify(function () { return atBottom(list) }, 2000)
+        // Hidden at the bottom.
+        verify(!view.showBackToBottom)
+        tryVerify(function () { return !button.visible })
+
+        // Shown after scrolling up; the label is fixed text.
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !list.moving && view.showBackToBottom })
+        tryVerify(function () { return button.visible && button.opacity === 1 })
+        compare(button.text, "New messages")
+        compare(button.focusPolicy, Qt.NoFocus)
+        // It sits above the message box, never over it.
+        var field = input(view)
+        var buttonBottom = button.mapToItem(view, 0, button.height).y
+        verify(buttonBottom <= field.mapToItem(view, 0, 0).y, buttonBottom + " overlaps the input")
+
+        // Click: at the bottom, following again, hidden; the input keeps the focus.
+        field.forceActiveFocus()
+        mouseClick(button)
+        tryVerify(function () { return atBottom(list) }, 2000)
+        verify(view.followTranscript)
+        verify(field.activeFocus)
+        tryVerify(function () { return !button.visible })
+        // And it keeps following the reply.
+        request.chunk(piece(paragraphs(60, 6)))
+        tryVerify(function () { return list.contentHeight > grown }, 2000)
+        tryVerify(function () { return atBottom(list) }, 2000)
+
+        // Done replying: the plain label.
+        request.chunk(line({ done: true, done_reason: "stop", message: { role: "assistant", content: "" } }))
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !list.moving && button.visible })
+        compare(button.text, "Back to bottom")
+    }
+
+    // --- nothing paints outside the view --------------------------------------
+
+    function test_viewAndTranscriptClip() {
+        var view = make({ shown: true }).view
+        verify(view.clip)
+        verify(findChild(view, "transcript").clip)
+        verify(findChild(view, "inputScroll").clip)
+        verify(findChild(view, "backToBottom").parent.clip)
+    }
+
+    function headerIsClean(header) {
+        var image = grabImage(header)
+        for (var y = 2; y < header.height - 2; y += 4) {
+            for (var x = 2; x < header.width - 2; x += 8) {
+                if (!Qt.colorEqual(image.pixel(x, y), "#ff00ff"))
+                    return "x=" + x + " y=" + y + " is " + image.pixel(x, y)
+            }
+        }
+        return ""
+    }
+
+    // Scrolled messages never paint over the tabs above the view.
+    function test_scrolledTranscriptStaysBelowTheTabs() {
+        var wrapper = ready(undefined, headedComponent)
+        var view = wrapper.view
+        var list = findChild(view, "transcript")
+        var request = sendText(view, "Tell me a long story")
+        var grown = 0
+        for (var chunk = 0; chunk < 6; chunk++) {
+            request.chunk(piece(paragraphs(chunk * 10, 10)))
+            tryVerify(function () { return list.contentHeight > grown }, 2000)
+            grown = list.contentHeight
+        }
+        request.chunk(line({ done: true, done_reason: "stop", message: { role: "assistant", content: "" } }))
+        verify(view.mapToItem(wrapper, 0, 0).y >= wrapper.header.height)
+        // Mid-way: messages above the view's top edge exist and must be clipped.
+        list.contentY = list.contentHeight / 2
+        wait(100)
+        compare(headerIsClean(wrapper.header), "")
+        list.contentY = list.originY - list.topMargin
+        wait(100)
+        compare(headerIsClean(wrapper.header), "")
     }
 }

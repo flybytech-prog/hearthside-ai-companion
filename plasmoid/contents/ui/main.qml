@@ -5,6 +5,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.kirigami as Kirigami
+import org.kde.notification
 import "ProviderCatalog.js" as Catalog
 import "RefreshGate.js" as RefreshGate
 import "SnapshotLogic.js" as SnapshotLogic
@@ -12,6 +13,7 @@ import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
 import "SettingsLogic.js" as SettingsLogic
+import "AlertLogic.js" as AlertLogic
 
 PlasmoidItem {
     id: root
@@ -68,6 +70,23 @@ PlasmoidItem {
     // {siteId: url}; only valid addresses survive, anything odd → built-in.
     readonly property var chatCustomUrls:
         ChatSites.parseCustomUrls(Plasmoid.configuration.chatCustomUrls)
+    // Per-site zoom {siteId: factor} for the web sites and Ollama. Read from
+    // the configuration at start; Ctrl+= / Ctrl+- / Ctrl+0 change it here and
+    // zoomWriteTimer stores it a moment later.
+    readonly property var chatZoomIds: ChatSites.siteIds().concat([OllamaChat.ENTRY.id])
+    property var chatZoom: ({})
+
+    // Settings → General → Keyboard shortcut opens.
+    readonly property string shortcutTarget:
+        SettingsLogic.normalizeShortcutTarget(Plasmoid.configuration.shortcutOpens)
+    // The shortcut opened the Ollama chat: its message box takes the focus.
+    signal ollamaFocusRequested()
+    // What the last shortcut press asked for: open (true) or closed.
+    property bool shortcutOpen: false
+
+    // Usage alerts, memory only: after a Plasma restart the first reading is
+    // a baseline again.
+    property var alertState: ({})
 
     // Stay signed in. Runtime state only; nothing here reaches the config
     // except chatProfileGeneration. The helper reports short codes and the
@@ -632,6 +651,114 @@ PlasmoidItem {
         }
     }
 
+    // Plasma's activation (the keyboard shortcut): closes an open popup,
+    // else opens it on the target from Settings → General.
+    function openFromShortcut() {
+        root.shortcutOpen = !root.expanded
+        if (root.shortcutOpen) {
+            var plan = SettingsLogic.shortcutPlan(root.shortcutTarget, root.popupTabs,
+                root.chatSiteIds.indexOf(OllamaChat.ENTRY.id) >= 0)
+            if (plan.tab !== "")
+                root.popupTab = plan.tab
+            if (plan.site !== "")
+                root.chatSiteId = plan.site
+            root.expanded = true
+            if (plan.focusInput)
+                root.ollamaFocusRequested()
+        }
+        // Plasma expands the popup itself right after this handler (spike
+        // K1), so the close is applied once it is done.
+        Qt.callLater(root.finishShortcut)
+    }
+
+    function finishShortcut() {
+        if (root.expanded !== root.shortcutOpen)
+            root.expanded = root.shortcutOpen
+    }
+
+    // factor must be one of ZOOM_STEPS; 1.0 removes the site's zoom.
+    function setSiteZoom(siteId, factor) {
+        if (root.chatZoomIds.indexOf(siteId) < 0 || SettingsLogic.ZOOM_STEPS.indexOf(factor) < 0)
+            return
+        root.chatZoom = SettingsLogic.parseZoomMap(
+            SettingsLogic.zoomMapToPersist(root.chatZoom, siteId, factor), root.chatZoomIds)
+        zoomWriteTimer.restart()
+    }
+
+    // direction: +1 bigger, -1 smaller, 0 back to 100%.
+    function stepSiteZoom(siteId, direction) {
+        root.setSiteZoom(siteId, SettingsLogic.zoomStep(
+            SettingsLogic.zoomFor(root.chatZoom, siteId), direction))
+    }
+
+    // Fresh percentage windows of the providers this run reported, for the
+    // metrics the Usage tab shows. Stale and failed providers are left out,
+    // so they keep their alert state.
+    function alertReadings(providerIds) {
+        var readings = []
+        var groups = root.tooltipProviderGroups()
+        for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+            var group = groups[groupIndex]
+            if (providerIds.indexOf(group.provider_id) < 0 || group.provider.status !== "ok")
+                continue
+            for (var metricIndex = 0; metricIndex < group.metrics.length; metricIndex++) {
+                var window = SnapshotLogic.windowFor(group.provider, group.metrics[metricIndex])
+                if (!window || typeof window.used_percent !== "number")
+                    continue
+                var resetsAt = typeof window.resets_at === "string"
+                    ? new Date(window.resets_at).getTime() : NaN
+                readings.push({
+                    providerId: group.provider_id,
+                    metricId: group.metrics[metricIndex],
+                    usedPercent: window.used_percent,
+                    resetsAtMs: isFinite(resetsAt) ? resetsAt : null
+                })
+            }
+        }
+        return readings
+    }
+
+    function checkAlerts(results) {
+        if (!root.usageShown)
+            return
+        var providerIds = []
+        var list = Array.isArray(results) ? results : []
+        for (var index = 0; index < list.length; index++) {
+            if (list[index] && typeof list[index].provider_id === "string")
+                providerIds.push(list[index].provider_id)
+        }
+        var result = AlertLogic.evaluate(root.alertState, root.alertReadings(providerIds), {
+            lowEnabled: Plasmoid.configuration.alertLowEnabled === true,
+            lowPercent: SettingsLogic.normalizeAlertPercent(Plasmoid.configuration.alertLowPercent),
+            resetEnabled: Plasmoid.configuration.alertResetEnabled === true
+        })
+        root.alertState = result.state
+        for (var alertIndex = 0; alertIndex < result.alerts.length; alertIndex++)
+            root.notifyAlert(result.alerts[alertIndex])
+    }
+
+    // Plasma reads a little markup in a notification's body (its title is
+    // plain text): the body's name is escaped.
+    function markupSafe(text) {
+        return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
+    // Catalog names and a whole percentage only; never helper text.
+    function notifyAlert(alert) {
+        var descriptor = Catalog.byId(alert.providerId)
+        var metric = Catalog.metric(alert.providerId, alert.metricId)
+        if (!descriptor || !metric)
+            return
+        var notification = alertNotification.createObject(root, {
+            reset: alert.kind === "reset",
+            providerName: descriptor.display_name,
+            metricName: root.markupSafe(metric.title),
+            percentLeft: Math.max(0, Math.min(100, Math.round(Number(alert.left) || 0)))
+        })
+        if (notification)
+            notification.sendEvent()
+    }
+
     function setUsageMode(mode) {
         Plasmoid.configuration.usageMode = mode === "used" ? "used" : "remaining"
     }
@@ -649,11 +776,16 @@ PlasmoidItem {
             var code = data["exit code"]
             var output = (data["stdout"] || "").toString()
             if (code === 0 && output.trim().length > 0) {
+                var payload = null
                 try {
-                    root.applySnapshot(JSON.parse(output))
+                    payload = JSON.parse(output)
+                    root.applySnapshot(payload)
                 } catch (error) {
+                    payload = null
                     root.lastError = i18n("Could not parse helper output")
                 }
+                if (payload)
+                    root.checkAlerts(payload.providers)
             } else {
                 var errorText = (data["stderr"] || "").toString().trim()
                 root.lastError = errorText.length > 0
@@ -711,6 +843,37 @@ PlasmoidItem {
         onTriggered: root.refresh()
     }
 
+    // Stores the zoom a second after the last Ctrl+= / Ctrl+- / Ctrl+0, so
+    // holding a key writes the configuration once.
+    Timer {
+        id: zoomWriteTimer
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            Plasmoid.configuration.chatSiteZoom = SettingsLogic.zoomMapToPersist(root.chatZoom, "", 1.0)
+        }
+    }
+
+    // One usage alert; destroyed by itself once shown (autoDelete).
+    Component {
+        id: alertNotification
+
+        Notification {
+            property bool reset: false
+            property string providerName: ""
+            property string metricName: ""
+            property int percentLeft: 0
+
+            componentName: "hearthside"
+            eventId: reset ? "usageReset" : "usageLow"
+            iconName: "hearthside"
+            urgency: Notification.NormalUrgency
+            autoDelete: true
+            title: reset ? i18n("%1 has reset", providerName) : i18n("%1 is running low", providerName)
+            text: reset ? i18n("%1 is available again.", metricName) : i18n("%1: %2% left", metricName, percentLeft)
+        }
+    }
+
     Timer {
         id: firstRunSettingsTimer
         interval: 1200
@@ -732,6 +895,24 @@ PlasmoidItem {
         root.chatGeneration = root.chatConfiguredGeneration
         root.chatModeSeen = root.chatStorageMode
         root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
+        root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
+    }
+
+    // The zoom map changed outside this widget (e.g. Defaults in the
+    // settings); a write of our own still waiting wins.
+    readonly property string configuredZoom: Plasmoid.configuration.chatSiteZoom
+    onConfiguredZoomChanged: {
+        if (!zoomWriteTimer.running)
+            root.chatZoom = SettingsLogic.parseZoomMap(root.configuredZoom, root.chatZoomIds)
+    }
+
+    // A zoom still waiting is stored before the widget goes (Plasma quits,
+    // the widget is removed), through the timer's own handler.
+    Component.onDestruction: {
+        if (zoomWriteTimer.running) {
+            zoomWriteTimer.stop()
+            zoomWriteTimer.triggered()
+        }
     }
 
     onChatStorageModeChanged: root.chatModeChanged()
@@ -760,6 +941,16 @@ PlasmoidItem {
     onChatSiteIdChanged: {
         if (root.chatSiteId !== OllamaChat.ENTRY.id)
             root.chatWebSiteId = root.chatSiteId
+    }
+
+    // The keyboard shortcut (set in Plasma's Keyboard Shortcuts tab) goes
+    // through openFromShortcut, never Plasma's plain toggle.
+    activationTogglesExpanded: false
+    Connections {
+        target: Plasmoid
+        function onActivated() {
+            root.openFromShortcut()
+        }
     }
 
     // Settings → General → Keep the popup open; also while a dialog is open.

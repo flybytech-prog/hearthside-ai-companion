@@ -282,4 +282,77 @@ TestCase {
         web.closeOverlay()
         verify(!web.overlayOpen)
     }
+
+    // --- zoom -----------------------------------------------------------
+
+    function localView(zoomMap) {
+        var web = make()
+        web.zoomMap = zoomMap
+        waitForCheck(1)
+        answer(web, "self")
+        verify(web.currentView !== null)
+        // Nothing listens on port 9: the load fails at once.
+        tryVerify(function () { return !web.currentView.loading }, 5000)
+        return web
+    }
+
+    function test_zoomFollowsTheMap() {
+        var web = localView({local: 1.25})
+        var view = web.currentView
+        fuzzyCompare(view.zoomFactor, 1.25, 0.001)
+        web.zoomMap = {local: 0.8, claude: 2.0}
+        fuzzyCompare(view.zoomFactor, 0.8, 0.001)
+        web.zoomMap = {}
+        fuzzyCompare(view.zoomFactor, 1.0, 0.001)
+    }
+
+    // Chromium's own Ctrl+wheel zoom moves zoomFactor by 0.1 a notch: one
+    // step that way is handed up for the page's site, never stored here.
+    function test_wheelZoomIsSnappedAndReported() {
+        var web = localView({local: 1.25})
+        var view = web.currentView
+        var asked = []
+        web.siteZoomRequested.connect(function (siteId, factor) { asked.push([siteId, factor]) })
+        // What main.qml does with the request.
+        web.siteZoomRequested.connect(function (siteId, factor) {
+            var map = Object.assign({}, web.zoomMap)
+            map[siteId] = factor
+            web.zoomMap = map
+        })
+        view.zoomFactor = 1.35
+        tryVerify(function () { return asked.length === 1 })
+        compare(asked[0][0], "local")
+        compare(asked[0][1], 1.5)
+        tryVerify(function () { return Math.abs(view.zoomFactor - 1.5) < 0.001 })
+        // Back on the binding, and no feedback loop.
+        wait(100)
+        compare(asked.length, 1)
+        web.zoomMap = {local: 0.75}
+        fuzzyCompare(view.zoomFactor, 0.75, 0.001)
+        compare(asked.length, 1)
+        // Down one step.
+        view.zoomFactor = 0.65
+        tryVerify(function () { return asked.length === 2 })
+        compare(asked[1], ["local", 0.67])
+        tryVerify(function () { return Math.abs(view.zoomFactor - 0.67) < 0.001 })
+        // Past the last step: nothing more to store, the zoom comes back.
+        web.zoomMap = {local: 2.0}
+        view.zoomFactor = 2.1
+        tryVerify(function () { return Math.abs(view.zoomFactor - 2.0) < 0.001 })
+        wait(100)
+        compare(asked.length, 2)
+    }
+
+    // main.qml may refuse (e.g. an unknown id): the stored zoom comes back.
+    function test_refusedWheelZoomGoesBack() {
+        var web = localView({local: 1.25})
+        var view = web.currentView
+        var asked = 0
+        web.siteZoomRequested.connect(function () { asked += 1 })
+        view.zoomFactor = 1.35
+        tryVerify(function () { return asked === 1 })
+        tryVerify(function () { return Math.abs(view.zoomFactor - 1.25) < 0.001 })
+        wait(100)
+        compare(asked, 1)
+    }
 }

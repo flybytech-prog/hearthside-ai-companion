@@ -65,6 +65,8 @@ CHAT_CONFIG_KEYS = {
     "chatAutoLockMinutes": ("Int", "0"),
     # Keep the popup open when clicking elsewhere.
     "chatKeepOpen": ("Bool", "false"),
+    # Per-site zoom, JSON {siteId: factor}; written only by main.qml (plan R1).
+    "chatSiteZoom": ("String", "{}"),
 }
 # The Ollama address (plan T4). Expected once main.xml has it or the Ollama
 # view exists, so it can neither be half-added nor forgotten.
@@ -82,6 +84,11 @@ GENERAL_CONFIG_KEYS = {
     "showChatTab": ("Bool", "true"),
     "popupSize": ("String", "normal"),
     "tooltipShowsUsage": ("Bool", "true"),
+    # Plan R1: what the global shortcut opens, and the usage alerts.
+    "shortcutOpens": ("String", "popup"),
+    "alertLowEnabled": ("Bool", "false"),
+    "alertLowPercent": ("Int", "20"),
+    "alertResetEnabled": ("Bool", "false"),
 }
 
 # Characters after which a "/" starts a regex literal rather than division.
@@ -1126,20 +1133,27 @@ def test_chat_files_never_write_the_plasmoid_config(filename):
     assert not lines, f"{_rel(path)} must never write Plasmoid.configuration; lines {sorted(set(lines))}"
 
 
+# The chat keys main.qml may write: the profile generation and the zoom map
+# (the zoom map only from zoomWriteTimer, see _zoom_write_problems).
+MAIN_WRITABLE_CHAT_KEYS = {"chatProfileGeneration", "chatSiteZoom"}
+
+
 def _main_config_write_offenders(code):
-    """main.qml may write chatProfileGeneration and no other chat key."""
+    """main.qml may write chatProfileGeneration and chatSiteZoom and no other chat key."""
     return [
         f"{_line_of(code, match.start())} {match.group(1)}"
         for match in re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*(chat\w*)\s*(?:[-+*/%&|^]|\?\?)?=(?!=)", code)
-        if match.group(1) != "chatProfileGeneration"
+        if match.group(1) not in MAIN_WRITABLE_CHAT_KEYS
     ] + [
         str(line) for line in _hits(r"\bPlasmoid\s*\.\s*configuration\s*\[", code)
     ]
 
 
-def test_main_writes_only_the_profile_generation_chat_key():
+def test_main_writes_only_the_profile_generation_and_zoom_chat_keys():
     offenders = _main_config_write_offenders(_read_code(MAIN_QML))
-    assert not offenders, f"{_rel(MAIN_QML)} may only write chatProfileGeneration among chat keys: {offenders}"
+    assert not offenders, (
+        f"{_rel(MAIN_QML)} may only write {sorted(MAIN_WRITABLE_CHAT_KEYS)} among chat keys: {offenders}"
+    )
 
 
 def test_proof_main_chat_config_write_is_caught():
@@ -1160,7 +1174,7 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
                 f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
             )
     literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0", "chatAutoLockMinutes": "0",
-                "chatKeepOpen": "false"}
+                "chatKeepOpen": "false", "chatSiteZoom": '"{}"'}
     if "chatOllamaUrl" in expected:
         literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
     for key, literal in literals.items():
@@ -1231,9 +1245,11 @@ def test_proof_missing_page_key_is_caught():
 
 
 # Keys main.qml may write: the profile generation, the schema and first-run
-# flags, the normalized refresh interval and the popup's Left/Used buttons.
+# flags, the normalized refresh interval, the popup's Left/Used buttons and
+# the debounced per-site zoom map.
 MAIN_WRITABLE_KEYS = {
     "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
+    "chatSiteZoom",
 }
 
 
@@ -3205,3 +3221,571 @@ def test_proof_helper_launch_rule_catches(path, old, new):
     sources = _all_code()
     sources[_rel(path)] = _mutated(path, old, new)
     assert _helper_launch_problems(sources)
+
+
+# --- R1: shortcut target, per-site zoom, usage alerts (plan T1.3) ----------------------
+#
+# R1 adds one chat key (chatSiteZoom) that main.qml writes, a Plasma activation
+# handler, and usage alerts through org.kde.notification. The rules below keep
+# each of those in its one allowed place.
+
+ALERT_LOGIC_JS = UI / "AlertLogic.js"
+NOTIFYRC = PLASMOID.parent / "assets" / "hearthside.notifyrc"
+ZOOM_WRITE = (r"\bPlasmoid\s*\.\s*configuration\s*\.\s*chatSiteZoom\s*"
+              r"(?:(?P<op>(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)=|\+\+|--)|(?P<eq>=(?!=)))")
+ZOOM_VALUE = re.compile(r"\s*SettingsLogic\s*\.\s*zoomMapToPersist\s*\(")
+ZOOM_TIMER_ID = re.compile(r"(?m)^\s*id\s*:\s*zoomWriteTimer\s*$")
+TRIGGERED_HANDLER = r"\bonTriggered\s*:\s*(?:function\s*\([^)]*\)\s*|\([^)]*\)\s*=>\s*)?\{"
+# Only the two chat views may declare keyboard shortcuts (zoom keys).
+KEY_SHORTCUT_FILES = ("ChatView.qml", "OllamaChatView.qml")
+
+
+def _appended(path, snippet):
+    """The real ``path`` with ``snippet`` inserted before its root item's closing brace."""
+    raw = path.read_text(encoding="utf-8")
+    cut = raw.rindex("}")
+    return _strip_comments(raw[:cut] + snippet + raw[cut:])
+
+
+def _main_and_others(sources):
+    main = sources.get(_rel(MAIN_QML), "")
+    others = {name: code for name, code in sources.items() if name != _rel(MAIN_QML)}
+    return main, others
+
+
+def _zoom_timer_handler_spans(code):
+    spans = []
+    for start, end in _block_spans(code, r"\bTimer\s*\{"):
+        body = code[start:end]
+        if ZOOM_TIMER_ID.search(body):
+            spans += [(start + s, start + e) for s, e in _block_spans(body, TRIGGERED_HANDLER)]
+    return spans
+
+
+# S1: a settings page that is open while main.qml stores a zoom takes the new
+# value, so Apply cannot write an old map back. This exact sync is the only
+# assignment to cfg_chatSiteZoom a page may make.
+CONFIG_CONNECTIONS_TARGET = re.compile(r"(?m)^\s*target\s*:\s*Plasmoid\s*\.\s*configuration\s*$")
+VALUE_CHANGED_HANDLER = r"\bfunction\s+onValueChanged\s*\(\s*key\s*,\s*value\s*\)\s*\{"
+ZOOM_SYNC = re.compile(r'\bif\s*\(\s*key\s*===\s*"chatSiteZoom"\s*\)\s*'
+                       r"(page\s*\.\s*cfg_chatSiteZoom\s*=\s*value)[ \t]*(?=\n|\}|$)")
+
+
+def _zoom_sync_offsets(code):
+    """Offsets of the allowed `page.cfg_chatSiteZoom = value` syncs in ``code``."""
+    offsets = []
+    for start, end in _block_spans(code, r"\bConnections\s*\{"):
+        if not CONFIG_CONNECTIONS_TARGET.search(code, start, end):
+            continue
+        for h_start, h_end in _block_spans(code[start:end], VALUE_CHANGED_HANDLER):
+            for match in ZOOM_SYNC.finditer(code, start + h_start, start + h_end):
+                offsets.append(match.start(1))
+    return offsets
+
+
+def _zoom_sync_problems(code):
+    """A page declaring cfg_chatSiteZoom syncs it exactly once, in the S1 form."""
+    if not re.search(r"(?m)^\s*property\s+\w+\s+cfg_chatSiteZoom\s*:", code):
+        return []
+    offsets = _zoom_sync_offsets(code)
+    return [] if len(offsets) == 1 else [f"want one S1 chatSiteZoom sync, got {len(offsets)}"]
+
+
+def _zoom_write_problems(sources):
+    """chatSiteZoom is written once, in main.qml's zoomWriteTimer handler, as `= SettingsLogic.zoomMapToPersist(`.
+
+    Pages may only take the stored value back in the S1 sync (``_zoom_sync_offsets``).
+    """
+    main, others = _main_and_others(sources)
+    problems = []
+    for name, code in others.items():
+        allowed = set(_zoom_sync_offsets(code))
+        problems += [f"{name}:{line} writes chatSiteZoom"
+                     for line in _hits(r"\bconfiguration\s*(?:\.\s*chatSiteZoom|\[[^\]]*chatSiteZoom[^\]]*\])"
+                                       r"\s*(?:[-+*/%&|^]|\?\?)?=(?!=)", code)]
+        problems += [f"{name}:{_line_of(code, match.start())} assigns cfg_chatSiteZoom outside the S1 sync"
+                     for match in re.finditer(r"(?:\bpage\s*\.\s*)?\bcfg_chatSiteZoom\s*"
+                                              r"(?:[-+*/%&|^]|\?\?)?=(?!=)|\bcfg_chatSiteZoom\s*(?:\+\+|--)", code)
+                     if match.start() not in allowed]
+    handlers = _zoom_timer_handler_spans(main)
+    writes = list(re.finditer(ZOOM_WRITE, main))
+    if len(writes) != 1:
+        problems.append(f"main.qml: want exactly one chatSiteZoom write, got {len(writes)}")
+    for match in writes:
+        line = _line_of(main, match.start())
+        if match.group("op") or not ZOOM_VALUE.match(main, match.end()):
+            problems.append(f"main.qml:{line}: chatSiteZoom must be written as `= SettingsLogic.zoomMapToPersist(`")
+        if not any(start <= match.start() < end for start, end in handlers):
+            problems.append(f"main.qml:{line}: chatSiteZoom written outside the zoomWriteTimer onTriggered handler")
+    return problems
+
+
+def test_chat_site_zoom_is_written_only_by_the_zoom_write_timer():
+    problems = _zoom_write_problems(_all_code())
+    assert not problems, problems
+
+
+ZOOM_WRITE_LINE = "Plasmoid.configuration.chatSiteZoom = SettingsLogic.zoomMapToPersist("
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (ZOOM_WRITE_LINE, "Plasmoid.configuration.chatSiteZoom = JSON.stringify("),
+    (ZOOM_WRITE_LINE, "Plasmoid.configuration.chatSiteZoom += SettingsLogic.zoomMapToPersist("),
+    (ZOOM_WRITE_LINE, "void (SettingsLogic.zoomMapToPersist("),
+    ("id: zoomWriteTimer", "id: otherTimer"),
+])
+def test_proof_zoom_write_rule_catches(old, new):
+    sources = _all_code()
+    sources[_rel(MAIN_QML)] = _mutated(MAIN_QML, old, new)
+    assert _zoom_write_problems(sources)
+
+
+def test_proof_zoom_write_outside_the_timer_is_caught():
+    sources = _all_code()
+    sources[_rel(MAIN_QML)] = _mutated(
+        MAIN_QML, "    function chatNext() {",
+        "    function chatNext() {\n        Plasmoid.configuration.chatSiteZoom = SettingsLogic.zoomMapToPersist({}, \"x\", 1)",
+    )
+    assert _zoom_write_problems(sources)
+
+
+@pytest.mark.parametrize(("path", "snippet"), [
+    (CHAT_VIEW, "    function z() { Plasmoid.configuration.chatSiteZoom = \"{}\" }\n"),
+    (CHAT_VIEW, "    function z() { Plasmoid.configuration[\"chatSiteZoom\"] = \"{}\" }\n"),
+    (CONFIG_PAGES[0], "    function z() { cfg_chatSiteZoom = \"{}\" }\n"),
+    *[(page, "    function z() { page.cfg_chatSiteZoom = \"{}\" }\n") for page in CONFIG_PAGES],
+    (CONFIG_PAGES[1], "    Component.onCompleted: page.cfg_chatSiteZoom = value\n"),
+])
+def test_proof_zoom_write_in_another_file_is_caught(path, snippet):
+    sources = _all_code()
+    sources[_rel(path)] = _appended(path, snippet)
+    assert _zoom_write_problems(sources)
+
+
+def _activation_problems(sources):
+    """`activationTogglesExpanded: false` once, in main.qml, and the name nowhere else."""
+    main, others = _main_and_others(sources)
+    problems = [f"{name}:{line}" for name, code in others.items()
+                for line in _hits(r"\bactivationTogglesExpanded\b", code)]
+    every = _hits(r"\bactivationTogglesExpanded\b", main)
+    wanted = _hits(r"(?m)^\s*activationTogglesExpanded\s*:\s*false\s*$", main)
+    if len(every) != 1 or len(wanted) != 1:
+        problems.append(f"main.qml: want `activationTogglesExpanded: false` exactly once, got lines {every}")
+    return problems
+
+
+def test_activation_toggles_expanded_is_off_once_in_main():
+    problems = _activation_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("activationTogglesExpanded: false", "activationTogglesExpanded: true"),
+    ("activationTogglesExpanded: false", "activationTogglesExpanded: !false"),
+    ("activationTogglesExpanded: false", "activationTogglesExpanded: false\n    activationTogglesExpanded: false"),
+    ("activationTogglesExpanded: false", "id: notIt"),
+])
+def test_proof_activation_rule_catches(old, new):
+    sources = _all_code()
+    sources[_rel(MAIN_QML)] = _mutated(MAIN_QML, old, new)
+    assert _activation_problems(sources)
+
+
+def test_proof_activation_flag_elsewhere_is_caught():
+    sources = _all_code()
+    sources[_rel(FULL_REPRESENTATION)] = _appended(
+        FULL_REPRESENTATION, "    function f() { Plasmoid.activationTogglesExpanded = true }\n")
+    assert _activation_problems(sources)
+
+
+def _notification_import_problems(sources):
+    """org.kde.notification (and Notification items) only in main.qml, imported once."""
+    main, others = _main_and_others(sources)
+    problems = [
+        f"{name}:{line}"
+        for name, code in others.items()
+        for pattern in (r"\borg\s*\.\s*kde\s*\.\s*notification\b", r"\bNotification\s*\{")
+        for line in _hits(pattern, code)
+    ]
+    imports = _hits(r"(?m)^\s*import\s+org\.kde\.notification\b", main)
+    if len(imports) != 1:
+        problems.append(f"main.qml: want one `import org.kde.notification`, got lines {imports}")
+    return problems
+
+
+def test_notifications_are_imported_only_by_main():
+    problems = _notification_import_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("path", [FULL_REPRESENTATION, CHAT_VIEW, UI / "UsageView.qml"], ids=lambda p: p.name)
+def test_proof_notification_import_elsewhere_is_caught(path):
+    sources = _all_code()
+    sources[_rel(path)] = _mutated(path, "import QtQuick\n", "import QtQuick\nimport org.kde.notification\n")
+    assert _notification_import_problems(sources)
+
+
+def test_proof_missing_notification_import_is_caught():
+    sources = _all_code()
+    sources[_rel(MAIN_QML)] = re.sub(r"(?m)^\s*import\s+org\.kde\.notification\b.*$", "", sources[_rel(MAIN_QML)])
+    assert _notification_import_problems(sources)
+
+
+def _call_spans(code, opener):
+    """(start, end) of each parenthesized argument list whose ``opener`` regex ends at "("."""
+    blanked = _strip_comments(code, blank_strings=True)
+    spans = []
+    for match in re.finditer(opener, blanked):
+        depth = 0
+        for index in range(match.end() - 1, len(blanked)):
+            if blanked[index] == "(":
+                depth += 1
+            elif blanked[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.end(), index))
+                    break
+    return spans
+
+
+def _expression_end(blanked, start):
+    """End of the expression at ``start``: a depth-0 comma, semicolon, newline or closing bracket."""
+    depth = 0
+    for index in range(start, len(blanked)):
+        char = blanked[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif depth == 0 and char in ",;\n":
+            return index
+    return len(blanked)
+
+
+def _only_i18n(blanked, start, end):
+    """``blanked[start:end]`` is `i18n(...)` or `cond ? <only_i18n> : <only_i18n>`."""
+    while start < end and blanked[start].isspace():
+        start += 1
+    while end > start and blanked[end - 1].isspace():
+        end -= 1
+    depth, question, pending = 0, None, 0
+    for index in range(start, end):
+        char = blanked[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and char == "?":
+            question = index if question is None else question
+            pending += 1
+        elif depth == 0 and char == ":" and pending:
+            pending -= 1
+            if pending == 0:   # the ":" of the outermost ternary; the condition may be anything
+                return _only_i18n(blanked, question + 1, index) and _only_i18n(blanked, index + 1, end)
+    call = re.compile(r"i18n\s*\(").match(blanked, start)
+    if not call:
+        return False
+    depth = 0
+    for index in range(call.end() - 1, end):
+        depth += blanked[index] == "("
+        depth -= blanked[index] == ")"
+        if depth == 0:
+            return index == end - 1   # the call's own ")" ends the expression: nothing appended
+    return False
+
+
+def _notification_text_problems(code):
+    """Notification title/text come only from i18n(, in items, createObject maps and assignments."""
+    blanked = _strip_comments(code, blank_strings=True)
+    problems = []
+    places = [(start, end, r"(?m)(?:^|[{;])\s*(title|text)\s*:") for start, end
+              in _block_spans(code, r"\bNotification\s*\{")]
+    places += [(start, end, r"\b(title|text)\s*:") for start, end in _call_spans(code, r"\.\s*createObject\s*\(")]
+    places += [(0, len(code), r"\.\s*(title|text)\s*=(?!=)")]
+    for start, end, pattern in places:
+        for match in re.compile(pattern).finditer(blanked, start, end):
+            if not _only_i18n(blanked, match.end(), _expression_end(blanked, match.end())):
+                problems.append(f"main.qml:{_line_of(code, match.start())}: {match.group(1)} not only from i18n(")
+    return problems
+
+
+def test_notification_title_and_text_come_only_from_i18n():
+    code = _read_code(MAIN_QML)
+    assert _block_spans(code, r"\bNotification\s*\{"), f"{_rel(MAIN_QML)} declares no Notification item"
+    problems = _notification_text_problems(code)
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("snippet", [
+    "Notification {\n    title: i18n(\"%1 is running low\", name)\n    text: i18n(\"%1: %2% left\", m, n)\n}",
+    "Notification { title: i18n(\"a\"); text: i18n(\"b (%1)\", f(x, [1, 2])) }",
+    "function f(c, a) { c.createObject(root, {eventId: \"usageLow\", title: a.low ? i18n(\"x\") : i18n(\"y\"),"
+    " text: i18n(\"%1\", a.left)}) }",
+    "function f(n, a) { n.text = a.x ? i18n(\"x\") : a.y ? i18n(\"y\") : i18n(\"z\"); n.sendEvent() }",
+])
+def test_notification_text_rule_accepts_i18n_forms(snippet):
+    assert _notification_text_problems(_strip_comments(snippet)) == []
+
+
+@pytest.mark.parametrize("snippet", [
+    "Notification { title: alert.name; text: i18n(\"x\") }",
+    "Notification { title: i18n(\"x\"); text: alert.metric }",
+    "Notification {\n        text: \"%1 left\".arg(n)\n    }",
+    "function f(c, a) { c.createObject(root, {title: a.name, text: i18n(\"x\")}) }",
+    "function f(c, a) { c.createObject(root, {title: i18n(\"x\"), text: a.metric}) }",
+    "function f(n, a) { n.title = a.name }",
+    "function f(n, a) { n.text = i18nd(\"x\", a) }",
+    "function f(n, a) { n.text = a.low ? i18n(\"x\") : a.name }",
+    "function f(n, a) { n.title = i18n(\"x\") + a.name }",
+    "function f(c, a) { c.createObject(root, {title: a.low ? a.name : i18n(\"x\")}) }",
+])
+def test_proof_notification_text_rule_catches(snippet):
+    code = _mutated(MAIN_QML, "    function chatNext() {", f"    {snippet}\n    function chatNext() {{")
+    assert _notification_text_problems(code)
+
+
+NOTIFICATION_BANNED = {
+    "NotificationAction": r"\bNotification(?:Reply)?Action\b",
+    "urls": r"\burls\s*:|\.\s*urls\s*=(?!=)",
+}
+NOTIFICATION_BLOCK_BANNED = r"(?m)(?:^|[{;])\s*(?:actions|defaultAction|replyAction)\s*:"
+
+
+def _notification_extra_problems(sources):
+    """No `urls:` and no actions: an alert is text only, nothing to click or open."""
+    main, _ = _main_and_others(sources)
+    problems = [
+        f"{name}:{line} {word}"
+        for name, code in sources.items()
+        for word, pattern in NOTIFICATION_BANNED.items()
+        if word == "NotificationAction" or "org.kde.notification" in code or name == _rel(MAIN_QML)
+        for line in _hits(pattern, code)
+    ]
+    for start, end in _block_spans(main, r"\bNotification\s*\{"):
+        for match in re.compile(NOTIFICATION_BLOCK_BANNED).finditer(main, start, end):
+            problems.append(f"main.qml:{_line_of(main, match.start())} notification action")
+    return problems
+
+
+def test_notifications_have_no_urls_or_actions():
+    problems = _notification_extra_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("target", "snippet"), [
+    (MAIN_QML, "    function f(c) { c.createObject(root, {urls: [\"file:///tmp\"]}) }\n"),
+    (MAIN_QML, "    function f(n) { n.urls = [] }\n"),
+    (MAIN_QML, "    NotificationAction { text: i18n(\"Open\") }\n"),
+    (MAIN_QML, "    Notification { actions: [] }\n"),
+    (MAIN_QML, "    Notification {\n        defaultAction: null\n    }\n"),
+    (CHAT_VIEW, "    property var a: NotificationAction {}\n"),
+])
+def test_proof_notification_extra_rule_catches(target, snippet):
+    sources = _all_code()
+    sources[_rel(target)] = _appended(target, snippet)
+    assert _notification_extra_problems(sources)
+
+
+def _notifyrc_events():
+    text = NOTIFYRC.read_text(encoding="utf-8")
+    return set(re.findall(r"(?m)^\[Event/(\w+)\]\s*$", text))
+
+
+def test_alerts_use_the_installed_notifyrc_events():
+    code = _read_code(MAIN_QML)
+    components = re.findall(r"\bcomponentName\s*[:=]\s*([^;\n,}]+)", code)
+    assert components and all(value.strip() == '"hearthside"' for value in components), (
+        f"{_rel(MAIN_QML)}: componentName must be \"hearthside\" (assets/hearthside.notifyrc), got {components}"
+    )
+    used = set(re.findall(r'"(usage[A-Z]\w*)"', code))
+    assert used == _notifyrc_events() == {"usageLow", "usageReset"}, (
+        f"{_rel(MAIN_QML)} event ids {sorted(used)} must match assets/hearthside.notifyrc {sorted(_notifyrc_events())}"
+    )
+
+
+ALERT_LOGIC_FORBIDDEN = {
+    "import": r"(?m)^\s*\.?import\b",
+    "Qt.": r"\bQt\s*\.",
+    "console": r"\bconsole\b",
+    "XMLHttpRequest": r"\bXMLHttpRequest\b",
+    "Plasmoid": r"\bPlasmoid\b",
+}
+
+
+def _alert_logic_problems(code):
+    problems = [] if re.match(r"\s*\.pragma\s+library\b", code) else ["must start with .pragma library"]
+    return problems + [f"{word} at line {line}" for word, pattern in ALERT_LOGIC_FORBIDDEN.items()
+                       for line in _hits(pattern, code)]
+
+
+def test_alert_logic_js_is_a_pure_library():
+    problems = _alert_logic_problems(_read_code(ALERT_LOGIC_JS))
+    assert not problems, f"{_rel(ALERT_LOGIC_JS)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '.import "SnapshotLogic.js" as SnapshotLogic',
+    "function f() { return Qt.formatDateTime(new Date()) }",
+    "function f() { console.log(1) }",
+    "function f() { return new XMLHttpRequest() }",
+    "function f() { return Plasmoid.configuration }",
+])
+def test_proof_alert_logic_rule_catches(snippet):
+    assert _alert_logic_problems(_read_code(ALERT_LOGIC_JS) + "\n" + snippet + "\n")
+
+
+def test_proof_alert_logic_needs_pragma():
+    code = re.sub(r"^\s*\.pragma\s+library\b", "", _read_code(ALERT_LOGIC_JS), count=1)
+    assert _alert_logic_problems(code)
+
+
+def _key_shortcut_offenders(sources):
+    """Shortcut items and StandardKey only in the two chat views."""
+    return [
+        f"{name}:{line}"
+        for name, code in sources.items() if Path(name).name not in KEY_SHORTCUT_FILES
+        for pattern in (r"\bShortcut\s*\{", r"\bStandardKey\b")
+        for line in _hits(pattern, code)
+    ]
+
+
+def test_keyboard_shortcuts_live_only_in_the_chat_views():
+    offenders = _key_shortcut_offenders(_all_code())
+    assert not offenders, f"Shortcut/StandardKey only in {KEY_SHORTCUT_FILES}: {offenders}"
+
+
+@pytest.mark.parametrize(("target", "snippet"), [
+    (MAIN_QML, "    Shortcut { sequence: \"Ctrl+0\" }\n"),
+    (FULL_REPRESENTATION, "    Shortcut {\n        sequences: [StandardKey.ZoomIn]\n    }\n"),
+    (CHAT_WEB_VIEW, "    property var k: StandardKey.ZoomOut\n"),
+    (UI / "configGeneral.qml", "    function f() { return Qt.createQmlObject(\"Shortcut { }\", page) }\n"),
+])
+def test_proof_key_shortcut_rule_catches(target, snippet):
+    sources = _all_code()
+    sources[_rel(target)] = _appended(target, snippet)
+    assert _key_shortcut_offenders(sources)
+
+
+ZOOM_SYNC_TEXT = 'else if (key === "chatSiteZoom")\n                page.cfg_chatSiteZoom = value'
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+def test_config_pages_take_the_stored_zoom_back(page):
+    problems = _zoom_sync_problems(_read_code(page))
+    assert not problems, f"{_rel(page)}: {problems}"
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+@pytest.mark.parametrize("new", [
+    "",                                                                         # sync removed
+    'else if (key === "chatSiteZoom")\n                page.cfg_chatSiteZoom = "{}"',
+    'else if (key === "chatSiteZoom")\n                page.cfg_chatSiteZoom = value + ""',
+    'else if (key === "chatProfileGeneration")\n                page.cfg_chatSiteZoom = value',
+    'else if (key === "chatSiteZoom")\n                page.cfg_chatSiteZoom = value\n'
+    '            if (key === "chatSiteZoom")\n                page.cfg_chatSiteZoom = value',
+], ids=["removed", "literal", "appended", "other-key", "twice"])
+def test_proof_zoom_sync_rule_catches(page, new):
+    code = _mutated(page, ZOOM_SYNC_TEXT, new)
+    sources = _all_code()
+    sources[_rel(page)] = code
+    assert _zoom_sync_problems(code) or _zoom_write_problems(sources)
+
+
+def test_proof_zoom_sync_outside_the_config_connections_is_caught():
+    page = CONFIG_PAGES[0]
+    code = _mutated(page, "target: Plasmoid.configuration\n", "target: page\n")
+    assert _zoom_sync_problems(code)
+
+
+# S3: the alert Notification gets catalog names and a clamped whole number
+# only, never helper or site text. Its title/text are i18n( (rule above).
+ALERT_ARGUMENTS = {
+    "reset": re.compile(r'alert\s*\.\s*kind\s*===\s*"reset"'),
+    "providerName": re.compile(r"descriptor\s*\.\s*display_name"),
+    "metricName": re.compile(r"root\s*\.\s*markupSafe\s*\(\s*metric\s*\.\s*title\s*\)"),
+}
+# percentLeft: a Math.* expression over alert.left and number literals.
+PERCENT_LEFT_WORDS = {"Math", "max", "min", "round", "floor", "ceil", "trunc", "Number", "alert", "left"}
+
+
+def _object_entries(blanked, start, end):
+    """(key, value start, value end) for each top-level entry of the object literal in blanked[start:end]."""
+    open_brace = blanked.find("{", start, end)
+    if open_brace == -1 or blanked[start:open_brace].strip(" \t\n,") != "root":
+        return None
+    entries, depth, entry_start = [], 0, open_brace + 1
+    for index in range(open_brace + 1, end):
+        char = blanked[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}" and depth:
+            depth -= 1
+        elif depth == 0 and char in ",}":
+            text = blanked[entry_start:index]
+            if text.strip():
+                match = re.match(r"\s*(\w+)\s*:", text)
+                if not match:
+                    return None
+                entries.append((match.group(1), entry_start + match.end(), index))
+            entry_start = index + 1
+            if char == "}":
+                if blanked[index + 1:end].strip():
+                    return None
+                return entries
+    return None
+
+
+def _alert_argument_problems(code):
+    blanked = _strip_comments(code, blank_strings=True)
+    calls = _call_spans(code, r"\balertNotification\s*\.\s*createObject\s*\(")
+    if len(calls) != 1:
+        return [f"want one alertNotification.createObject call, got {len(calls)}"]
+    entries = _object_entries(blanked, *calls[0])
+    if entries is None:
+        return ["alertNotification.createObject must be (root, { ... }) with plain key: value entries"]
+    problems = []
+    keys = [key for key, _, _ in entries]
+    if sorted(keys) != sorted([*ALERT_ARGUMENTS, "percentLeft"]):
+        problems.append(f"keys must be exactly {sorted([*ALERT_ARGUMENTS, 'percentLeft'])}, got {keys}")
+    for key, start, end in entries:
+        value = code[start:end].strip()
+        if key in ALERT_ARGUMENTS and not ALERT_ARGUMENTS[key].fullmatch(value):
+            problems.append(f"{key}: {value!r}")
+        elif key == "percentLeft":
+            words = set(re.findall(r"[A-Za-z_]\w*", value))
+            if (not re.match(r"Math\s*\.\s*\w+\s*\(", value) or not words <= PERCENT_LEFT_WORDS
+                    or re.search(r"[\"'`]", value)):
+                problems.append(f"percentLeft must be a Math.* expression over alert.left: {value!r}")
+    return problems
+
+
+def test_alert_notification_arguments_are_pinned():
+    problems = _alert_argument_problems(_read_code(MAIN_QML))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("providerName: descriptor.display_name", "providerName: root.lastError"),
+    ("providerName: descriptor.display_name", "providerName: descriptor.display_name + root.lastError"),
+    ("metricName: root.markupSafe(metric.title)", "metricName: metric.title"),
+    ("metricName: root.markupSafe(metric.title)", "metricName: root.markupSafe(root.lastError)"),
+    ('reset: alert.kind === "reset"', "reset: true"),
+    ("percentLeft: Math.max(", "percentLeft: root.lastError, x: Math.max("),
+    ("percentLeft: Math.max(0, Math.min(100, Math.round(Number(alert.left) || 0)))", "percentLeft: alert.left"),
+    ("percentLeft: Math.max(0, Math.min(100, Math.round(Number(alert.left) || 0)))",
+     "percentLeft: Math.round(root.lastError.length)"),
+    ("percentLeft: Math.max(0, Math.min(100, Math.round(Number(alert.left) || 0)))",
+     'percentLeft: Math.round(Number(alert.left) || "x")'),
+    ('reset: alert.kind === "reset",', 'reset: alert.kind === "reset",\n            title: i18n("x"),'),
+    ("alertNotification.createObject(root, {", "alertNotification.createObject(root, root.lastArgs || {"),
+])
+def test_proof_alert_argument_rule_catches(old, new):
+    assert _alert_argument_problems(_mutated(MAIN_QML, old, new))
+
+
+def test_proof_second_alert_create_is_caught():
+    code = _mutated(MAIN_QML, "    function setUsageMode(mode) {",
+                    "    function x() { alertNotification.createObject(root, {}) }\n    function setUsageMode(mode) {")
+    assert _alert_argument_problems(code)

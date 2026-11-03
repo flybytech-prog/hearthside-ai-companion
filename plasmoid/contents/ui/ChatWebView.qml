@@ -5,6 +5,7 @@ import QtWebEngine
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import "ChatSites.js" as ChatSites
+import "SettingsLogic.js" as SettingsLogic
 
 // The only file that touches Qt WebEngine. Everything lives in one profile.
 // By default it is off the record: cookies, cache and site storage stay in
@@ -42,6 +43,12 @@ Item {
     property var customUrls: ({})
     // Only makes the owner check's helper source name unique.
     property int appletId: 0
+    // Per-site zoom {siteId: factor}; a sign-in window uses its site's.
+    property var zoomMap: ({})
+
+    // A page was zoomed with Ctrl+wheel (Chromium's own zoom): main.qml
+    // stores factor, a ZOOM_STEPS value, for siteId. Never written here.
+    signal siteZoomRequested(string siteId, real factor)
 
     property var currentView: null
     readonly property bool overlayOpen: chatWeb.overlayView !== null
@@ -558,6 +565,13 @@ Item {
             property double ownerPassExpires: 0
             // Sign-in window only: the address of the page that opened it.
             property string openerUrl: ""
+            readonly property real wantedZoom: SettingsLogic.zoomFor(chatWeb.zoomMap, page.site)
+            // The last zoom change came while a page was loading.
+            property bool zoomedWhileLoading: false
+
+            // Chromium keeps it across navigations (spike Z1), so it is
+            // bound once.
+            zoomFactor: page.wantedZoom
 
             anchors.fill: parent
             visible: page.isOverlay || page.site === chatWeb.siteId
@@ -711,6 +725,29 @@ Item {
                     page.failed = true
                 if (loadingInfo.status !== WebEngineLoadingInfo.LoadStartedStatus)
                     Qt.callLater(chatWeb.syncUserAgent)
+            }
+
+            // Ctrl+wheel zooms inside Chromium itself: the zoom moves one
+            // step that way and is stored for the page's site (a sign-in
+            // window's too), then the binding is back. While a page loads
+            // a change is never stored, only undone.
+            onZoomFactorChanged: {
+                if (Math.abs(page.zoomFactor - page.wantedZoom) > 0.001) {
+                    page.zoomedWhileLoading = page.loading
+                    Qt.callLater(page.adoptZoom)
+                }
+            }
+
+            function adoptZoom() {
+                // Qt WebEngine's wheel zoom moves by 0.1 a notch: one step
+                // that way, so 1.25 → 1.35 means 1.5, never back to 1.25.
+                var factor = SettingsLogic.zoomStep(page.wantedZoom,
+                    page.zoomFactor > page.wantedZoom ? 1 : -1)
+                if (!page.zoomedWhileLoading && Math.abs(factor - page.wantedZoom) > 0.001)
+                    chatWeb.siteZoomRequested(page.site, factor)
+                // The stored zoom (new or old); equal values change nothing,
+                // so this can't loop.
+                page.zoomFactor = Qt.binding(function () { return page.wantedZoom })
             }
 
             onRenderProcessTerminated: (terminationStatus, exitCode) => {

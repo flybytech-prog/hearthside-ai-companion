@@ -58,6 +58,18 @@ KCM.SimpleKCM {
     property string cfg_popupSizeDefault: "normal"
     property bool cfg_tooltipShowsUsage: true
     property bool cfg_tooltipShowsUsageDefault: true
+    property string cfg_shortcutOpens: "popup"
+    property string cfg_shortcutOpensDefault: "popup"
+    // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so
+    // Apply never writes back an old value.
+    property string cfg_chatSiteZoom: "{}"
+    property string cfg_chatSiteZoomDefault: "{}"
+    property bool cfg_alertLowEnabled: false
+    property bool cfg_alertLowEnabledDefault: false
+    property int cfg_alertLowPercent: 20
+    property int cfg_alertLowPercentDefault: 20
+    property bool cfg_alertResetEnabled: false
+    property bool cfg_alertResetEnabledDefault: false
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
@@ -68,6 +80,15 @@ KCM.SimpleKCM {
         { value: 1800, text: i18n("30 minutes") },
         { value: 3600, text: i18n("1 hour") }
     ]
+    readonly property var shortcutChoices: [
+        { value: "popup", text: i18n("As when clicking the icon") },
+        { value: "chat", text: i18n("Chat") },
+        { value: "ollama", text: i18n("Ollama message box") },
+        { value: "usage", text: i18n("Usage") }
+    ]
+    readonly property var alertChoices: SettingsLogic.ALERT_PERCENTS.map(function (percent) {
+        return { value: percent, text: i18n("%1%", percent) }
+    })
     readonly property var sizeChoices: [
         { value: "compact", text: i18n("Compact") },
         { value: "normal", text: i18n("Normal") },
@@ -207,12 +228,15 @@ KCM.SimpleKCM {
         page.runVault("status")
     }
 
-    // main.qml may move to a new generation while this page is open.
+    // main.qml may move to a new generation or store a zoom while this page
+    // is open.
     Connections {
         target: Plasmoid.configuration
         function onValueChanged(key, value) {
             if (key === "chatProfileGeneration")
                 page.cfg_chatProfileGeneration = value
+            else if (key === "chatSiteZoom")
+                page.cfg_chatSiteZoom = value
         }
     }
 
@@ -304,6 +328,24 @@ KCM.SimpleKCM {
             onToggled: page.cfg_chatKeepOpen = checked
         }
 
+        RowLayout {
+            Kirigami.FormData.label: i18n("Keyboard shortcut opens:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.ComboBox {
+                objectName: "shortcutOpensChoice"
+                textRole: "text"
+                valueRole: "value"
+                model: page.shortcutChoices
+                currentIndex: page.choiceIndex(page.shortcutChoices,
+                    SettingsLogic.normalizeShortcutTarget(page.cfg_shortcutOpens), 0)
+                onActivated: page.cfg_shortcutOpens = currentValue
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Choose the key in the Keyboard Shortcuts tab. Pressing it again closes the popup. Ollama message box opens the popup as usual while Ollama is off or the Chat tab is hidden; a hidden tab opens the other one.")
+            }
+        }
+
         // --- Usage ----------------------------------------------------------
 
         Kirigami.Separator {
@@ -343,6 +385,52 @@ KCM.SimpleKCM {
             text: i18n("Show usage when hovering over the panel icon")
             checked: page.cfg_tooltipShowsUsage
             onToggled: page.cfg_tooltipShowsUsage = checked
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Notifications:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "alertLowChoice"
+                enabled: page.cfg_showUsageTab
+                text: i18n("Notify when a plan drops below")
+                checked: page.cfg_alertLowEnabled
+                onToggled: page.cfg_alertLowEnabled = checked
+            }
+            QQC2.ComboBox {
+                objectName: "alertLowPercentChoice"
+                enabled: page.cfg_showUsageTab && page.cfg_alertLowEnabled
+                textRole: "text"
+                valueRole: "value"
+                model: page.alertChoices
+                currentIndex: page.choiceIndex(page.alertChoices,
+                    SettingsLogic.normalizeAlertPercent(page.cfg_alertLowPercent), 3)
+                onActivated: page.cfg_alertLowPercent = currentValue
+                Accessible.name: i18n("Percent left")
+            }
+            QQC2.Label {
+                enabled: page.cfg_showUsageTab && page.cfg_alertLowEnabled
+                text: i18n("left")
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Shows one notification when a plan's usage left reaches this level, whether the popup shows Left or Used. It is checked at every usage refresh, only while the Usage tab is shown. A plan that is already this low when Plasma starts doesn't notify. Notifications can be muted under System Settings → Notifications → Hearthside.")
+            }
+        }
+
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "alertResetChoice"
+                enabled: page.cfg_showUsageTab
+                text: i18n("Notify when a plan resets")
+                checked: page.cfg_alertResetEnabled
+                onToggled: page.cfg_alertResetEnabled = checked
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Shows a notification when a plan that had dropped to the level above starts over with its next period. A notification names the provider, the plan and a percentage; Plasma may keep it in its notification history.")
+            }
         }
 
         // --- Privacy --------------------------------------------------------

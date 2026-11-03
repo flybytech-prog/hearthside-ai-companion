@@ -43,10 +43,16 @@ ColumnLayout {
     property bool storageBusy: false
     // Overridable by tests only.
     property url webSource: Qt.resolvedUrl("ChatWebView.qml")
+    // Per-site zoom {siteId: factor}, owned by main.qml.
+    property var zoomMap: ({})
 
     // create, unlock, private, lock, auto-lock, retry, held-open, clear-saved,
     // open, recheck, dismiss-notice, saved-session
     signal storageRequest(string action)
+    // Ctrl+= / Ctrl+- / Ctrl+0 on the site shown: +1, -1 or 0 (reset).
+    signal zoomRequested(int direction)
+    // Ctrl+wheel in a page: store factor (a ZOOM_STEPS value) for siteId.
+    signal siteZoomRequested(string siteId, real factor)
 
     property bool started: false
     property bool clearing: false
@@ -340,6 +346,24 @@ ColumnLayout {
         chatView.syncLoader()
     }
 
+    // Zoom keys, also while the page has the focus. Ctrl+wheel is Chromium's
+    // own; ChatWebView reports it through siteZoomRequested.
+    Shortcut {
+        sequences: [StandardKey.ZoomIn, "Ctrl+="]
+        enabled: chatView.current && chatView.available
+        onActivated: chatView.zoomRequested(1)
+    }
+    Shortcut {
+        sequences: [StandardKey.ZoomOut]
+        enabled: chatView.current && chatView.available
+        onActivated: chatView.zoomRequested(-1)
+    }
+    Shortcut {
+        sequence: "Ctrl+0"
+        enabled: chatView.current && chatView.available
+        onActivated: chatView.zoomRequested(0)
+    }
+
     Timer {
         id: idleTimer
         interval: Math.max(1000, ChatStorage.autoLockCheckInterval(chatView.autoLockMinutes))
@@ -351,6 +375,9 @@ ColumnLayout {
     Connections {
         target: chatView.web
         ignoreUnknownSignals: true
+        function onSiteZoomRequested(siteId, factor) {
+            chatView.siteZoomRequested(siteId, factor)
+        }
         // A failing page may mean the folder went away: let main.qml check.
         function onPageFailedChanged() {
             if (chatView.web && chatView.web.pageFailed && chatView.persistentActive)
@@ -626,6 +653,7 @@ ColumnLayout {
                 // customUrls first: the first page load must already use them.
                 webLoader.item.appletId = Qt.binding(function () { return chatView.appletId })
                 webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
+                webLoader.item.zoomMap = Qt.binding(function () { return chatView.zoomMap })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })
                 chatView.focusLater()

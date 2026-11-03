@@ -70,6 +70,25 @@ ColumnLayout {
     property var unloadNames: []
     // Change handlers wait for this: they also run while the view is built.
     property bool completed: false
+    // Ctrl+= / Ctrl+- / Ctrl+0 size of the transcript and message box, from
+    // main.qml's zoom map ("ollama").
+    property real textScale: 1.0
+    // Ctrl+wheel: angle not yet used up (one step per 120, a mouse notch).
+    property real wheelZoomAngle: 0
+    // The transcript follows the newest text until the user scrolls up;
+    // back at the bottom, or on the next send, it follows again.
+    property bool followTranscript: true
+    // The user is moving the transcript (drag, flick, wheel, scroll bar):
+    // it is never pinned meanwhile.
+    readonly property bool transcriptHeld: transcriptView.moving
+        || transcriptScroll.QQC2.ScrollBar.vertical.pressed
+    // A message was sent while the transcript was held.
+    property bool sentWhileHeld: false
+    // Scrolled up away from the newest text: Back to bottom is offered.
+    readonly property bool showBackToBottom: !ollamaView.followTranscript
+        && transcript.count > 0 && !ollamaView.transcriptAtBottom()
+    readonly property font bodyFont: ollamaView.scaledFont(Kirigami.Theme.defaultFont)
+    readonly property font codeFont: ollamaView.scaledFont(Kirigami.Theme.fixedWidthFont)
 
     property alias messages: transcript
     readonly property int port: OllamaChat.portOf(ollamaView.address)
@@ -85,7 +104,82 @@ ColumnLayout {
         && input.text.trim() !== "" && !ollamaView.promptTooLong
     readonly property bool hasConversation: transcript.count > 0 || ollamaView.generating
 
+    // +1, -1 or 0 (reset), handled by main.qml.
+    signal zoomRequested(int direction)
+
     spacing: 0
+    // Nothing of the view paints outside it (e.g. over the popup's tabs).
+    clip: true
+
+    function scaledFont(base) {
+        if (ollamaView.textScale === 1.0)
+            return base
+        var spec = { family: base.family, weight: base.weight, italic: base.italic }
+        if (base.pixelSize > 0)
+            spec.pixelSize = Math.max(1, Math.round(base.pixelSize * ollamaView.textScale))
+        else
+            spec.pointSize = base.pointSize * ollamaView.textScale
+        return Qt.font(spec)
+    }
+
+    // Ctrl+wheel over the conversation or the message box: one step per
+    // notch, smaller touchpad moves add up. A plain wheel still scrolls.
+    function wheelZoom(wheel) {
+        if (!ollamaView.current)
+            return
+        ollamaView.wheelZoomAngle += wheel.angleDelta.y
+        while (Math.abs(ollamaView.wheelZoomAngle) >= 120) {
+            var direction = ollamaView.wheelZoomAngle > 0 ? 1 : -1
+            ollamaView.wheelZoomAngle -= direction * 120
+            ollamaView.zoomRequested(direction)
+        }
+    }
+
+    // The transcript's last position, bottom margin included.
+    function transcriptEnd() {
+        var list = transcriptView
+        return Math.max(list.originY - list.topMargin,
+            list.originY + list.contentHeight + list.bottomMargin - list.height)
+    }
+
+    // Within a line of the end, so a pixel off still counts as the bottom.
+    function transcriptAtBottom() {
+        return transcriptView.contentY >= ollamaView.transcriptEnd() - Kirigami.Units.gridUnit
+    }
+
+    // positionViewAtEnd() creates the last items but stops short of the
+    // bottom margin; the exact end follows.
+    function scrollToEnd() {
+        transcriptView.positionViewAtEnd()
+        transcriptView.contentY = ollamaView.transcriptEnd()
+    }
+
+    // Runs after the new text is laid out (contentHeight changed), never
+    // straight after it is set: the reply's height isn't known yet then.
+    function pinTranscript() {
+        if (ollamaView.followTranscript && !ollamaView.transcriptHeld)
+            ollamaView.scrollToEnd()
+    }
+
+    // The user let go: following again only if they ended at the bottom,
+    // or they sent a message meanwhile.
+    function transcriptReleased() {
+        ollamaView.followTranscript = ollamaView.sentWhileHeld || ollamaView.transcriptAtBottom()
+        ollamaView.sentWhileHeld = false
+        ollamaView.pinTranscript()
+    }
+
+    // Back to bottom: jump down and follow again.
+    function followBottom() {
+        ollamaView.followTranscript = true
+        ollamaView.scrollToEnd()
+        Qt.callLater(ollamaView.pinTranscript)
+    }
+
+    onTranscriptHeldChanged: {
+        if (!ollamaView.transcriptHeld)
+            ollamaView.transcriptReleased()
+    }
 
     function focusInput() {
         if (ollamaView.current)
@@ -344,6 +438,9 @@ ColumnLayout {
             return
         }
         input.text = ""
+        // Sending always jumps to the bottom and follows the reply.
+        ollamaView.followTranscript = true
+        ollamaView.sentWhileHeld = ollamaView.transcriptHeld
         transcript.append({ author: "user", body: prompt, phase: "done" })
         transcript.append({ author: "assistant", body: "", phase: "waiting" })
         ollamaView.replyRow = transcript.count - 1
@@ -367,7 +464,7 @@ ColumnLayout {
         xhr.send(body)
         firstByteTimer.interval = ollamaView.firstByteTimeout
         firstByteTimer.restart()
-        Qt.callLater(transcriptView.positionViewAtEnd)
+        Qt.callLater(ollamaView.pinTranscript)
     }
 
     function chatProgress(xhr, url, finished) {
@@ -436,13 +533,11 @@ ColumnLayout {
             return
         var next = ollamaView.stream
         var phase = next.content !== "" ? "streaming" : next.thinking ? "thinking" : "waiting"
-        var follow = transcriptView.atYEnd
+        // The transcript follows through its contentHeight handler.
         if (transcript.get(row).body !== next.content)
             transcript.setProperty(row, "body", next.content)
         if (transcript.get(row).phase !== phase)
             transcript.setProperty(row, "phase", phase)
-        if (follow)
-            Qt.callLater(transcriptView.positionViewAtEnd)
     }
 
     // Reply text as shown: paragraphs and code blocks, so that while a
@@ -665,6 +760,22 @@ ColumnLayout {
         id: transcript
     }
 
+    Shortcut {
+        sequences: [StandardKey.ZoomIn, "Ctrl+="]
+        enabled: ollamaView.current
+        onActivated: ollamaView.zoomRequested(1)
+    }
+    Shortcut {
+        sequences: [StandardKey.ZoomOut]
+        enabled: ollamaView.current
+        onActivated: ollamaView.zoomRequested(-1)
+    }
+    Shortcut {
+        sequence: "Ctrl+0"
+        enabled: ollamaView.current
+        onActivated: ollamaView.zoomRequested(0)
+    }
+
     Plasma5Support.DataSource {
         id: ownerSource
         engine: "executable"
@@ -755,8 +866,11 @@ ColumnLayout {
     Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
+        // Keeps the transcript and Back to bottom inside this area.
+        clip: true
 
         QQC2.ScrollView {
+            id: transcriptScroll
             anchors.fill: parent
             // Text wraps; the side margins made the content a few pixels wider
             // than the view, which showed a stray horizontal scroll bar.
@@ -772,6 +886,25 @@ ColumnLayout {
                 leftMargin: Kirigami.Units.largeSpacing
                 rightMargin: Kirigami.Units.largeSpacing
                 reuseItems: false
+                // A Flickable doesn't clip by itself: messages scrolled past
+                // the top would paint over the popup's header and tabs.
+                clip: true
+
+                onContentHeightChanged: {
+                    if (ollamaView.followTranscript)
+                        Qt.callLater(ollamaView.pinTranscript)
+                }
+                onHeightChanged: {
+                    if (ollamaView.followTranscript)
+                        Qt.callLater(ollamaView.pinTranscript)
+                }
+
+                WheelHandler {
+                    objectName: "transcriptWheelZoom"
+                    target: null
+                    acceptedModifiers: Qt.ControlModifier
+                    onWheel: (wheel) => ollamaView.wheelZoom(wheel)
+                }
 
                 delegate: ColumnLayout {
                     id: message
@@ -835,7 +968,7 @@ ColumnLayout {
                             color: Kirigami.Theme.textColor
                             selectionColor: Kirigami.Theme.highlightColor
                             selectedTextColor: Kirigami.Theme.highlightedTextColor
-                            font: Kirigami.Theme.defaultFont
+                            font: ollamaView.bodyFont
                             text: message.mine ? message.body : ""
                         }
                     }
@@ -871,7 +1004,7 @@ ColumnLayout {
                                 color: Kirigami.Theme.textColor
                                 selectionColor: Kirigami.Theme.highlightColor
                                 selectedTextColor: Kirigami.Theme.highlightedTextColor
-                                font: segment.code ? Kirigami.Theme.fixedWidthFont : Kirigami.Theme.defaultFont
+                                font: segment.code ? ollamaView.codeFont : ollamaView.bodyFont
                                 text: segment.content
                             }
                             PlasmaComponents.ToolButton {
@@ -942,6 +1075,29 @@ ColumnLayout {
                             QQC2.ToolTip.visible: hovered
                         }
                     }
+                }
+            }
+        }
+
+        // Over the transcript's bottom edge, never over the message box,
+        // and it never takes the focus from it. Fixed texts only.
+        PlasmaComponents.Button {
+            id: backToBottom
+            objectName: "backToBottom"
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Kirigami.Units.largeSpacing
+            focusPolicy: Qt.NoFocus
+            icon.name: "go-down"
+            text: ollamaView.generating ? i18n("New messages") : i18n("Back to bottom")
+            enabled: ollamaView.showBackToBottom
+            opacity: ollamaView.showBackToBottom ? 1 : 0
+            visible: opacity > 0
+            onClicked: ollamaView.followBottom()
+
+            Behavior on opacity {
+                NumberAnimation {
+                    duration: Kirigami.Units.shortDuration
                 }
             }
         }
@@ -1050,9 +1206,12 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
         QQC2.ScrollView {
+            objectName: "inputScroll"
             Layout.fillWidth: true
             Layout.maximumHeight: Kirigami.Units.gridUnit * 8
             QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+            // A long message scrolls inside the box, never over the transcript.
+            clip: true
 
             PlasmaComponents.TextArea {
                 id: input
@@ -1061,10 +1220,17 @@ ColumnLayout {
                 readOnly: ollamaView.checking === "send"
                 wrapMode: TextEdit.Wrap
                 textFormat: TextEdit.PlainText
+                font: ollamaView.bodyFont
                 Kirigami.SpellCheck.enabled: false
                 inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhSensitiveData
                 placeholderText: i18n("Message (Enter sends, Shift+Enter adds a line)")
                 Accessible.name: i18n("Message to Ollama")
+                WheelHandler {
+                    objectName: "inputWheelZoom"
+                    target: null
+                    acceptedModifiers: Qt.ControlModifier
+                    onWheel: (wheel) => ollamaView.wheelZoom(wheel)
+                }
                 Keys.onPressed: (event) => {
                     if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                             && !(event.modifiers & Qt.ShiftModifier)) {

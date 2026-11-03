@@ -56,6 +56,18 @@ KCM.ScrollViewKCM {
     property string cfg_popupSizeDefault: "normal"
     property bool cfg_tooltipShowsUsage: true
     property bool cfg_tooltipShowsUsageDefault: true
+    property string cfg_shortcutOpens: "popup"
+    property string cfg_shortcutOpensDefault: "popup"
+    // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so
+    // Apply never writes back an old value.
+    property string cfg_chatSiteZoom: "{}"
+    property string cfg_chatSiteZoomDefault: "{}"
+    property bool cfg_alertLowEnabled: false
+    property bool cfg_alertLowEnabledDefault: false
+    property int cfg_alertLowPercent: 20
+    property int cfg_alertLowPercentDefault: 20
+    property bool cfg_alertResetEnabled: false
+    property bool cfg_alertResetEnabledDefault: false
 
     property var catalogModel: Catalog.providers
     property var installedProviderIds: []
@@ -180,6 +192,8 @@ KCM.ScrollViewKCM {
         function onValueChanged(key, value) {
             if (key === "chatProfileGeneration")
                 page.cfg_chatProfileGeneration = value
+            else if (key === "chatSiteZoom")
+                page.cfg_chatSiteZoom = value
         }
     }
 

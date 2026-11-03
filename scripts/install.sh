@@ -34,11 +34,17 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Could not run the Hearthside helper. Nothing was deleted." >&2
         exit 1
     fi
+    # The usage alert events file goes too, but only once the data is gone.
+    remove_notifyrc() {
+        rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6/hearthside.notifyrc"
+    }
     case "$reply" in
         '{"ok":true,"removed":[]}')
+            remove_notifyrc
             echo "No Hearthside chat sign-in data found."
             ;;
         '{"ok":true,"removed":["vault"]}')
+            remove_notifyrc
             echo "Deleted: encrypted chat folder (saved chat sign-ins)."
             ;;
         '{"ok":false,"error":"not-locked"}')
@@ -215,6 +221,14 @@ fi
 icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 mkdir -p -- "$icon_directory"
 cp -f -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
+
+# Usage alert events (System Settings → Notifications → Hearthside). The old
+# file is unlinked first, so a symlink in its place is replaced, never followed.
+notifyrc_directory="${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6"
+mkdir -p -- "$notifyrc_directory"
+rm -f -- "$notifyrc_directory/hearthside.notifyrc"
+cp -- "$project_directory/assets/hearthside.notifyrc" "$notifyrc_directory/hearthside.notifyrc"
+chmod 0644 -- "$notifyrc_directory/hearthside.notifyrc"
 
 if [ "$restart_plasma" = true ]; then
     if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then

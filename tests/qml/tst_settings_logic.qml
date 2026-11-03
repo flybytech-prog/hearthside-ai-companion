@@ -62,4 +62,109 @@ TestCase {
         verify(!SettingsLogic.canUntick(false))
         verify(!SettingsLogic.canUntick(undefined))
     }
+
+    function test_shortcutTarget() {
+        compare(SettingsLogic.SHORTCUT_TARGETS, ["popup", "chat", "ollama", "usage"])
+        compare(SettingsLogic.normalizeShortcutTarget("popup"), "popup")
+        compare(SettingsLogic.normalizeShortcutTarget("chat"), "chat")
+        compare(SettingsLogic.normalizeShortcutTarget("ollama"), "ollama")
+        compare(SettingsLogic.normalizeShortcutTarget("usage"), "usage")
+        compare(SettingsLogic.normalizeShortcutTarget("Chat"), "popup")
+        compare(SettingsLogic.normalizeShortcutTarget(""), "popup")
+        compare(SettingsLogic.normalizeShortcutTarget(undefined), "popup")
+        compare(SettingsLogic.normalizeShortcutTarget(2), "popup")
+    }
+
+    function test_shortcutPlan() {
+        var both = {usage: true, chat: true}
+        var usageOnly = {usage: true, chat: false}
+        var chatOnly = {usage: false, chat: true}
+        var keep = {tab: "", site: "", focusInput: false}
+        compare(SettingsLogic.shortcutPlan("popup", both, true), keep)
+        compare(SettingsLogic.shortcutPlan("odd", both, true), keep)
+        compare(SettingsLogic.shortcutPlan("chat", both, true), {tab: "chat", site: "", focusInput: false})
+        compare(SettingsLogic.shortcutPlan("usage", both, true), {tab: "usage", site: "", focusInput: false})
+        compare(SettingsLogic.shortcutPlan("ollama", both, true), {tab: "chat", site: "ollama", focusInput: true})
+        // Ollama off, or the Chat tab hidden: as when clicking the icon.
+        compare(SettingsLogic.shortcutPlan("ollama", both, false), keep)
+        compare(SettingsLogic.shortcutPlan("ollama", both, "true"), keep)
+        compare(SettingsLogic.shortcutPlan("ollama", usageOnly, true), keep)
+        // A hidden target tab falls back to the other one.
+        compare(SettingsLogic.shortcutPlan("chat", usageOnly, true).tab, "usage")
+        compare(SettingsLogic.shortcutPlan("usage", chatOnly, true).tab, "chat")
+        compare(SettingsLogic.shortcutPlan("usage", undefined, true).tab, "usage")
+        compare(SettingsLogic.shortcutPlan("chat", undefined, true).tab, "usage")
+    }
+
+    function test_zoomSteps() {
+        compare(SettingsLogic.ZOOM_STEPS, [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0])
+        compare(SettingsLogic.zoomStep(1.0, 1), 1.1)
+        compare(SettingsLogic.zoomStep(1.0, -1), 0.9)
+        compare(SettingsLogic.zoomStep(1.5, 0), 1.0)
+        compare(SettingsLogic.zoomStep(2.0, 1), 2.0)
+        compare(SettingsLogic.zoomStep(0.5, -1), 0.5)
+        compare(SettingsLogic.zoomStep(0.67, 1), 0.75)
+        compare(SettingsLogic.zoomStep(0.75, -1), 0.67)
+        // Between steps: the neighbouring step.
+        compare(SettingsLogic.zoomStep(1.2, 1), 1.25)
+        compare(SettingsLogic.zoomStep(1.2, -1), 1.1)
+        // Odd input.
+        compare(SettingsLogic.zoomStep(NaN, 1), 1.1)
+        compare(SettingsLogic.zoomStep("1.5", 1), 1.1)
+        compare(SettingsLogic.zoomStep(1.5, 2), 1.0)
+        compare(SettingsLogic.zoomStep(1.5, undefined), 1.0)
+        compare(SettingsLogic.zoomStep(9, 1), 2.0)
+        compare(SettingsLogic.zoomStep(9, -1), 2.0)
+        compare(SettingsLogic.zoomStep(0.1, -1), 0.5)
+    }
+
+    function test_parseZoomMap() {
+        var ids = ["claude", "chatgpt", "ollama"]
+        compare(SettingsLogic.parseZoomMap("{}", ids), {})
+        compare(SettingsLogic.parseZoomMap('{"claude":1.25,"ollama":0.8}', ids), {claude: 1.25, ollama: 0.8})
+        // Unknown ids, 1.0, factors off the steps, strings and junk are dropped.
+        compare(SettingsLogic.parseZoomMap('{"claude":1.0,"evil":1.5,"chatgpt":1.3}', ids), {})
+        compare(SettingsLogic.parseZoomMap('{"claude":"1.25","chatgpt":null}', ids), {})
+        compare(SettingsLogic.parseZoomMap("[1.5]", ids), {})
+        compare(SettingsLogic.parseZoomMap("not json", ids), {})
+        compare(SettingsLogic.parseZoomMap("", ids), {})
+        compare(SettingsLogic.parseZoomMap(undefined, ids), {})
+        compare(SettingsLogic.parseZoomMap('{"claude":1.5}', undefined), {})
+    }
+
+    function test_zoomFor() {
+        var map = {claude: 1.5}
+        compare(SettingsLogic.zoomFor(map, "claude"), 1.5)
+        compare(SettingsLogic.zoomFor(map, "chatgpt"), 1.0)
+        compare(SettingsLogic.zoomFor(map, "toString"), 1.0)
+        compare(SettingsLogic.zoomFor({claude: 3}, "claude"), 1.0)
+        compare(SettingsLogic.zoomFor(null, "claude"), 1.0)
+        compare(SettingsLogic.zoomFor(map, undefined), 1.0)
+    }
+
+    function test_zoomMapToPersist() {
+        compare(SettingsLogic.zoomMapToPersist({}, "claude", 1.25), '{"claude":1.25}')
+        // Sorted keys: the same zoom always gives the same text.
+        compare(SettingsLogic.zoomMapToPersist({ollama: 0.8}, "chatgpt", 1.5), '{"chatgpt":1.5,"ollama":0.8}')
+        // 1.0 and odd factors are never stored.
+        compare(SettingsLogic.zoomMapToPersist({claude: 1.25}, "claude", 1.0), "{}")
+        compare(SettingsLogic.zoomMapToPersist({claude: 1.25}, "claude", 1.3), "{}")
+        compare(SettingsLogic.zoomMapToPersist({claude: 1.25, grok: "2"}, "", 1.5), '{"claude":1.25}')
+        compare(SettingsLogic.zoomMapToPersist(null, "claude", 2.0), '{"claude":2}')
+        // Round trip.
+        var ids = ["claude", "chatgpt", "ollama"]
+        var text = SettingsLogic.zoomMapToPersist({claude: 0.67}, "ollama", 1.75)
+        compare(SettingsLogic.parseZoomMap(text, ids), {claude: 0.67, ollama: 1.75})
+    }
+
+    function test_alertPercent() {
+        compare(SettingsLogic.ALERT_PERCENTS, [5, 10, 15, 20, 25, 30, 40, 50])
+        compare(SettingsLogic.normalizeAlertPercent(5), 5)
+        compare(SettingsLogic.normalizeAlertPercent(50), 50)
+        compare(SettingsLogic.normalizeAlertPercent(35), 20)
+        compare(SettingsLogic.normalizeAlertPercent(0), 20)
+        compare(SettingsLogic.normalizeAlertPercent("10"), 20)
+        compare(SettingsLogic.normalizeAlertPercent(undefined), 20)
+        compare(SettingsLogic.normalizeAlertPercent(NaN), 20)
+    }
 }

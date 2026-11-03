@@ -9,6 +9,7 @@ Item {
     property var siteIds: []
     property string siteId: ""
     property var customUrls: ({})
+    property var zoomMap: ({})
     property bool dialogOpen: false
     property bool canGoBack: false
     property bool canOpenExternally: false

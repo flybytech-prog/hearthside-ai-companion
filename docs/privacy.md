@@ -22,6 +22,21 @@ Usage snapshots, stale readings, and rate-limit cooldowns live only in the
 Plasma widget process. They disappear when Plasma restarts. Hearthside does not
 read local chat transcripts and does not keep usage history.
 
+Usage notifications (**Settings → General → Usage → Notifications**, off by
+default) are sent to Plasma's notification server through KDE's notification
+library as the `hearthside` application. Each one names a provider, a plan
+(for example "Claude Code" and "Weekly") and a whole percentage left, nothing
+else: no account, plan name from the provider, error text or link, and no
+buttons. Plasma may keep it in its notification history like any other
+notification. They can be muted or changed under **System Settings →
+Notifications → Hearthside**, which saves that choice in
+`~/.config/hearthside.notifyrc`. Which plans already notified is kept only
+in the widget's memory, so after a Plasma restart the first reading counts
+as a starting point again and never notifies. `scripts/install.sh` installs
+`hearthside.notifyrc` to `${XDG_DATA_HOME:-~/.local/share}/knotifications6/`
+so the two events appear in System Settings; it holds names and settings
+only.
+
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
 is written to `$XDG_CACHE_HOME/hearthside/antigravity-auth.json` (falling back
@@ -215,13 +230,17 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `chatKeepOpen`, `chatAutoLockMinutes`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Ollama address | `chatOllamaUrl` in the Plasma configuration file, plain text; only a loopback `http://` address with a port is ever saved | Same |
 | Downloads | Only files you approve, saved to your Downloads folder | Same |
 | Uploads | Read-only, from files you pick in the file dialog | Same |
 | Page console messages | Discarded; never written to the journal | Same |
 | Links opened in your browser | Handed to your default browser, which may keep them in its history; the address briefly appears in that browser's process arguments | Same |
+
+The configuration file is readable by other users on many systems (mode
+`0644`), so the enabled sites and their zoom levels can be seen by anyone who
+can log in to this computer.
 
 Apart from your settings and approved downloads, Hearthside writes to disk
 only in two places: the Antigravity token cache described above, and, only if

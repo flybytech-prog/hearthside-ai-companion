@@ -76,6 +76,12 @@ plasmashell's memory.
   you turn on **Keep the popup open when clicking elsewhere**; the **Minimize**
   button hides it with chat pages, sign-ins and the Ollama conversation
   intact.
+- **Zoom per site**: **Ctrl+=** (or **Ctrl++**) or **Ctrl+scroll up** zooms
+  in, **Ctrl+-** or **Ctrl+scroll down** zooms out, and **Ctrl+0** goes back
+  to 100%, one step at a time from 50% to 200%. Each chat site keeps its own
+  zoom, also in its sign-in windows and across Plasma restarts; in the Ollama
+  chat the same keys and Ctrl+scroll over the conversation or the message
+  box change the text size.
 
 ### Usage
 
@@ -87,6 +93,9 @@ plasmashell's memory.
   installed and tracked.
 - Keeps successful readings in Plasma session memory when a temporary or
   rate-limit error occurs; usage history is never written to disk.
+- **Notifications** (optional, off by default): a notification when a plan
+  drops to a level of usage left you choose (5% to 50%), and when such a plan
+  resets.
 - Refreshes rotating OAuth credentials back to their exact source with
   compare-before-write protection, and uses Linux Secret Service through
   `secret-tool` without placing secrets in process arguments.
@@ -155,16 +164,26 @@ starts with Plasma while it remains on a panel.
   the screen); **Keep the popup open when clicking elsewhere**. A hidden Chat
   tab starts no chat page, web engine or Ollama chat, and hiding it locks
   open saved sign-ins. A hidden Usage tab runs no usage refresh, and the panel
-  icon's tooltip shows only the name. The keyboard shortcut is set in Plasma's
-  own **Keyboard Shortcuts** page.
-- **Usage**: **Display** Left or Used, **Refresh every**, and **Show usage
-  when hovering over the panel icon**.
+  icon's tooltip shows only the name. The keyboard shortcut itself is set in
+  Plasma's own **Keyboard Shortcuts** page; **Keyboard shortcut opens**
+  chooses what it opens: the popup as when clicking the icon, Chat, the
+  Ollama message box (ready to type; the normal popup while Ollama is off) or
+  Usage. Pressing the shortcut again closes the popup.
+- **Usage**: **Display** Left or Used, **Refresh every**, **Show usage
+  when hovering over the panel icon**, and **Notifications**: **Notify when
+  a plan drops below** a percentage **left** (20% by default, whatever
+  Display shows) and **Notify when a plan resets** (only for a plan that had
+  dropped that low). Plans are checked at each usage refresh while the Usage
+  tab is shown; a plan already that low when Plasma starts doesn't notify.
+  Mute or adjust them under **System Settings → Notifications →
+  Hearthside**.
 - **Privacy**: **Stay signed in** (Off or Encrypted), **Lock automatically**,
   and under **Show folder actions** **Change passphrase…** and **Delete
   encrypted folder…**.
 
 Fresh installs open on Chat, show both tabs at Normal size, track all
-providers, display usage left, and refresh every five minutes.
+providers, display usage left, refresh every five minutes, and send no
+notifications.
 
 ## Configure usage providers
 
@@ -207,8 +226,9 @@ encrypted folder in the Chat tab (or turn Stay signed in off), then run:
 ./scripts/install.sh --uninstall-web-data
 ```
 
-It deletes the encrypted folder and nothing else, and refuses while the
-folder is unlocked.
+It deletes the encrypted folder and the usage alert events file
+(`knotifications6/hearthside.notifyrc`) and nothing else, and refuses while
+the folder is unlocked.
 When upgrading from AI Usage 2.x by hand, remove the old helper and widget
 first, so the two never refresh the same sign-ins at once:
 
