@@ -83,6 +83,14 @@ PlasmoidItem {
     signal ollamaFocusRequested()
     // What the last shortcut press asked for: open (true) or closed.
     property bool shortcutOpen: false
+    // Ollama is on and the Chat tab can show it: text dropped on the panel
+    // icon opens it.
+    readonly property bool ollamaDropTarget: root.chatShown
+        && root.chatSiteIds.indexOf(OllamaChat.ENTRY.id) >= 0
+    // Text dropped on the panel icon, until the popup puts it into Ollama's
+    // message box (FullRepresentation.takePendingDrop). Runtime only, never
+    // sent from here.
+    property string pendingDrop: ""
 
     // Usage alerts, memory only: after a Plasma restart the first reading is
     // a baseline again.
@@ -669,6 +677,19 @@ PlasmoidItem {
         // Plasma expands the popup itself right after this handler (spike
         // K1), so the close is applied once it is done.
         Qt.callLater(root.finishShortcut)
+    }
+
+    // Text dropped on the panel icon: open the popup on Ollama with it in the
+    // message box. One character over the limit is enough for the view to
+    // refuse it.
+    function dropToOllama(text) {
+        if (typeof text !== "string" || text === "" || !root.ollamaDropTarget)
+            return
+        root.pendingDrop = text.length > OllamaChat.MAX_PROMPT_CHARS
+            ? text.slice(0, OllamaChat.MAX_PROMPT_CHARS + 1) : text
+        root.popupTab = "chat"
+        root.chatSiteId = OllamaChat.ENTRY.id
+        root.expanded = true
     }
 
     function finishShortcut() {

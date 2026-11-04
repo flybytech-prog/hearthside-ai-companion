@@ -26,6 +26,54 @@ PlasmaExtras.Representation {
         root.popupScale
     )
 
+    // Ollama's model picker; model names come from the server, so its
+    // delegate shows them as plain text only.
+    component ModelPicker: PlasmaComponents.ComboBox {
+        id: picker
+        Layout.fillWidth: true
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 5
+        enabled: ollamaView.modelList.length > 0
+        model: ollamaView.modelList
+        textRole: "name"
+        valueRole: "name"
+        displayText: picker.currentIndex >= 0 ? picker.currentText : i18n("No model")
+
+        delegate: PlasmaComponents.ItemDelegate {
+            id: modelDelegate
+            required property var modelData
+            required property int index
+            width: ListView.view ? ListView.view.width : implicitWidth
+            highlighted: picker.highlightedIndex === modelDelegate.index
+            contentItem: RowLayout {
+                spacing: Kirigami.Units.smallSpacing
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    text: modelDelegate.modelData.name
+                    elide: Text.ElideRight
+                }
+                PlasmaComponents.Label {
+                    textFormat: Text.PlainText
+                    visible: text !== ""
+                    text: modelDelegate.modelData.parameterSize
+                    opacity: 0.6
+                }
+            }
+        }
+    }
+
+    // Text dropped on the panel icon (main.qml) goes into Ollama's message
+    // box; it is never sent from there.
+    function takePendingDrop() {
+        if (root.pendingDrop === "")
+            return
+        var text = root.pendingDrop
+        root.pendingDrop = ""
+        ollamaView.takeDrop(text)
+    }
+
+    Component.onCompleted: full.takePendingDrop()
+
     Layout.minimumWidth: Kirigami.Units.gridUnit * 18
     Layout.minimumHeight: Kirigami.Units.gridUnit * 15
     Layout.preferredWidth: full.popupSize.width
@@ -42,6 +90,9 @@ PlasmaExtras.Representation {
         // The keyboard shortcut opened Ollama's message box.
         function onOllamaFocusRequested() {
             ollamaView.focusLater()
+        }
+        function onPendingDropChanged() {
+            full.takePendingDrop()
         }
         // A hidden Chat tab keeps no web view or saved sign-ins open.
         function onChatShownChanged() {
@@ -172,43 +223,21 @@ PlasmaExtras.Representation {
                         }
                     }
                 }
-                PlasmaComponents.ComboBox {
+                ModelPicker {
                     id: modelCombo
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: Kirigami.Units.gridUnit * 5
                     visible: full.onOllama
-                    enabled: ollamaView.modelList.length > 0
-                    model: ollamaView.modelList
-                    textRole: "name"
-                    valueRole: "name"
                     currentIndex: ollamaView.modelIndex
-                    displayText: ollamaView.modelIndex >= 0 ? currentText : i18n("No model")
                     onActivated: ollamaView.selectModel(currentValue)
                     Accessible.name: i18n("Model")
-
-                    // Model names come from the server: plain text only.
-                    delegate: PlasmaComponents.ItemDelegate {
-                        id: modelDelegate
-                        required property var modelData
-                        required property int index
-                        width: ListView.view ? ListView.view.width : implicitWidth
-                        highlighted: modelCombo.highlightedIndex === modelDelegate.index
-                        contentItem: RowLayout {
-                            spacing: Kirigami.Units.smallSpacing
-                            PlasmaComponents.Label {
-                                Layout.fillWidth: true
-                                textFormat: Text.PlainText
-                                text: modelDelegate.modelData.name
-                                elide: Text.ElideRight
-                            }
-                            PlasmaComponents.Label {
-                                textFormat: Text.PlainText
-                                visible: text !== ""
-                                text: modelDelegate.modelData.parameterSize
-                                opacity: 0.6
-                            }
-                        }
-                    }
+                }
+                // Compare: model B, answering after A.
+                ModelPicker {
+                    id: modelComboB
+                    objectName: "modelComboB"
+                    visible: full.onOllama && ollamaView.comparing
+                    currentIndex: ollamaView.modelIndexB
+                    onActivated: ollamaView.selectModelB(currentValue)
+                    Accessible.name: i18n("Second model")
                 }
                 PlasmaComponents.ToolButton {
                     icon.name: "view-refresh"
@@ -217,6 +246,29 @@ PlasmaExtras.Representation {
                     enabled: !ollamaView.busy
                     onClicked: ollamaView.reloadModels()
                     QQC2.ToolTip.text: i18n("Reload models")
+                    QQC2.ToolTip.visible: hovered
+                }
+                PlasmaComponents.ToolButton {
+                    objectName: "personaButton"
+                    icon.name: "user-identity"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: full.onOllama
+                    checked: ollamaView.editingPersona
+                    text: i18n("Personality")
+                    onClicked: ollamaView.editingPersona = !ollamaView.editingPersona
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered
+                }
+                PlasmaComponents.ToolButton {
+                    objectName: "compareButton"
+                    icon.name: "view-split-left-right"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: full.onOllama
+                    enabled: !ollamaView.busy
+                    checked: ollamaView.comparing
+                    text: i18n("Compare two models")
+                    onClicked: ollamaView.setComparing(!ollamaView.comparing)
+                    QQC2.ToolTip.text: text
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {

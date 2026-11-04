@@ -286,6 +286,35 @@ TestCase {
                 [{ role: "user", content: "x".repeat(OllamaChat.MAX_PROMPT_CHARS) }]) !== "")
     }
 
+    function test_chatRequestBodySystemGoesFirst() {
+        var history = [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" },
+                       { role: "user", content: "again" }]
+        var parsed = JSON.parse(OllamaChat.chatRequestBody("m", history, "Answer in German."))
+        compare(parsed.messages.length, 4)
+        compare(parsed.messages[0], { role: "system", content: "Answer in German." })
+        compare(parsed.messages[1].role, "user")
+        compare(parsed.messages.filter(function (m) { return m.role === "system" }).length, 1)
+        // No personality: no system message at all.
+        var values = [undefined, null, "", "   \n "]
+        for (var index = 0; index < values.length; index++) {
+            parsed = JSON.parse(OllamaChat.chatRequestBody("m", history, values[index]))
+            compare(parsed.messages.length, 3, String(values[index]))
+            compare(parsed.messages[0].role, "user")
+        }
+        // At the cap it goes; one more character, or not a string, sends nothing.
+        var full = "x".repeat(OllamaChat.MAX_SYSTEM_CHARS)
+        compare(JSON.parse(OllamaChat.chatRequestBody("m", history, full)).messages[0].content, full)
+        compare(OllamaChat.chatRequestBody("m", history, full + "x"), "")
+        compare(OllamaChat.chatRequestBody("m", history, 5), "")
+        compare(OllamaChat.chatRequestBody("m", history, { role: "system" }), "")
+        compare(OllamaChat.chatRequestBody("m", history, ["x"]), "")
+        // History can never carry the system role, with or without a personality.
+        compare(OllamaChat.chatRequestBody("m", [{ role: "system", content: "x" }], "p"), "")
+        compare(OllamaChat.chatRequestBody("m", [], "p"), "")
+        compare(OllamaChat.MAX_SYSTEM_CHARS, 8000)
+        compare(OllamaChat.ROLES, ["user", "assistant"])
+    }
+
     function test_unloadRequestBody() {
         compare(OllamaChat.unloadRequestBody("llama3:latest"),
                 '{"model":"llama3:latest","messages":[],"keep_alive":0}')
@@ -856,5 +885,196 @@ TestCase {
         compare(OllamaChat.revealHidden(undefined), "")
         compare(OllamaChat.revealHidden(42), "")
         verify(!OllamaChat.hasHidden(null))
+    }
+
+    // --- formatting ----------------------------------------------------------
+
+    function plain(text) {
+        return [{ text: text, bold: false, italic: false, code: false }]
+    }
+
+    function test_blocksEveryKind() {
+        var text = "# Title\n## Sub ##\n### Small\nIntro **bold** and *it*.\nsecond line\n\n"
+            + "- one\n* two\n+ three\n\n1. first\n2. second\n10. tenth\n\n```js\nx = 1\n```\nend"
+        compare(OllamaChat.blocks(text), [
+            { kind: "heading", spans: plain("Title"), level: 1 },
+            { kind: "heading", spans: plain("Sub"), level: 2 },
+            { kind: "heading", spans: plain("Small"), level: 3 },
+            { kind: "paragraph", spans: [
+                { text: "Intro ", bold: false, italic: false, code: false },
+                { text: "bold", bold: true, italic: false, code: false },
+                { text: " and ", bold: false, italic: false, code: false },
+                { text: "it", bold: false, italic: true, code: false },
+                { text: ".\nsecond line", bold: false, italic: false, code: false }] },
+            { kind: "bullet", spans: plain("one"), depth: 0 },
+            { kind: "bullet", spans: plain("two"), depth: 0 },
+            { kind: "bullet", spans: plain("three"), depth: 0 },
+            { kind: "number", spans: plain("first"), n: 1 },
+            { kind: "number", spans: plain("second"), n: 2 },
+            { kind: "number", spans: plain("tenth"), n: 10 },
+            { kind: "code", text: "x = 1", lang: "js" },
+            { kind: "paragraph", spans: plain("end") }
+        ])
+        compare(OllamaChat.blocks(""), [])
+        compare(OllamaChat.blocks(undefined), [])
+        compare(OllamaChat.blocks("  \n\n "), [])
+    }
+
+    function test_blocksNotRecognised() {
+        // Four hashes, no space, a rule: literal paragraphs.
+        var literal = ["#### Four", "#Tight", "---", "* * *", "-no space", "1)x", "| a | b |\n|---|---|"]
+        for (var index = 0; index < literal.length; index++)
+            compare(OllamaChat.blocks(literal[index]), [{ kind: "paragraph", spans: plain(literal[index]) }],
+                    literal[index])
+    }
+
+    function test_blocksListNesting() {
+        var depths = OllamaChat.blocks("- a\n  - b\n    - c\n      - d\n        - e\n  - f\n- g")
+            .map(function (block) { return block.depth })
+        compare(depths, [0, 1, 2, 2, 2, 1, 0])
+        // Four-space indents nest the same way; tabs count as four.
+        compare(OllamaChat.blocks("* a\n    * b\n\t\t* c").map(function (b) { return b.depth }), [0, 1, 2])
+        // A line right after an item joins it; after a blank line it is a paragraph.
+        compare(OllamaChat.blocks("- a\n  more\n\nafter"), [
+            { kind: "bullet", spans: plain("a\nmore"), depth: 0 },
+            { kind: "paragraph", spans: plain("after") }
+        ])
+        // A heading line ends a paragraph.
+        compare(OllamaChat.blocks("text\n# H").map(function (b) { return b.kind }), ["paragraph", "heading"])
+    }
+
+    function test_literalLinksImagesAndHtml() {
+        var cases = [
+            "[t](http://127.0.0.1:9/)",
+            "![x](http://127.0.0.1:9/y.png)",
+            "<img src=\"http://127.0.0.1:9/x\">",
+            "<b>bold</b> &amp; &lt;i&gt;",
+            "<http://127.0.0.1:9/auto>",
+            "see http://127.0.0.1:9/plain"
+        ]
+        for (var index = 0; index < cases.length; index++) {
+            var shown = OllamaChat.blocks(cases[index])
+            compare(shown, [{ kind: "paragraph", spans: plain(cases[index]) }], cases[index])
+            verify(!OllamaChat.isStyled(shown[0].spans))
+        }
+        // Inside emphasis, the link text still stays literal.
+        compare(OllamaChat.spans("**[t](http://x/)**"),
+                [{ text: "[t](http://x/)", bold: true, italic: false, code: false }])
+    }
+
+    function test_spansEmphasis() {
+        compare(OllamaChat.spans("__b__ _i_ `c d`"), [
+            { text: "b", bold: true, italic: false, code: false },
+            { text: " ", bold: false, italic: false, code: false },
+            { text: "i", bold: false, italic: true, code: false },
+            { text: " ", bold: false, italic: false, code: false },
+            { text: "c d", bold: false, italic: false, code: true }
+        ])
+        compare(OllamaChat.spans("**bold *both* bold**"), [
+            { text: "bold ", bold: true, italic: false, code: false },
+            { text: "both", bold: true, italic: true, code: false },
+            { text: " bold", bold: true, italic: false, code: false }
+        ])
+        // Inline code keeps its markers' insides as they are.
+        compare(OllamaChat.spans("`**x**`"), [{ text: "**x**", bold: false, italic: false, code: true }])
+        // snake_case, a lone star, "2 * 3 * 4" and spaced marks stay literal.
+        var literal = ["snake_case_name", "a * b", "2 * 3 * 4", "** spaced **", "_ x _", "a_b_c"]
+        for (var index = 0; index < literal.length; index++)
+            compare(OllamaChat.spans(literal[index]), plain(literal[index]), literal[index])
+        compare(OllamaChat.spans(""), [])
+        compare(OllamaChat.spans(null), [])
+    }
+
+    function test_unterminatedMarksStayLiteral() {
+        compare(OllamaChat.spans("**never closed"), plain("**never closed"))
+        compare(OllamaChat.spans("*open and `tick"), plain("*open and `tick"))
+        compare(OllamaChat.spans("``"), plain("``"))
+        compare(OllamaChat.spans("a **b** c **d"), [
+            { text: "a ", bold: false, italic: false, code: false },
+            { text: "b", bold: true, italic: false, code: false },
+            { text: " c **d", bold: false, italic: false, code: false }
+        ])
+        // Streaming: half a bold stays literal until it closes.
+        compare(OllamaChat.blocks("Use **bo"), [{ kind: "paragraph", spans: plain("Use **bo") }])
+        // An unterminated fence is code to the end, markup and all.
+        compare(OllamaChat.blocks("x\n```\n# not a heading\n**b**"), [
+            { kind: "paragraph", spans: plain("x") },
+            { kind: "code", text: "# not a heading\n**b**", lang: "" }
+        ])
+        // Many unclosed marks stay quick (linear).
+        var many = new Array(1300).join("*a ")
+        compare(OllamaChat.spans(many), plain(many))
+    }
+
+    function test_styledWordCap() {
+        var words = []
+        for (var index = 0; index < OllamaChat.MAX_STYLED_WORDS; index++)
+            words.push(index === 0 ? "**w**" : "w")
+        var atCap = words.join(" ")
+        verify(OllamaChat.isStyled(OllamaChat.spans(atCap)))
+        var over = atCap + " w"
+        compare(OllamaChat.spans(over), plain(over))
+        compare(OllamaChat.blocks("- " + over)[0].spans, plain(over))
+        var long = "**" + "x".repeat(OllamaChat.MAX_STYLED_CHARS) + "**"
+        compare(OllamaChat.spans(long), plain(long))
+        compare(OllamaChat.MAX_STYLED_WORDS, 300)
+    }
+
+    function test_blocksRevealHidden() {
+        var shown = OllamaChat.blocks("# A‮B\n- x​y\nok\u0007\n```\nrm ⁦z\n```")
+        compare(OllamaChat.spansText(shown[0].spans), "A⟦U+202E⟧B")
+        compare(OllamaChat.spansText(shown[1].spans), "x⟦U+200B⟧y\nok⟦U+0007⟧")
+        compare(shown[2].text, "rm ⟦U+2066⟧z")
+    }
+
+    function test_flowWords() {
+        var words = OllamaChat.flowWords(OllamaChat.spans("Say **hi**, then\n`run x`."))
+        compare(words.map(function (w) { return w.br ? "|" : w.text + (w.space ? "_" : "") }),
+                ["Say_", "hi", ",_", "then", "|", "run_", "x", "."])
+        compare(words[1].bold, true)
+        compare(words[5].code, true)
+        compare(words[7].code, false)
+        compare(OllamaChat.flowWords([]), [])
+        compare(OllamaChat.flowWords(null), [])
+        compare(OllamaChat.spansText(OllamaChat.spans("a **b** `c`")), "a b c")
+        verify(!OllamaChat.isStyled(plain("x")))
+        verify(!OllamaChat.isStyled(null))
+    }
+
+    // --- conversation --------------------------------------------------------
+
+    function test_lastTurn() {
+        var u = { author: "user" }
+        var a = { author: "assistant" }
+        compare(OllamaChat.lastTurn([u, a, u, a]), { userIndex: 2, assistantIndex: 3 })
+        compare(OllamaChat.lastTurn([u, a, u]), { userIndex: 2, assistantIndex: -1 })
+        compare(OllamaChat.lastTurn([a]), { userIndex: -1, assistantIndex: 0 })
+        compare(OllamaChat.lastTurn([u, a, a]), { userIndex: -1, assistantIndex: 2 })
+        var none = { userIndex: -1, assistantIndex: -1 }
+        compare(OllamaChat.lastTurn([]), none)
+        compare(OllamaChat.lastTurn(null), none)
+        compare(OllamaChat.lastTurn("ua"), none)
+        compare(OllamaChat.lastTurn([u, null]), none)
+        compare(OllamaChat.lastTurn([u, { author: "system" }]), none)
+    }
+
+    function test_dropText() {
+        compare(OllamaChat.dropText("hello", ""), { ok: true, text: "hello" })
+        compare(OllamaChat.dropText("dropped", "typed\n\n "), { ok: true, text: "typed\n\ndropped" })
+        compare(OllamaChat.dropText("dropped", "   "), { ok: true, text: "dropped" })
+        compare(OllamaChat.dropText("dropped", undefined), { ok: true, text: "dropped" })
+        // Controls go, tab and line feed stay; CRLF becomes LF.
+        compare(OllamaChat.dropText("a\u0007b\r\nc\td\u001b[31m\u0085", ""), { ok: true, text: "ab\nc\td[31m" })
+        compare(OllamaChat.dropText("a\u0000b", ""), { ok: false, error: "not-text" })
+        compare(OllamaChat.dropText(5, ""), { ok: false, error: "not-text" })
+        compare(OllamaChat.dropText(null, ""), { ok: false, error: "not-text" })
+        compare(OllamaChat.dropText("", "x"), { ok: false, error: "empty" })
+        compare(OllamaChat.dropText(" \n\u0007\t", ""), { ok: false, error: "empty" })
+        var max = OllamaChat.MAX_PROMPT_CHARS
+        compare(OllamaChat.dropText("x".repeat(max), "").ok, true)
+        compare(OllamaChat.dropText("x".repeat(max + 1), ""), { ok: false, error: "too-long" })
+        // Typed text plus the drop and the blank line between them count.
+        compare(OllamaChat.dropText("x".repeat(max - 4), "ab").ok, true)
+        compare(OllamaChat.dropText("x".repeat(max - 3), "ab"), { ok: false, error: "too-long" })
     }
 }

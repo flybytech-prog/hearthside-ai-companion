@@ -570,13 +570,18 @@ TestCase {
 
     function test_replyBlocks() {
         var view = make().view
-        compare(JSON.stringify(view.blocks("Para one\nline\n\n  \nPara two\n```js\nx = 1\n\ny = 2\n```\ntail")), JSON.stringify([
-            { kind: "text", text: "Para one\nline", lang: "" },
-            { kind: "text", text: "Para two", lang: "" },
-            { kind: "code", text: "x = 1\n\ny = 2", lang: "js" },
-            { kind: "text", text: "tail", lang: "" }
-        ]))
-        compare(view.blocks(""), [])
+        // The blocks come from OllamaChat.blocks (tested there); the view
+        // shows each in its own item.
+        var wrapper = ready()
+        var request = sendText(wrapper.view, "Hi")
+        request.chunk(piece("Para one\nline\n\n  \nPara two\n```js\nx = 1\n\ny = 2\n```\ntail"))
+        request.chunk(line({ done: true }))
+        wait(30)
+        var shown = shownTexts(wrapper.view)
+        verify(shown.indexOf("Para one\nline") >= 0, JSON.stringify(shown))
+        verify(shown.indexOf("Para two") >= 0, JSON.stringify(shown))
+        verify(shown.indexOf("x = 1\n\ny = 2") >= 0, JSON.stringify(shown))
+        verify(shown.indexOf("tail") >= 0, JSON.stringify(shown))
         compare(view.wrapFor("short words only"), TextEdit.Wrap)
         compare(view.wrapFor(new Array(121).join("x")), TextEdit.WrapAnywhere)
     }
@@ -910,7 +915,9 @@ TestCase {
     // Every text the view sets on a control itself (never server text).
     property var fixedTexts: ["", "Clear this conversation?", "Clear", "Cancel", "Copy reply",
         "Copy code", "Retry", "Reload models", "Send", "Stop", "Back to bottom", "New messages",
-        "Message (Enter sends, Shift+Enter adds a line)"]
+        "Message (Enter sends, Shift+Enter adds a line)", "Model A", "Model B", "Close",
+        "Edit message", "Regenerate reply",
+        "How this model should answer, e.g. “Answer briefly, in German.”"]
 
     function test_everyShownTextIsPlain() {
         var wrapper = ready()
@@ -1313,5 +1320,464 @@ TestCase {
         mouseWheel(field, 10, 10, 0, -240)
         tryVerify(function () { return flick.contentY > 0 }, 2000)
         compare(asked.length, 3)
+    }
+
+    // --- R2: formatting, personalities, regenerate/edit, compare, drops --------
+
+    // Texts of the shown text items (Text, Label, TextEdit) under item.
+    function shownTexts(item) {
+        var items = []
+        collect(item, items)
+        var texts = []
+        for (var index = 0; index < items.length; index++) {
+            if (items[index].visible && items[index].textFormat !== undefined
+                    && typeof items[index].text === "string" && items[index].text !== "")
+                texts.push(items[index].text)
+        }
+        return texts
+    }
+
+    function reply(request, text) {
+        request.chunk(piece(text))
+        request.chunk(line({ done: true }))
+    }
+
+    function messagesOf(request) {
+        return JSON.parse(request.body).messages
+    }
+
+    function test_formattedReplyIsPlainWordItems() {
+        var wrapper = ready()
+        var view = wrapper.view
+        reply(sendText(view, "Hi"), "# Title\n\nSay **bold** and *it* `code` <b>x</b> [t](http://127.0.0.1:9/)\n\n- item **b**\n2. two")
+        wait(50)
+        var items = []
+        collect(view, items)
+        var bold = null
+        var italic = null
+        var code = null
+        var words = 0
+        for (var index = 0; index < items.length; index++) {
+            var item = items[index]
+            if (!item.visible || item.textFormat === undefined || typeof item.text !== "string")
+                continue
+            if (item.text === "bold" && item.font.bold)
+                bold = item
+            if (item.text === "it" && item.font.italic)
+                italic = item
+            if (item.text === "code")
+                code = item
+            if (item.text === "<b>x</b>" || item.text === "[t](http://127.0.0.1:9/)")
+                words += 1
+        }
+        verify(bold !== null && italic !== null && code !== null)
+        compare(bold.textFormat, Text.PlainText)
+        compare(italic.textFormat, Text.PlainText)
+        compare(code.textFormat, Text.PlainText)
+        compare(code.font.family, view.codeFont.family)
+        // HTML and links stay literal words.
+        compare(words, 2)
+        var shown = shownTexts(view)
+        verify(shown.indexOf("Title") >= 0, JSON.stringify(shown))
+        verify(shown.indexOf("•") >= 0 && shown.indexOf("2.") >= 0, JSON.stringify(shown))
+        verify(shown.indexOf("**bold**") < 0)
+        verify(findChild(view, "replyWords") !== null)
+    }
+
+    function test_everyShownTextIsPlainWithFormatting() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.setPersona("llama3:latest", "<b>persona</b>")
+        view.setComparing(true)
+        view.editingPersona = true
+        var request = sendText(view, "<i>q</i>")
+        reply(request, "**<img src=\"http://127.0.0.1:9/x\">** and *<a href=\"x\">a</a>*\n\n- <b>li</b>\n### <h1>h</h1>")
+        reply(testCase.requests[testCase.requests.length - 1], "**B <b>**")
+        wait(50)
+        var items = []
+        collect(view, items)
+        var marked = 0
+        for (var index = 0; index < items.length; index++) {
+            var item = items[index]
+            if (item.textFormat === undefined || typeof item.text !== "string")
+                continue
+            if (item.text.indexOf("<") >= 0)
+                marked += 1
+            if (item.textFormat !== Text.PlainText)
+                verify(testCase.fixedTexts.indexOf(item.text) >= 0,
+                       "not plain text at " + item + ": " + item.text)
+        }
+        verify(marked >= 6, "found " + marked)
+    }
+
+    function test_personaIsTheFirstAndOnlySystemMessage() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.editingPersona = true
+        var field = findChild(view, "personaInput")
+        verify(field !== null && field.visible)
+        compare(field.textFormat, TextEdit.PlainText)
+        field.text = "Answer in German.\nBriefly."
+        compare(view.personaFor("llama3:latest"), "Answer in German.\nBriefly.")
+        // Another model's personality is never sent to this one.
+        view.setPersona("qwen3:8b", "Pirate")
+        var first = sendText(view, "Hi")
+        var sent = messagesOf(first)
+        compare(sent[0], { role: "system", content: "Answer in German.\nBriefly." })
+        compare(sent.filter(function (m) { return m.role === "system" }).length, 1)
+        compare(sent[1], { role: "user", content: "Hi" })
+        reply(first, "Hallo")
+        // The note above the transcript shows the first line, as plain text.
+        var note = findChild(view, "personaLine")
+        verify(note.visible)
+        compare(note.textFormat, Text.PlainText)
+        compare(note.text, "Personality: Answer in German.")
+        // Only the persona makes a system message: none in history, none
+        // after it is removed.
+        field.text = ""
+        var second = sendText(view, "Again")
+        compare(messagesOf(second).map(function (m) { return m.role }), ["user", "assistant", "user"])
+        // The conversation never shows the persona.
+        compare(view.messages.count, 4)
+        for (var index = 0; index < view.messages.count; index++)
+            verify(view.messages.get(index).body.indexOf("German") < 0)
+    }
+
+    function test_personaLimitAndMemoryOnly() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.setPersona("llama3:latest", "x".repeat(8001))
+        input(view).text = "Hi"
+        verify(view.personaTooLong)
+        verify(!view.canSend)
+        view.setPersona("llama3:latest", "Be kind")
+        verify(view.canSend)
+        reply(sendText(view, "Hi"), "Hello")
+        // Clear keeps personalities; turning Ollama off drops them.
+        view.clearConversation(false)
+        compare(view.personaFor("llama3:latest"), "Be kind")
+        wrapper.siteOn = false
+        compare(view.personaFor("llama3:latest"), "")
+        compare(JSON.stringify(view.sessionPersonas), "{}")
+        verify(!view.comparing)
+        // Odd model names are never keys.
+        view.setPersona("__proto__", "x")
+        view.setPersona("bad name", "x")
+        compare(JSON.stringify(view.sessionPersonas), "{\"m:__proto__\":\"x\"}")
+        compare(view.personaFor("constructor"), "")
+    }
+
+    function test_regenerateReplacesTheLastReply() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.setPersona("llama3:latest", "Short answers")
+        reply(sendText(view, "First"), "One")
+        reply(sendText(view, "Second"), "Two")
+        compare(view.messages.count, 4)
+        wait(30)
+        var button = named(view, "regenerateButton")
+        verify(button !== null)
+        var checks = testCase.ownerCommands.length
+        var before = testCase.requests.length
+        button.clicked()
+        // Its own owner check, then the same history without the old reply.
+        compare(testCase.ownerCommands.length, checks + 1)
+        compare(testCase.requests.length, before + 1)
+        var again = testCase.requests[before]
+        compare(messagesOf(again), [
+            { role: "system", content: "Short answers" },
+            { role: "user", content: "First" }, { role: "assistant", content: "One" },
+            { role: "user", content: "Second" }
+        ])
+        compare(view.messages.count, 4)
+        compare(view.messages.get(3).body, "")
+        reply(again, "Two again")
+        compare(view.messages.count, 4)
+        compare(view.messages.get(2).body, "Second")
+        compare(view.messages.get(3).body, "Two again")
+        // A port owned by someone else: nothing is sent, the reply stays.
+        testCase.ownerReply = { ok: true, owner: "other" }
+        before = testCase.requests.length
+        view.regenerate("a")
+        compare(testCase.requests.length, before)
+        compare(view.problem, "other")
+        compare(view.messages.get(3).body, "Two again")
+    }
+
+    function test_regenerateOnlyForTheLastFinishedReply() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var request = sendText(view, "Hi")
+        request.chunk(piece("Part"))
+        // Not while generating.
+        var before = testCase.requests.length
+        view.regenerate("a")
+        compare(testCase.requests.length, before)
+        verify(named(view, "regenerateButton") === null)
+        request.chunk(line({ done: true }))
+        wait(30)
+        verify(named(view, "regenerateButton") !== null)
+        verify(named(view, "editButton") !== null)
+        // Only the last reply of the pane offers it.
+        reply(sendText(view, "Two"), "B")
+        wait(30)
+        var items = []
+        collect(view, items)
+        var shown = items.filter(function (item) { return item.objectName === "regenerateButton" && item.visible })
+        compare(shown.length, 1)
+    }
+
+    function test_editPutsTheLastMessageBack() {
+        var wrapper = ready()
+        var view = wrapper.view
+        reply(sendText(view, "First"), "One")
+        reply(sendText(view, "Second try"), "Two")
+        wait(30)
+        input(view).text = ""
+        var before = testCase.requests.length
+        var checks = testCase.ownerCommands.length
+        named(view, "editButton").clicked()
+        compare(input(view).text, "Second try")
+        compare(view.messages.count, 2)
+        compare(view.messages.get(1).body, "One")
+        // Nothing is sent or checked until Send.
+        compare(testCase.requests.length, before)
+        compare(testCase.ownerCommands.length, checks)
+        var resent = sendText(view, "Second, better")
+        compare(messagesOf(resent).length, 3)
+        compare(view.messages.count, 4)
+    }
+
+    function compareReady(models) {
+        var wrapper = ready(models)
+        var view = wrapper.view
+        view.setComparing(true)
+        verify(view.comparing)
+        compare(view.modelName, "llama3:latest")
+        compare(view.modelNameB, "qwen3:8b")
+        return wrapper
+    }
+
+    function test_compareRunsAThenBWithTwoOwnerChecks() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        view.setPersona("qwen3:8b", "Persona B")
+        var checks = testCase.ownerCommands.length
+        var a = sendText(view, "Same question")
+        compare(testCase.ownerCommands.length, checks + 1)
+        compare(JSON.parse(a.body).model, "llama3:latest")
+        compare(messagesOf(a), [{ role: "user", content: "Same question" }])
+        compare(input(view).text, "")
+        // B waits for A.
+        a.chunk(piece("Answer A"))
+        compare(testCase.requests.length, 3)
+        a.chunk(line({ done: true }))
+        compare(testCase.ownerCommands.length, checks + 2)
+        compare(testCase.requests.length, 4)
+        var b = testCase.requests[3]
+        compare(JSON.parse(b.body).model, "qwen3:8b")
+        compare(messagesOf(b), [{ role: "system", content: "Persona B" },
+                                { role: "user", content: "Same question" }])
+        verify(view.generating)
+        reply(b, "Answer B")
+        verify(!view.generating)
+        compare(view.messages.count, 2)
+        compare(view.messages.get(1).body, "Answer A")
+        compare(view.messagesB.count, 2)
+        compare(view.messagesB.get(1).body, "Answer B")
+        // Each pane keeps its own history.
+        var a2 = sendText(view, "Next")
+        compare(messagesOf(a2).map(function (m) { return m.content }), ["Same question", "Answer A", "Next"])
+        reply(a2, "A2")
+        var b2 = testCase.requests[testCase.requests.length - 1]
+        compare(messagesOf(b2).map(function (m) { return m.content }),
+                ["Persona B", "Same question", "Answer B", "Next"])
+        // Model B's pane shows its model name, as plain text.
+        var label = null
+        var items = []
+        collect(view, items)
+        for (var index = 0; index < items.length; index++) {
+            if (items[index].objectName === "paneModel" && items[index].text === "qwen3:8b")
+                label = items[index]
+        }
+        verify(label !== null && label.visible)
+        compare(label.textFormat, Text.PlainText)
+    }
+
+    function test_compareStopCancelsB() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        var a = sendText(view, "Q")
+        a.chunk(piece("Partial A"))
+        var checks = testCase.ownerCommands.length
+        view.stop()
+        compare(a.aborted, 1)
+        verify(!view.generating)
+        compare(view.checking, "")
+        a.chunk(line({ done: true }))
+        wait(30)
+        compare(testCase.ownerCommands.length, checks)
+        compare(testCase.requests.length, 3)
+        compare(view.messagesB.count, 0)
+        compare(view.messages.get(1).phase, "stopped")
+
+        // Stop during B's owner check: B never starts.
+        var a2 = sendText(view, "Q2")
+        testCase.ownerReply = null
+        reply(a2, "A2")
+        compare(view.checking, "send")
+        view.stop()
+        compare(view.checking, "")
+        compare(testCase.requests.length, 4)
+        compare(view.messagesB.count, 0)
+    }
+
+    function test_compareBGetsNothingWhenAFailsHard() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        var a = sendText(view, "Q")
+        a.finish(0, "")
+        compare(view.problem, "not-running")
+        compare(testCase.requests.length, 3)
+        compare(view.messagesB.count, 0)
+    }
+
+    function test_compareClearClearsBothAndUnloadsBoth() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        reply(sendText(view, "Q"), "A")
+        reply(testCase.requests[testCase.requests.length - 1], "B")
+        view.setPersona("llama3:latest", "kept")
+        var before = testCase.requests.length
+        view.clearConversation(true)
+        compare(view.messages.count, 0)
+        compare(view.messagesB.count, 0)
+        var unloads = testCase.requests.slice(before)
+        compare(unloads.length, 2)
+        compare(unloads.map(function (r) { return JSON.parse(r.body).model }).sort(),
+                ["llama3:latest", "qwen3:8b"])
+        for (var index = 0; index < unloads.length; index++)
+            compare(JSON.parse(unloads[index].body).messages, [])
+        compare(view.personaFor("llama3:latest"), "kept")
+    }
+
+    function test_compareEditAndRegeneratePerPane() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        reply(sendText(view, "Q"), "A")
+        reply(testCase.requests[testCase.requests.length - 1], "B")
+        // Regenerate in pane B asks model B only.
+        var before = testCase.requests.length
+        view.regenerate("b")
+        compare(testCase.requests.length, before + 1)
+        var again = testCase.requests[before]
+        compare(JSON.parse(again.body).model, "qwen3:8b")
+        reply(again, "B2")
+        compare(testCase.requests.length, before + 1)
+        compare(view.messagesB.get(1).body, "B2")
+        compare(view.messages.get(1).body, "A")
+        // Edit takes the message back out of both panes.
+        view.editLast()
+        compare(input(view).text, "Q")
+        compare(view.messages.count, 0)
+        compare(view.messagesB.count, 0)
+    }
+
+    function test_compareLayoutAndHint() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        var paneA = findChild(view, "transcript")
+        var paneB = findChild(view, "transcriptB")
+        verify(paneB !== null && paneB.visible)
+        verify(paneB.clip)
+        // 500 px is narrow: stacked, with the hint toward the Large popup.
+        verify(!view.sideBySide)
+        verify(findChild(view, "compareHint").visible)
+        var a = paneA.mapToItem(view, 0, 0)
+        var b = paneB.mapToItem(view, 0, 0)
+        verify(b.y > a.y)
+        wrapper.anchors.fill = undefined
+        wrapper.height = testCase.height
+        wrapper.width = Kirigami.Units.gridUnit * 41
+        verify(view.sideBySide)
+        tryVerify(function () { return paneB.mapToItem(view, 0, 0).x > paneA.mapToItem(view, 0, 0).x })
+        verify(!findChild(view, "compareHint").visible)
+        view.setComparing(false)
+        verify(!paneB.visible)
+    }
+
+    // Pane B has the same wheel handling: Ctrl+wheel zooms, a wheel up
+    // stops following, Back to bottom brings it back.
+    function test_compareSecondPaneScrollsAndZooms() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        var list = findChild(view, "transcriptB")
+        reply(sendText(view, "Long"), "A")
+        var b = testCase.requests[testCase.requests.length - 1]
+        for (var chunk = 0; chunk < 6; chunk++)
+            b.chunk(piece(paragraphs(chunk * 10, 10)))
+        b.chunk(line({ done: true }))
+        tryVerify(function () { return atBottom(list) }, 2000)
+        var asked = []
+        view.zoomRequested.connect(function (direction) { asked.push(direction) })
+        mouseWheel(list, 50, 50, 0, 120, Qt.NoButton, Qt.ControlModifier)
+        compare(asked, [1])
+        verify(atBottom(list))
+        mouseWheel(list, 50, 50, 0, 600)
+        tryVerify(function () { return !atBottom(list) })
+        var button = findChild(view, "backToBottomB")
+        tryVerify(function () { return button.visible })
+        // Pane A is unaffected.
+        verify(view.followTranscript)
+        button.clicked()
+        tryVerify(function () { return atBottom(list) })
+    }
+
+    function test_dropFillsTheInputAndNeverSends() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var field = input(view)
+        field.text = "Typed"
+        var before = testCase.requests.length
+        var checks = testCase.ownerCommands.length
+        verify(view.textDropped(true, false, "Dropped\u0007 text"))
+        compare(field.text, "Typed\n\nDropped text")
+        compare(testCase.requests.length, before)
+        compare(testCase.ownerCommands.length, checks)
+        verify(!view.generating)
+        // Files are refused, with a fixed text.
+        verify(!view.textDropped(true, true, "/home/user/file.txt"))
+        compare(view.problem, "drop-file")
+        compare(findChild(view, "problemText").text, "Drop text, not files.")
+        compare(field.text, "Typed\n\nDropped text")
+        // Too long: refused, the input stays.
+        verify(view.textDropped(true, false, "x".repeat(32000)))
+        compare(view.problem, "drop-too-long")
+        compare(field.text, "Typed\n\nDropped text")
+        // A good drop clears the drop problem.
+        verify(view.textDropped(true, false, "more"))
+        compare(view.problem, "")
+        compare(testCase.requests.length, before)
+        // Nothing without text, nothing while hidden or off.
+        verify(!view.textDropped(false, false, ""))
+        wrapper.shown = false
+        verify(!view.textDropped(true, false, "x"))
+        compare(field.text, "Typed\n\nDropped text\n\nmore")
+        compare(testCase.requests.length, before)
+    }
+
+    function test_takeDropFromThePanelIcon() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var before = testCase.requests.length
+        view.takeDrop("from the icon")
+        compare(input(view).text, "from the icon")
+        view.takeDrop("a\u0000b")
+        compare(view.problem, "drop-file")
+        compare(input(view).text, "from the icon")
+        compare(testCase.requests.length, before)
+        wrapper.siteOn = false
+        view.takeDrop("off")
+        compare(input(view).text, "")
     }
 }

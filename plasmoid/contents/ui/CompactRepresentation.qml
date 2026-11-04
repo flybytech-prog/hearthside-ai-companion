@@ -23,6 +23,28 @@ MouseArea {
             root.expanded = !root.expanded
     }
 
+    // Text dragged from another program onto the icon opens the Ollama chat
+    // with the text in its message box; nothing is sent until Send. Only
+    // text: drags with files or links are refused.
+    DropArea {
+        anchors.fill: parent
+        enabled: root.ollamaDropTarget
+        onEntered: (drag) => {
+            if (drag.hasText && !drag.hasUrls)
+                drag.accept(Qt.CopyAction)
+            else
+                drag.accepted = false
+        }
+        onDropped: (drop) => {
+            if (drop.hasText && !drop.hasUrls) {
+                root.dropToOllama(drop.text)
+                drop.accept(Qt.CopyAction)
+            } else {
+                drop.accepted = false
+            }
+        }
+    }
+
     // Only the Hearthside icon is shown in the panel; usage lives in the
     // popup and the tooltip.
     Kirigami.Icon {

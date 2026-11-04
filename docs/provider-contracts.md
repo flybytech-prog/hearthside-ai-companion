@@ -305,7 +305,7 @@ Requests, all to the configured address, nothing in the URL but the path:
 | --- | --- | --- |
 | `GET /api/version` | The Ollama view is shown, after the owner check | none |
 | `GET /api/tags` | After a valid version reply | none |
-| `POST /api/chat` | Send, after its own owner check | `{"model":m,"messages":[{"role":"user"\|"assistant","content":s},…],"stream":true}` |
+| `POST /api/chat` | Send or Regenerate, after its own owner check; while comparing, again for model B once A is done (second owner check) | `{"model":m,"messages":[{"role":"system","content":p}?,{"role":"user"\|"assistant","content":s},…],"stream":true}` |
 | `POST /api/chat` | Clear conversation, once per model used, after an owner check | `{"model":m,"messages":[],"keep_alive":0}` (unloads the model) |
 
 The only header set is `Content-Type: application/json` (POST only); no
@@ -317,6 +317,32 @@ polling: the list is loaded when the view is shown while it isn't loaded yet
 address changes. Each turn sends the whole
 conversation; prompts are at most 32000 characters (Send is disabled above
 that).
+
+System message: the model's personality (memory only, per model name, at
+most 8000 characters) is sent as the **first** message,
+`{"role":"system","content":p}`, built only by
+`OllamaChat.chatRequestBody(model, messages, system)`. No personality (empty,
+blank, null or undefined) sends no system message; a longer one, or a
+non-string, sends nothing at all (Send is disabled). The history never
+carries the system role (`ROLES` is user and assistant; a history message
+with any other role makes the body empty). llama3 obeys it (spike O1, Ollama
+0.40.13).
+
+Compare runs the two models one after the other, never at once: model A's
+request, then model B's with B's own history and personality. Stop aborts
+the running request and B is not asked; B is also not asked after a failure
+that means the server is gone (not running, refused, timeout). Clear unloads
+every model either pane used. Regenerate drops the pane's last reply and
+sends the same history again; Edit only changes the conversation in memory.
+
+Formatting (`OllamaChat.blocks`): the reply is read into heading (`#`–`###`),
+paragraph, bullet (`-`, `*`, `+`, nested to depth 2), numbered (`1.`) and
+code (```` ``` ```` fences, unterminated = code to the end) blocks, each with
+spans of plain text marked bold (`**`/`__`), italic (`*`/`_`) or inline code
+(`` ` ``). Unclosed markers stay literal; links, autolinks, images, HTML and
+entities and tables are never recognised. A block over 300 words (or 4000
+characters) is one plain span with its markers left in. Every block's text
+goes through `revealHidden` first.
 
 Replies:
 

@@ -8,7 +8,7 @@ ConfigModel {
         source: "configGeneral.qml"
     }
     ConfigCategory {
-        name: i18n("AI Usage")
+        name: i18n("AI Provider Settings")
         icon: "speedometer"
         source: "configUsage.qml"
     }

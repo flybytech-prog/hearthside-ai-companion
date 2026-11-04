@@ -59,7 +59,9 @@ plasmashell's memory.
   in your browser only after you confirm.
 - **Built-in Ollama chat** (optional, off by default): talk to the models of
   the Ollama server on this computer with a native chat — model picker,
-  streaming replies, Stop, Copy and Clear. No browser engine, conversation in
+  streaming replies with simple formatting, Stop, Copy, Regenerate, Edit and
+  Clear, a personality per model, side-by-side compare of two models, and
+  text you drag in from other programs. No browser engine, conversation in
   memory only.
 - **Stay signed in** (optional, off by default): keep chat sign-ins across
   Plasma restarts in an encrypted folder protected by a passphrase you choose
@@ -103,7 +105,7 @@ plasmashell's memory.
 ### Settings
 
 Plasma's standard configuration dialog with three pages of its own —
-**General** (popup, usage display and privacy), **AI Usage** (providers) and
+**General** (popup, usage display and privacy), **AI Provider Settings** (providers) and
 **Chat** (sites and addresses) — plus Plasma's **Keyboard Shortcuts** and
 **About**. Longer explanations sit behind the small **?** buttons. Hearthside
 starts with Plasma while it remains on a panel.
@@ -122,9 +124,25 @@ starts with Plasma while it remains on a panel.
   cloud models are hidden because they send your messages to ollama.com.
   Enter sends, Shift+Enter adds a line, Esc or **Stop** ends a reply, each
   reply and code block has a Copy button, and **Clear conversation** drops it
-  from memory and asks Ollama to unload the models it used. Replies are shown
-  as plain text, with fenced code blocks in a monospace font; links, images
-  and other formatting are not rendered. Hearthside never starts Ollama: if
+  from memory and asks Ollama to unload the models it used. **Regenerate**
+  (on the last reply) asks again, **Edit** (on your last message) puts it back
+  into the message box. Replies show headings, lists, bold, italic and inline
+  code, with fenced code blocks in a monospace font, all as plain text; links,
+  images, HTML and tables are shown as they are and never load or open
+  anything.
+  - **Personality**: the toolbar's Personality button sets an instruction for
+    the current model ("Answer briefly, in German."), sent first with every
+    message to it. It is kept in memory only, until you turn Ollama off or
+    Plasma restarts; Clear keeps it.
+  - **Compare two models**: the toolbar's Compare button adds a second model
+    and pane. Each message goes to the first model, then to the second, and
+    each pane keeps its own conversation; Stop also cancels the second
+    model's turn. Both models stay loaded until Clear, so this needs memory
+    for both. The panes sit side by side when the popup is wide enough
+    (**Settings → General → Size: Large**), else one above the other.
+  - **Drag and drop**: drag text from another program onto the chat or onto
+    the panel icon, and it lands in the message box (nothing is sent until you
+    press Send). Files are refused for now. Hearthside never starts Ollama: if
   it isn't running, the Chat tab says so and shows
   `systemctl start ollama` (or `ollama serve`). The address is
   `http://127.0.0.1:11434` unless you change it under **Show advanced
@@ -187,7 +205,7 @@ notifications.
 
 ## Configure usage providers
 
-Under **Settings → AI Usage**, track only the tools you use, and choose which
+Under **Settings → AI Provider Settings**, track only the tools you use, and choose which
 metrics of each provider the panel icon's tooltip shows (its default metric,
 such as Weekly, when none is checked).
 

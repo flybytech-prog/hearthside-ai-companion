@@ -20,6 +20,14 @@ var MAX_REPLY_CHARS = 200000
 var MAX_MODELS = 200
 var MAX_SERVER_ERROR_CHARS = 300
 var MAX_INT = 2147483648
+// A personality (system prompt) per model, memory only.
+var MAX_SYSTEM_CHARS = 8000
+// Longer blocks are shown as one plain text, markers and all: every styled
+// word is an item of its own.
+var MAX_STYLED_WORDS = 300
+var MAX_STYLED_CHARS = 4000
+// List nesting shown: 0, 1, 2.
+var MAX_LIST_DEPTH = 2
 
 var LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"]
 var ENDPOINTS = { version: "/api/version", tags: "/api/tags", chat: "/api/chat" }
@@ -160,11 +168,19 @@ function isModelName(name) {
 
 // The POST /api/chat body, or "" when anything is off. Only role and content
 // are sent; user turns are capped at MAX_PROMPT_CHARS, replies at
-// MAX_REPLY_CHARS.
-function chatRequestBody(model, messages) {
+// MAX_REPLY_CHARS. A personality (system, at most MAX_SYSTEM_CHARS) goes
+// first; "", null or undefined means none, anything else odd sends nothing.
+// Nothing else ever carries the system role.
+function chatRequestBody(model, messages, system) {
     if (!isModelName(model) || !Array.isArray(messages) || messages.length === 0)
         return ""
     var clean = []
+    if (system !== undefined && system !== null && system !== "") {
+        if (typeof system !== "string" || system.length > MAX_SYSTEM_CHARS)
+            return ""
+        if (system.trim() !== "")
+            clean.push({ role: "system", content: system })
+    }
     for (var index = 0; index < messages.length; index++) {
         var message = messages[index]
         if (!message || typeof message !== "object" || ROLES.indexOf(message.role) < 0
@@ -495,6 +511,296 @@ function segments(text) {
     }
     flush(inCode ? "code" : "text")
     return result
+}
+
+// --- Formatting ---------------------------------------------------------------
+
+// A whitelisted subset of Markdown, read into blocks the view shows as
+// separate plain text items: headings (#, ##, ###), - * + bullets, "1."
+// lists, **bold** / __bold__, *italic* / _italic_, `code` and ``` fences.
+// Links, autolinks, images, HTML tags and entities, tables and everything
+// else stay literal text: nothing is ever fetched, opened or interpreted.
+
+var HEADING_LINE = /^ {0,3}(#{1,3})[ \t]+(.*)$/
+var BULLET_LINE = /^([ \t]*)[-*+][ \t]+(.*)$/
+var NUMBER_LINE = /^([ \t]*)([0-9]{1,9})\.[ \t]+(.*)$/
+var RULE_LINE = /^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/
+
+function indentWidth(text) {
+    var width = 0
+    for (var index = 0; index < text.length; index++)
+        width += text.charAt(index) === "\t" ? 4 : 1
+    return width
+}
+
+// The nesting of a list item from its indent; indents (mutated) holds the
+// indents of the open levels.
+function listDepth(indents, width) {
+    while (indents.length > 0 && indents[indents.length - 1] > width)
+        indents.pop()
+    if (indents.length === 0 || indents[indents.length - 1] < width)
+        indents.push(width)
+    return Math.min(MAX_LIST_DEPTH, indents.length - 1)
+}
+
+function isSpace(character) {
+    return character === "" || /\s/.test(character)
+}
+
+function isWordCharacter(character) {
+    return /[A-Za-z0-9]/.test(character)
+}
+
+// Where the mark opened at open closes, else -1. Text must follow the
+// opening mark and come before the closing one; "_" only works at word
+// edges (snake_case stays as it is). noCloser remembers marks without any
+// closing left, so a run of unclosed marks stays linear.
+function closingMark(text, open, mark, noCloser) {
+    var single = mark.charAt(0)
+    if (noCloser[mark] === true || isSpace(text.charAt(open + mark.length)))
+        return -1
+    if (single === "_" && open > 0 && isWordCharacter(text.charAt(open - 1)))
+        return -1
+    var from = open + mark.length + 1
+    while (true) {
+        var close = text.indexOf(mark, from)
+        if (close < 0) {
+            noCloser[mark] = true
+            return -1
+        }
+        var after = text.charAt(close + mark.length)
+        var good = !isSpace(text.charAt(close - 1))
+            && (mark.length === 2 || after !== single)
+            && (single !== "_" || !isWordCharacter(after))
+        if (good)
+            return close
+        from = close + 1
+    }
+}
+
+function pushSpan(out, text, bold, italic, code) {
+    if (text === "")
+        return
+    var last = out.length > 0 ? out[out.length - 1] : null
+    if (last !== null && last.bold === bold && last.italic === italic && last.code === code)
+        last.text += text
+    else
+        out.push({ text: text, bold: bold, italic: italic, code: code })
+}
+
+// Bold and italic in text without inline code; unclosed marks stay literal.
+function emphasis(text, bold, italic, out, depth) {
+    var noCloser = {}
+    var index = 0
+    var plainStart = 0
+    while (index < text.length) {
+        var character = text.charAt(index)
+        if ((character !== "*" && character !== "_") || depth >= 4) {
+            index++
+            continue
+        }
+        var mark = text.charAt(index + 1) === character ? character + character : character
+        var close = closingMark(text, index, mark, noCloser)
+        if (close < 0) {
+            index += mark.length
+            continue
+        }
+        pushSpan(out, text.slice(plainStart, index), bold, italic, false)
+        emphasis(text.slice(index + mark.length, close),
+            bold || mark.length === 2, italic || mark.length === 1, out, depth + 1)
+        index = close + mark.length
+        plainStart = index
+    }
+    pushSpan(out, text.slice(plainStart), bold, italic, false)
+}
+
+// [{text, bold, italic, code}] of one block's text (already revealed). A
+// block over MAX_STYLED_WORDS words (or MAX_STYLED_CHARS characters) stays
+// one plain span, markers and all.
+function spans(text) {
+    if (typeof text !== "string" || text === "")
+        return []
+    var trimmed = text.trim()
+    var words = trimmed === "" ? 0 : trimmed.split(/\s+/).length
+    if (words > MAX_STYLED_WORDS || text.length > MAX_STYLED_CHARS)
+        return [{ text: text, bold: false, italic: false, code: false }]
+    var out = []
+    var parts = text.split("`")
+    // Odd parts sit between two backticks: inline code, kept as it is. An
+    // unclosed or empty one stays literal.
+    for (var index = 0; index < parts.length; index++) {
+        var closed = index + 1 < parts.length
+        if (index % 2 === 0)
+            emphasis(parts[index], false, false, out, 0)
+        else if (closed && parts[index] !== "")
+            pushSpan(out, parts[index], false, false, true)
+        else
+            emphasis((closed ? "``" : "`") + parts[index], false, false, out, 0)
+    }
+    return out
+}
+
+function isStyled(list) {
+    return Array.isArray(list) && list.some(function (span) {
+        return span.bold === true || span.italic === true || span.code === true
+    })
+}
+
+// The block's text without its markers.
+function spansText(list) {
+    return Array.isArray(list) ? list.map(function (span) { return span.text }).join("") : ""
+}
+
+// The pieces of styled spans as laid out word by word: [{text, bold,
+// italic, code, space, br}]. space: whitespace follows; br: a line break.
+function flowWords(list) {
+    var out = []
+    var spanList = Array.isArray(list) ? list : []
+    for (var index = 0; index < spanList.length; index++) {
+        var span = spanList[index]
+        var tokens = typeof span.text === "string" ? span.text.split(/(\s+)/) : []
+        for (var inner = 0; inner < tokens.length; inner++) {
+            var token = tokens[inner]
+            if (token === "")
+                continue
+            if (/^\s+$/.test(token)) {
+                if (out.length === 0)
+                    continue
+                if (token.indexOf("\n") >= 0)
+                    out.push({ text: "", bold: false, italic: false, code: false, space: false, br: true })
+                else
+                    out[out.length - 1].space = true
+                continue
+            }
+            out.push({ text: token, bold: span.bold === true, italic: span.italic === true,
+                       code: span.code === true, space: false, br: false })
+        }
+    }
+    return out
+}
+
+function textBlock(block) {
+    // Hidden characters become visible markers before anything is shown.
+    var shown = { kind: block.kind, spans: spans(revealHidden(block.lines.join("\n"))) }
+    if (block.kind === "heading")
+        shown.level = block.level
+    else if (block.kind === "bullet")
+        shown.depth = block.depth
+    else if (block.kind === "number")
+        shown.n = block.n
+    return shown
+}
+
+// Headings, paragraphs and list items of text outside code fences.
+function textBlocks(text) {
+    var result = []
+    var current = null
+    var indents = []
+    var flush = function () {
+        if (current !== null)
+            result.push(textBlock(current))
+        current = null
+    }
+    var lines = text.split("\n")
+    for (var index = 0; index < lines.length; index++) {
+        var line = lines[index]
+        var bare = line.replace(/\r$/, "")
+        if (/^\s*$/.test(bare)) {
+            flush()
+            continue
+        }
+        var rule = RULE_LINE.test(bare)
+        var match = rule ? null : HEADING_LINE.exec(bare)
+        if (match) {
+            flush()
+            indents = []
+            current = { kind: "heading", level: match[1].length,
+                        lines: [match[2].replace(/[ \t]+#+[ \t]*$/, "").trim()] }
+            flush()
+            continue
+        }
+        match = rule ? null : BULLET_LINE.exec(bare)
+        if (match) {
+            flush()
+            current = { kind: "bullet", depth: listDepth(indents, indentWidth(match[1])), lines: [match[2]] }
+            continue
+        }
+        match = rule ? null : NUMBER_LINE.exec(bare)
+        if (match) {
+            flush()
+            listDepth(indents, indentWidth(match[1]))
+            current = { kind: "number", n: parseInt(match[2], 10), lines: [match[3]] }
+            continue
+        }
+        if (current !== null && current.kind !== "paragraph") {
+            // A line right after a list item belongs to it.
+            current.lines.push(line.replace(/^[ \t]+/, ""))
+            continue
+        }
+        if (current === null) {
+            indents = []
+            current = { kind: "paragraph", lines: [] }
+        }
+        current.lines.push(line)
+    }
+    flush()
+    return result
+}
+
+// The reply as shown: [{kind: "heading", level, spans} | {kind: "paragraph",
+// spans} | {kind: "bullet", depth, spans} | {kind: "number", n, spans} |
+// {kind: "code", text, lang}]. Hidden, control and zero-width characters
+// are shown as markers (revealHidden) in every block, so what is shown,
+// selected and copied is the same text.
+function blocks(text) {
+    var result = []
+    var parts = segments(text)
+    for (var index = 0; index < parts.length; index++) {
+        if (parts[index].kind === "code")
+            result.push({ kind: "code", text: revealHidden(parts[index].text), lang: parts[index].lang })
+        else
+            result = result.concat(textBlocks(parts[index].text))
+    }
+    return result
+}
+
+// --- Conversation -----------------------------------------------------------
+
+// The last exchange of a transcript ([{author}]): the index of its user
+// message and of the reply to it, -1 when there is none. A user message
+// without a reply (it failed) has assistantIndex -1.
+function lastTurn(rows) {
+    var none = { userIndex: -1, assistantIndex: -1 }
+    if (!Array.isArray(rows) || rows.length === 0)
+        return none
+    var author = function (row) {
+        return row && typeof row === "object" ? row.author : ""
+    }
+    var last = rows.length - 1
+    if (author(rows[last]) === "user")
+        return { userIndex: last, assistantIndex: -1 }
+    if (author(rows[last]) !== "assistant")
+        return none
+    if (last >= 1 && author(rows[last - 1]) === "user")
+        return { userIndex: last - 1, assistantIndex: last }
+    return { userIndex: -1, assistantIndex: last }
+}
+
+// Text dropped on the chat, for the message box (it is never sent from
+// here): control characters except tab and line feed are removed, NUL
+// means it isn't text, and it is added after what is typed already.
+// {ok: true, text} is the whole new message; else {ok: false, error}.
+function dropText(text, currentInput) {
+    if (typeof text !== "string" || text.indexOf("\u0000") >= 0)
+        return { ok: false, error: "not-text" }
+    var clean = text.replace(/[\u0001-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    if (clean.trim() === "")
+        return { ok: false, error: "empty" }
+    var current = typeof currentInput === "string" ? currentInput.replace(/\s+$/, "") : ""
+    var joined = current === "" ? clean : current + "\n\n" + clean
+    if (joined.length > MAX_PROMPT_CHARS)
+        return { ok: false, error: "too-long" }
+    return { ok: true, text: joined }
 }
 
 // --- Port owner check -------------------------------------------------------

@@ -326,6 +326,30 @@ none of the web profile rules above apply to it; these do:
   may be another computer) before the widget can notice. The widget then
   drops the request and shows none of that reply, but cannot take the
   message back.
+- **Personalities.** A personality (the toolbar's Personality button) is
+  your instruction for one model, at most 8000 characters. It is sent as the
+  first message (`role: "system"`) in every request to that model, the same
+  way as the conversation. In this version it lives in Plasma's memory only:
+  **Clear conversation** keeps it, turning Ollama off in settings or a Plasma
+  restart drops it. It is never saved to a file or a setting. Only the first
+  line is shown above the conversation ("Personality: …").
+- **Compare.** With **Compare two models** on, each message goes to model A
+  and then, once A is done, to model B: two requests, each with its own port
+  owner check and its own conversation and personality. Both models then
+  hold the message in their context cache (RAM, or GPU memory) until they
+  are unloaded, so it sits in two places, and the memory needed is about the
+  sum of both models (around 2 × 5 GB for two 8B models at 4-bit; on this
+  kind of computer without a GPU that is RAM). **Stop** ends the running
+  request and B is not asked. **Clear conversation** clears both panes and
+  unloads both models.
+- **Drag and drop.** Text dragged from another program onto the chat, or onto
+  the panel icon (which opens the Ollama chat), goes into the message box
+  after what you typed; nothing is sent until you press Send. The dragged
+  text passes through the compositor like any drag and drop, as plain text
+  only (no HTML or files are read); control characters other than tab and
+  line feed are removed. Nothing is written anywhere. Files are refused
+  ("Drop text, not files."), and so is text that would make the message
+  longer than 32000 characters. Dropping is off while Ollama is off.
 - **What Ollama keeps.** Ollama holds the conversation in its memory (the
   model's context cache, also in GPU memory) until the model is unloaded,
   5 minutes after the last message by default. **Clear conversation** asks
@@ -363,7 +387,12 @@ none of the web profile rules above apply to it; these do:
   restart.
 - **What is shown.** Replies and server error messages are shown as plain
   text only, so a reply containing HTML, Markdown images or links can't make
-  the widget load anything. Fenced code blocks are shown in a monospace font.
+  the widget load anything. A small set of formatting is shown: headings
+  (`#`, `##`, `###`), bullet and numbered lists, bold, italic and inline
+  code, each as separate plain text items (never as rich text). Links,
+  images, HTML tags and entities and tables stay literal text; nothing in a
+  reply can be clicked or opened. Copy copies the reply's text as it came,
+  markers included. Fenced code blocks are shown in a monospace font.
   Hidden and control characters in a reply are shown as visible markers such
   as `⟦U+202E⟧`, with the note "This text contains hidden or control
   characters": control characters (U+0000–U+001F except tab and line feed, so
@@ -381,10 +410,14 @@ none of the web profile rules above apply to it; these do:
   (it only asks for the colour form) is left alone; emoji sequences joined
   with U+200D and right-to-left text that use these characters show the
   markers.
-- **Typing.** Spell checking is off in the message field, and it asks input
+- **Typing.** Spell checking is off in the message and personality fields, and they ask input
   methods not to learn or predict what you type (`ImhSensitiveData`,
   `ImhNoPredictiveText`); some input methods (for example CJK prediction) may
   offer fewer suggestions there.
+- **Regenerate and Edit.** Regenerate (on the last reply) sends the same
+  conversation again, after a new owner check, and replaces that reply; Edit
+  (on your last message) puts it back into the message box and removes it and
+  its reply from the conversation, sending nothing until Send.
 - **Copying.** The Copy buttons and Ctrl+C put text on the clipboard, where a
   clipboard manager such as Klipper may keep it (see below). They copy the
   text as shown, with the markers, never the characters listed above, so none
