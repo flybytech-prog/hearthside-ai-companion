@@ -16,6 +16,7 @@ import "PromptLibrary.js" as PromptLibrary
 import "SettingsLogic.js" as SettingsLogic
 import "AlertLogic.js" as AlertLogic
 import "TooltipLogic.js" as TooltipLogic
+import "UsageLogic.js" as UsageLogic
 
 PlasmoidItem {
     id: root
@@ -224,8 +225,18 @@ PlasmoidItem {
     )
     readonly property var configuredMetrics: configuredObject(
         Plasmoid.configuration.providerMetrics,
-        {"claude": ["weekly"], "codex": ["weekly"]}
+        {}
     )
+    // Settings → AI Provider Settings → Usage tab.
+    readonly property var providerOrder: UsageLogic.normalizeOrder(
+        Plasmoid.configuration.providerOrder, Catalog.providerIds())
+    // The Usage tab's providers in that order; the hover popup and the
+    // alerts follow it too.
+    readonly property var shownProviders: UsageLogic.orderProviders(
+        root.snapshot.providers || [], root.providerOrder)
+    readonly property bool usageCompact: Plasmoid.configuration.usageCompact === true
+    readonly property var usageThresholds: UsageLogic.normalizeThresholds(
+        Plasmoid.configuration.usageWarnPercent, Plasmoid.configuration.usageCriticalPercent)
     readonly property var tooltipGroups: TooltipLogic.applyChoice(
         root.tooltipProviderGroups(), root.tooltipChoice)
     readonly property color normalUsageColor: {
@@ -332,17 +343,19 @@ PlasmoidItem {
     }
 
     function barColor(rawUsed) {
-        if (rawUsed >= 85)
+        var level = UsageLogic.usageLevel(rawUsed, root.usageThresholds)
+        if (level === "critical")
             return Kirigami.Theme.negativeTextColor
-        if (rawUsed >= 60)
+        if (level === "warning")
             return Kirigami.Theme.neutralTextColor
         return root.normalUsageColor
     }
 
     function valueColor(rawUsed) {
-        if (rawUsed >= 85)
+        var level = UsageLogic.usageLevel(rawUsed, root.usageThresholds)
+        if (level === "critical")
             return Kirigami.Theme.negativeTextColor
-        if (rawUsed >= 60)
+        if (level === "warning")
             return Kirigami.Theme.neutralTextColor
         return Kirigami.Theme.textColor
     }
@@ -354,11 +367,11 @@ PlasmoidItem {
             : "speedometer"
     }
 
-    // The providers the Usage tab shows, each with its selected metrics
-    // (else its default metric).
+    // The providers the Usage tab shows, in its order, each with its
+    // selected metrics (else its default metric).
     function tooltipProviderGroups() {
         var result = []
-        var shown = root.snapshot.providers || []
+        var shown = root.shownProviders
         for (var index = 0; index < shown.length; index++) {
             var providerId = shown[index].provider_id
             var descriptor = Catalog.byId(providerId)
@@ -1193,11 +1206,26 @@ PlasmoidItem {
         onTriggered: Plasmoid.internalAction("configure").trigger()
     }
 
+    // Settings schema 2 -> 3, once: the reading boxes now filter the Usage
+    // tab. A choice saved for the hover popup moves to tooltipMetrics (unless
+    // it has its own), and the Usage tab shows every reading again.
+    function migrateUsageMetrics() {
+        var next = UsageLogic.migratedUsageMetrics(Plasmoid.configuration.providerMetrics,
+            Plasmoid.configuration.tooltipMetrics, Catalog.providers)
+        if (Plasmoid.configuration.tooltipMetrics !== next.tooltipMetrics)
+            Plasmoid.configuration.tooltipMetrics = next.tooltipMetrics
+        if (Plasmoid.configuration.providerMetrics !== next.providerMetrics)
+            Plasmoid.configuration.providerMetrics = next.providerMetrics
+    }
+
     Component.onCompleted: {
         if (Plasmoid.configuration.refreshInterval !== root.refreshInterval)
             Plasmoid.configuration.refreshInterval = root.refreshInterval
-        if (Plasmoid.configuration.configSchemaVersion !== 2)
-            Plasmoid.configuration.configSchemaVersion = 2
+        // A fresh widget has nothing to migrate.
+        if (Plasmoid.configuration.initialSetupComplete && Number(Plasmoid.configuration.configSchemaVersion) < 3)
+            root.migrateUsageMetrics()
+        if (Plasmoid.configuration.configSchemaVersion !== 3)
+            Plasmoid.configuration.configSchemaVersion = 3
         if (!Plasmoid.configuration.initialSetupComplete) {
             Plasmoid.configuration.initialSetupComplete = true
             firstRunSettingsTimer.start()

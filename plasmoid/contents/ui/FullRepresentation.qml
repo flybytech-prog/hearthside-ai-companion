@@ -187,14 +187,6 @@ PlasmaExtras.Representation {
                     }
                 }
                 PlasmaComponents.ToolButton {
-                    icon.name: "view-refresh"
-                    display: QQC2.AbstractButton.IconOnly
-                    visible: root.usageShown
-                    onClicked: root.refresh()
-                    QQC2.ToolTip.text: i18n("Refresh now")
-                    QQC2.ToolTip.visible: hovered
-                }
-                PlasmaComponents.ToolButton {
                     icon.name: "configure"
                     display: QQC2.AbstractButton.IconOnly
                     onClicked: Plasmoid.internalAction("configure").trigger()
@@ -521,15 +513,9 @@ PlasmaExtras.Representation {
                 topMargin: Kirigami.Units.smallSpacing
                 bottomMargin: Kirigami.Units.smallSpacing
             }
-            PlasmaComponents.Label {
+            // The update time and Refresh sit at the top of the Usage tab.
+            Item {
                 Layout.fillWidth: true
-                textFormat: Text.PlainText
-                text: root.hasData
-                    ? i18n("Updated %1", Qt.formatTime(root.lastUpdate, "HH:mm:ss"))
-                    : i18n("Loading…")
-                opacity: 0.6
-                font: Kirigami.Theme.smallFont
-                elide: Text.ElideRight
             }
             PlasmaComponents.Label {
                 textFormat: Text.PlainText

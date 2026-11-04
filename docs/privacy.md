@@ -37,6 +37,26 @@ as a starting point again and never notifies. `scripts/install.sh` installs
 so the two events appear in System Settings; it holds names and settings
 only.
 
+The usage settings are stored like every other widget setting: in plain
+text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`, which is often
+readable by other users (mode `0644`). They hold provider and reading ids
+from the built-in catalog, choices and percentages only; never a credential,
+an account, a plan name, a reading or an error from a provider.
+
+| Setting | Where it is set | What it contains |
+| --- | --- | --- |
+| `trackedProviders` | AI Provider Settings → Track | The tracked provider ids, for example `["claude","codex"]` |
+| `providerMetrics` | AI Provider Settings → reading boxes | The readings the Usage tab shows per provider, for example `{"claude":["session","weekly"]}`; a provider left out (the default, `{}`) shows all its readings |
+| `providerOrder` | AI Provider Settings → Move up / Move down | The provider order, for example `["codex","claude"]`; empty (the default) is the built-in order |
+| `usageCompact` | AI Provider Settings → Layout: Compact | `true` or `false` (the default) |
+| `usageWarnPercent`, `usageCriticalPercent` | AI Provider Settings → Warning / Critical colour from | Percent used in steps of 5: warning 50 to 90 (60 by default), critical 55 to 95 (85 by default) |
+| `configSchemaVersion` | Written by the widget | The settings format, now `3`; it makes the upgrade step above run once |
+| `tooltipShowsUsage`, `tooltipShowsReset` | AI Provider Settings → Hover popup | `true` (the default) or `false` |
+| `tooltipMetrics` | AI Provider Settings → Hover popup → Readings | The hover popup's own readings, for example `{"claude":["session","weekly"]}`, or empty (the default) for Same as the Usage tab. On the first start after the upgrade that made the reading boxes filter the Usage tab, a saved `providerMetrics` choice moves here (unless this already had one), and `providerMetrics` becomes `{}` |
+| `usageMode` | General → Display, or the popup's Left / Used | `remaining` (the default) or `used` |
+| `refreshInterval` | General → Refresh every | Seconds: 60, 300 (the default), 900, 1800 or 3600 |
+| `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled` | General → Notifications | On/off and a percentage left (20 by default) |
+
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
 is written to `$XDG_CACHE_HOME/hearthside/antigravity-auth.json` (falling back
@@ -307,8 +327,8 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `tooltipShowsReset`, the hover popup readings (`tooltipMetrics`, for example `{"claude":["session","weekly"]}`, or empty for the Usage tab's), `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled`, and
-`chatVaultUnlock`, Passphrase or KDE Wallet), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, and
+`chatVaultUnlock`, Passphrase or KDE Wallet), and the usage settings in the table near the top of this page, in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Prompt library | This session's prompts and personalities in Plasma memory only | Saved in the encrypted folder (`library/`); in Plasma memory only while unlocked; never in the configuration |
 | KDE Wallet key | Not used | With Unlock with KDE Wallet: a random key in your KDE Wallet and a key slot file `vault-keys/wallet.conf` next to the encrypted folder |

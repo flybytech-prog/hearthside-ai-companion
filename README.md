@@ -105,9 +105,22 @@ plasmashell's memory.
 ### Usage
 
 - Shows each available quota, plan, reset time, extra usage or credits, with
-  **Left** and **Used** display modes; hover over the panel icon for a short
-  summary with the time until each reset, such as
-  `Claude Code — Session: 62% left, resets in 2 h 10 min`.
+  **Left** and **Used** display modes. You choose which readings each
+  provider shows (all of them by default) and the order of the providers.
+- **Updated N min ago** at the top of the tab, with a **Refresh** button.
+  The button is there also while the first reading loads or after it failed,
+  and is greyed out while a refresh is running.
+- **Compact layout** (optional): one slim bar per reading with its name,
+  value and a short time until reset (such as Weekly, 38%, 2d 4h), without
+  plan names or captions; errors still show, on one line.
+- **Warning colours**: bars and values turn to your theme's warning colour
+  from 60% used and to its critical colour from 85% used; both levels can be
+  changed in steps of 5% (50% to 95%), whether the tab shows Left or Used.
+- **Hover popup**: hover over the panel icon for a short summary, such as
+  `Claude Code — Session: 62% left, resets in 2 h 10 min`. It shows the Usage
+  tab's readings, or readings you choose per provider, with or without the
+  time until each reset. Claude Code has no daily limit: its **Session** is
+  the 5-hour window and **Weekly** the 7-day one.
 - Detects installed tools through the Plasma login environment, CLI names, and
   Linux/XDG data locations, and contacts only providers that are both
   installed and tracked.
@@ -123,9 +136,10 @@ plasmashell's memory.
 ### Settings
 
 Plasma's standard configuration dialog with three pages of its own —
-**General** (popup, usage display and privacy), **AI Provider Settings** (providers) and
-**Chat** (sites and addresses) — plus Plasma's **Keyboard Shortcuts** and
-**About**. Longer explanations sit behind the small **?** buttons. Hearthside
+**General** (popup, usage display, refresh and notifications, privacy),
+**AI Provider Settings** (providers and their order, the Usage tab's
+readings, layout and colours, and the hover popup) and **Chat** (sites and
+addresses) — plus Plasma's **Keyboard Shortcuts** and **About**. Longer explanations sit behind the small **?** buttons. Hearthside
 starts with Plasma while it remains on a panel.
 
 ### Chat sites
@@ -205,12 +219,8 @@ starts with Plasma while it remains on a panel.
   chooses what it opens: the popup as when clicking the icon, Chat, the
   Ollama message box (ready to type; the normal popup while Ollama is off) or
   Usage. Pressing the shortcut again closes the popup.
-- **Usage**: **Display** Left or Used, **Refresh every**, **Hover popup**
-  (**Show usage when hovering over the panel icon**, **Show time until
-  reset**, and **Readings**: **Same as the Usage tab**, or untick it to choose
-  each tracked provider's readings, for example Claude Code's Session, its
-  5-hour window, next to Weekly; percentages say "left" or "used" as Display
-  shows), and **Notifications**: **Notify when
+- **Usage**: **Display** Left or Used (for the Usage tab and the hover
+  popup), **Refresh every**, and **Notifications**: **Notify when
   a plan drops below** a percentage **left** (20% by default, whatever
   Display shows) and **Notify when a plan resets** (only for a plan that had
   dropped that low). Plans are checked at each usage refresh while the Usage
@@ -221,16 +231,51 @@ starts with Plasma while it remains on a panel.
   and under **Show folder actions** **Change passphrase…** and **Delete
   encrypted folder…**.
 
+The hover popup's settings are under **Settings → AI Provider Settings**
+(see below).
+
+### Settings → AI Provider Settings
+
+- **Usage tab**: **Layout: Compact** (one slim bar per reading), **Warning
+  colour from** (50% to 90% used, 60% by default) and **Critical colour
+  from** (55% to 95% used, 85% by default); when one pick passes the other
+  level, that other level moves so the critical one stays higher), and the
+  **Refresh status** button, which checks the tracked providers once.
+- **Providers and readings**: one row per provider, in the order the Usage
+  tab, the hover popup and the notifications list them. The **Move up** and
+  **Move down** arrow buttons move a tracked provider past the next tracked
+  one (untracked providers keep their place and can't be moved); **Track** turns it on or off; the reading boxes
+  (for example Claude Code's Session, Weekly, Sonnet, Fable and Extra Usage)
+  choose what the Usage tab shows. Every box is ticked at first, which also
+  shows readings added later; the last ticked box can't be unticked (turn
+  **Track** off instead). A reading the provider doesn't report right now is
+  marked "(unavailable)".
+- **Hover popup**: **Show usage when hovering over the panel icon**, **Show
+  time until reset**, and **Readings**: **Same as the Usage tab** (the ticked
+  readings, or each provider's main reading, such as Weekly, while all of its
+  readings are ticked), or untick it to choose each tracked provider's own
+  readings, for example Claude Code's Session, its 5-hour window, next to
+  Weekly. Percentages say "left" or "used" as **General → Display** shows.
+
+Usage notifications follow the Usage tab's ticked readings, or each
+provider's main reading while all of its readings are ticked.
+
+Upgrading from a version where these boxes chose only the hover popup's
+readings: on its first start the widget moves that choice to the hover
+popup's own **Readings** (unless it already had its own), so the hover popup
+shows the same as before, and the Usage tab starts with every reading shown.
+
 Fresh installs open on Chat, show both tabs at Normal size, track all
-providers, display usage left, refresh every five minutes, and send no
-notifications.
+providers in catalog order with every reading shown in the standard layout,
+display usage left, refresh every five minutes, colour bars from 60% and 85%
+used, and send no notifications.
 
 ## Configure usage providers
 
-Under **Settings → AI Provider Settings**, track only the tools you use, and choose which
-metrics of each provider the panel icon's tooltip shows (its default metric,
-such as Weekly, when none is checked), unless **Settings → General → Usage →
-Readings** chooses the tooltip's own.
+Under **Settings → AI Provider Settings**, track only the tools you use, put
+them in the order you want, and untick the readings you don't need in the
+Usage tab. The hover popup shows the same readings unless you untick
+**Same as the Usage tab** there and choose its own.
 
 ## Install
 

@@ -6,6 +6,8 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ProviderCatalog.js" as Catalog
+import "TooltipLogic.js" as TooltipLogic
+import "UsageLogic.js" as UsageLogic
 
 KCM.ScrollViewKCM {
     id: page
@@ -14,10 +16,8 @@ KCM.ScrollViewKCM {
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
     property string cfg_trackedProvidersDefault:
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
-    property string cfg_providerMetrics:
-        "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
-    property string cfg_providerMetricsDefault:
-        "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
+    property string cfg_providerMetrics: "{}"
+    property string cfg_providerMetricsDefault: "{}"
     property string cfg_usageMode: "remaining"
     property string cfg_usageModeDefault: "remaining"
     property int cfg_refreshInterval: 300
@@ -74,8 +74,48 @@ KCM.ScrollViewKCM {
     property int cfg_alertLowPercentDefault: 20
     property bool cfg_alertResetEnabled: false
     property bool cfg_alertResetEnabledDefault: false
+    property string cfg_providerOrder: ""
+    property string cfg_providerOrderDefault: ""
+    property bool cfg_usageCompact: false
+    property bool cfg_usageCompactDefault: false
+    property int cfg_usageWarnPercent: 60
+    property int cfg_usageWarnPercentDefault: 60
+    property int cfg_usageCriticalPercent: 85
+    property int cfg_usageCriticalPercentDefault: 85
 
     property var catalogModel: Catalog.providers
+    // The provider rows in the Usage tab's order.
+    readonly property var providerOrder: UsageLogic.normalizeOrder(page.cfg_providerOrder, Catalog.providerIds())
+    readonly property var orderedCatalog: UsageLogic.orderProviders(page.catalogModel, page.providerOrder)
+    readonly property var thresholds: UsageLogic.normalizeThresholds(
+        page.cfg_usageWarnPercent, page.cfg_usageCriticalPercent)
+    // Warning 50–90, critical 55–95: every pick is kept, the other level
+    // moves out of its way.
+    readonly property var warnChoices: UsageLogic.WARN_PERCENTS.map(function (percent) {
+        return { value: percent, text: i18n("%1% used", percent) }
+    })
+    readonly property var criticalChoices: UsageLogic.CRITICAL_PERCENTS.map(function (percent) {
+        return { value: percent, text: i18n("%1% used", percent) }
+    })
+    // The arrows order the tracked providers only.
+    readonly property var trackedIds: page.tracked()
+    // Hover popup readings: null while "Same as the Usage tab" is on.
+    readonly property var tooltipChoice: TooltipLogic.parseTooltipMetrics(page.cfg_tooltipMetrics, Catalog.providers)
+    readonly property bool tooltipReadingsEnabled: page.cfg_showUsageTab && page.cfg_tooltipShowsUsage
+    // Tracked providers in the Usage tab's order (all of them if the list is odd).
+    readonly property var tooltipProviders: {
+        var tracked = null
+        try {
+            tracked = JSON.parse(page.cfg_trackedProviders || "")
+        } catch (error) {
+        }
+        var ordered = UsageLogic.orderProviders(Catalog.providers, page.providerOrder)
+        if (!Array.isArray(tracked))
+            return ordered
+        return ordered.filter(function (provider) {
+            return tracked.indexOf(provider.provider_id) >= 0
+        })
+    }
     property var installedProviderIds: []
     property var providerResults: ({})
     property string statusMessage: ""
@@ -127,23 +167,105 @@ KCM.ScrollViewKCM {
         )
     }
 
+    // The ticked readings that are still catalog metrics, as main.qml reads them.
     function selectedMetrics(providerId) {
-        var result = parseMetrics()[providerId]
-        return Array.isArray(result) ? result : []
+        return UsageLogic.effectiveChoice(parseMetrics()[providerId], page.metricIds(providerId))
     }
 
+    function metricIds(providerId) {
+        var descriptor = Catalog.byId(providerId)
+        return descriptor ? descriptor.metrics.map(function (metric) { return metric.id }) : []
+    }
+
+    // No ticked reading stored means the Usage tab shows them all, so every
+    // box shows ticked; the last ticked one can't be unticked.
     function setMetric(providerId, metricId, enabled) {
         var metrics = parseMetrics()
-        var selected = Array.isArray(metrics[providerId])
-            ? metrics[providerId].slice() : []
-        selected = setMembership(selected, metricId, enabled)
-        metrics[providerId] = selected
+        var selected = Array.isArray(metrics[providerId]) ? metrics[providerId] : []
+        var next = UsageLogic.toggleMetric(selected, page.metricIds(providerId), metricId, enabled)
+        if (next.length === 0)
+            delete metrics[providerId]
+        else
+            metrics[providerId] = next
         page.cfg_providerMetrics = JSON.stringify(metrics)
         if (enabled) {
             page.cfg_trackedProviders = JSON.stringify(
                 setMembership(tracked(), providerId, true)
             )
         }
+    }
+
+    function lastShownMetric(providerId, metricId) {
+        return UsageLogic.isLastShown(parseMetrics()[providerId], page.metricIds(providerId), metricId)
+    }
+
+    function canMove(providerId, direction) {
+        return UsageLogic.canMove(page.providerOrder, providerId, direction, page.trackedIds)
+    }
+
+    // Swaps with the next tracked provider; untracked ones keep their place.
+    function moveProvider(providerId, direction) {
+        page.cfg_providerOrder = JSON.stringify(
+            UsageLogic.moveId(page.providerOrder, providerId, direction, page.trackedIds))
+    }
+
+    function descriptorFor(providerId) {
+        var list = page.catalogModel || []
+        for (var index = 0; index < list.length; index++) {
+            if (list[index] && list[index].provider_id === providerId)
+                return list[index]
+        }
+        return Catalog.byId(providerId)
+    }
+
+    // Moves the rows instead of resetting the model, so the list keeps its
+    // scroll position and the arrow keeps its focus.
+    function syncProviderRows() {
+        var wanted = page.orderedCatalog.map(function (provider) { return provider.provider_id })
+        var current = []
+        for (var index = 0; index < providerRows.count; index++)
+            current.push(providerRows.get(index).providerId)
+        var moves = UsageLogic.syncMoves(current, wanted)
+        if (moves === null) {
+            providerRows.clear()
+            for (var add = 0; add < wanted.length; add++)
+                providerRows.append({ providerId: wanted[add] })
+            return
+        }
+        for (var step = 0; step < moves.length; step++)
+            providerRows.move(moves[step].from, moves[step].to, 1)
+    }
+
+    onOrderedCatalogChanged: page.syncProviderRows()
+
+    ListModel {
+        id: providerRows
+    }
+
+    function setThresholds(warn, critical) {
+        var next = UsageLogic.normalizeThresholds(warn, critical)
+        page.cfg_usageWarnPercent = next.warn
+        page.cfg_usageCriticalPercent = next.critical
+    }
+
+    function setTooltipSame(same) {
+        page.cfg_tooltipMetrics = same ? "" : JSON.stringify(
+            TooltipLogic.seedTooltipMetrics(page.cfg_providerMetrics, Catalog.providers))
+    }
+
+    function setTooltipMetric(providerId, metricId, enabled) {
+        var choice = page.tooltipChoice
+            || TooltipLogic.seedTooltipMetrics(page.cfg_providerMetrics, Catalog.providers)
+        page.cfg_tooltipMetrics = JSON.stringify(
+            TooltipLogic.setTooltipMetric(choice, Catalog.providers, providerId, metricId, enabled))
+    }
+
+    function choiceIndex(choices, value, fallback) {
+        for (var index = 0; index < choices.length; index++) {
+            if (choices[index].value === value)
+                return index
+        }
+        return fallback
     }
 
     function resultFor(providerId) {
@@ -188,8 +310,10 @@ KCM.ScrollViewKCM {
     }
 
     Component.onCompleted: {
-        page.cfg_configSchemaVersion = 2
+        // Never back to 2, which would run main.qml's migration again.
+        page.cfg_configSchemaVersion = 3
         page.cfg_initialSetupComplete = true
+        page.syncProviderRows()
         Qt.callLater(page.detectProviders)
     }
 
@@ -240,7 +364,7 @@ KCM.ScrollViewKCM {
         id: providerList
         clip: true
         spacing: Kirigami.Units.smallSpacing
-        model: page.catalogModel
+        model: providerRows
 
         header: ColumnLayout {
             width: providerList.width
@@ -250,10 +374,10 @@ KCM.ScrollViewKCM {
                 Layout.fillWidth: true
                 Kirigami.Heading {
                     level: 2
-                    text: i18n("Providers")
+                    text: i18n("Usage tab")
                 }
                 Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Tracked providers appear in the Usage tab. The checked metrics are shown when you hover over the panel icon, unless General → Hover popup chooses its own readings. Credentials stay on this computer; the helper only contacts the usage APIs of providers you track.")
+                    toolTipText: i18n("Tracked providers appear in the Usage tab in the order below. The arrows move a tracked provider past the next tracked one; untracked providers keep their place and can't be moved. The ticked readings are the ones the Usage tab shows; with every reading ticked it also shows readings added later. Usage notifications follow the ticked readings, or a provider's main reading while all are ticked. Credentials stay on this computer; the helper only contacts the usage APIs of providers you track.")
                 }
                 Item {
                     Layout.fillWidth: true
@@ -272,11 +396,70 @@ KCM.ScrollViewKCM {
                 wrapMode: Text.WordWrap
                 opacity: 0.72
             }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                RowLayout {
+                    Kirigami.FormData.label: i18n("Layout:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.CheckBox {
+                        objectName: "usageCompactChoice"
+                        enabled: page.cfg_showUsageTab
+                        text: i18n("Compact")
+                        checked: page.cfg_usageCompact
+                        onToggled: page.cfg_usageCompact = checked
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Shows one slim bar per reading with its name, value and time until reset, without plan names or captions. Errors still show, on one line.")
+                    }
+                }
+
+                RowLayout {
+                    Kirigami.FormData.label: i18n("Warning colour from:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.ComboBox {
+                        objectName: "usageWarnChoice"
+                        enabled: page.cfg_showUsageTab
+                        textRole: "text"
+                        valueRole: "value"
+                        model: page.warnChoices
+                        currentIndex: page.choiceIndex(page.warnChoices, page.thresholds.warn, 2)
+                        onActivated: page.setThresholds(currentValue, page.thresholds.critical)
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Bars and values turn to the warning colour from this much used, and to the critical colour from the Critical level, whether the popup shows Left or Used. The critical level stays above the warning level.")
+                    }
+                }
+
+                QQC2.ComboBox {
+                    objectName: "usageCriticalChoice"
+                    Kirigami.FormData.label: i18n("Critical colour from:")
+                    enabled: page.cfg_showUsageTab
+                    textRole: "text"
+                    valueRole: "value"
+                    model: page.criticalChoices
+                    currentIndex: page.choiceIndex(page.criticalChoices, page.thresholds.critical, 6)
+                    onActivated: {
+                        // Keeps the pick: the warning level moves below it.
+                        var warn = Math.min(page.thresholds.warn, currentValue - 5)
+                        page.setThresholds(warn, currentValue)
+                    }
+                }
+            }
+
+            Kirigami.Heading {
+                level: 3
+                text: i18n("Providers and readings")
+            }
         }
 
         delegate: Rectangle {
             id: providerRow
-            required property var modelData
+            required property string providerId
+            readonly property var descriptor: page.descriptorFor(providerRow.providerId) || ({})
             width: providerList.width
             implicitHeight: providerColumn.implicitHeight
                 + Kirigami.Units.largeSpacing * 2
@@ -303,7 +486,7 @@ KCM.ScrollViewKCM {
 
                     Kirigami.Icon {
                         source: Qt.resolvedUrl(
-                            "../images/" + providerRow.modelData.icon
+                            "../images/" + providerRow.descriptor.icon
                         )
                         Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
                         Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
@@ -317,7 +500,7 @@ KCM.ScrollViewKCM {
                             Layout.fillWidth: true
                             level: 4
                             textFormat: Text.PlainText
-                            text: providerRow.modelData.display_name
+                            text: providerRow.descriptor.display_name
                             elide: Text.ElideRight
                         }
                         QQC2.Label {
@@ -325,21 +508,50 @@ KCM.ScrollViewKCM {
                             // Helper text: never rich text.
                             textFormat: Text.PlainText
                             text: page.providerStatus(
-                                providerRow.modelData.provider_id
+                                providerRow.descriptor.provider_id
                             )
                             opacity: 0.62
                             elide: Text.ElideRight
                             font: Kirigami.Theme.smallFont
                         }
                     }
+                    QQC2.ToolButton {
+                        id: moveUpButton
+                        icon.name: "go-up"
+                        display: QQC2.AbstractButton.IconOnly
+                        text: i18n("Move up")
+                        enabled: page.canMove(providerRow.providerId, -1)
+                        onClicked: {
+                            page.moveProvider(providerRow.providerId, -1)
+                            // At the top: the row's other arrow keeps the focus.
+                            if (!moveUpButton.enabled && moveDownButton.enabled)
+                                moveDownButton.forceActiveFocus()
+                        }
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
+                    }
+                    QQC2.ToolButton {
+                        id: moveDownButton
+                        icon.name: "go-down"
+                        display: QQC2.AbstractButton.IconOnly
+                        text: i18n("Move down")
+                        enabled: page.canMove(providerRow.providerId, 1)
+                        onClicked: {
+                            page.moveProvider(providerRow.providerId, 1)
+                            if (!moveDownButton.enabled && moveUpButton.enabled)
+                                moveUpButton.forceActiveFocus()
+                        }
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
+                    }
                     QQC2.Switch {
                         text: i18n("Track")
                         checked: page.contains(
                             page.tracked(),
-                            providerRow.modelData.provider_id
+                            providerRow.descriptor.provider_id
                         )
                         onClicked: page.setTracked(
-                            providerRow.modelData.provider_id,
+                            providerRow.descriptor.provider_id,
                             checked
                         )
                     }
@@ -350,29 +562,33 @@ KCM.ScrollViewKCM {
                     spacing: Kirigami.Units.smallSpacing
 
                     Repeater {
-                        model: providerRow.modelData.metrics || []
+                        model: providerRow.descriptor.metrics || []
 
                         delegate: QQC2.CheckBox {
                             id: metricCheck
                             required property var modelData
                             text: page.metricAvailable(
-                                providerRow.modelData.provider_id,
+                                providerRow.descriptor.provider_id,
                                 metricCheck.modelData.id
                             )
                                 ? metricCheck.modelData.title
                                 : i18n("%1 (unavailable)", metricCheck.modelData.title)
                             opacity: page.metricAvailable(
-                                providerRow.modelData.provider_id,
+                                providerRow.descriptor.provider_id,
                                 metricCheck.modelData.id
                             ) ? 1 : 0.65
-                            checked: page.contains(
+                            checked: UsageLogic.isShown(
                                 page.selectedMetrics(
-                                    providerRow.modelData.provider_id
+                                    providerRow.descriptor.provider_id
                                 ),
                                 metricCheck.modelData.id
                             )
+                            enabled: !metricCheck.checked || !page.lastShownMetric(
+                                providerRow.descriptor.provider_id,
+                                metricCheck.modelData.id
+                            )
                             onClicked: page.setMetric(
-                                providerRow.modelData.provider_id,
+                                providerRow.descriptor.provider_id,
                                 metricCheck.modelData.id,
                                 checked
                             )
@@ -393,6 +609,84 @@ KCM.ScrollViewKCM {
                 text: page.statusMessage
                 wrapMode: Text.WordWrap
                 opacity: 0.72
+            }
+
+            Kirigami.Heading {
+                Layout.topMargin: Kirigami.Units.largeSpacing
+                level: 2
+                text: i18n("Hover popup")
+            }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                RowLayout {
+                    Kirigami.FormData.label: i18n("Panel icon:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.CheckBox {
+                        objectName: "tooltipUsageChoice"
+                        enabled: page.cfg_showUsageTab
+                        text: i18n("Show usage when hovering over the panel icon")
+                        checked: page.cfg_tooltipShowsUsage
+                        onToggled: page.cfg_tooltipShowsUsage = checked
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Percentages follow General → Display: Left shows \"62% left\", Used shows \"38% used\".")
+                    }
+                }
+
+                QQC2.CheckBox {
+                    objectName: "tooltipResetChoice"
+                    enabled: page.tooltipReadingsEnabled
+                    text: i18n("Show time until reset")
+                    checked: page.cfg_tooltipShowsReset
+                    onToggled: page.cfg_tooltipShowsReset = checked
+                }
+
+                RowLayout {
+                    Kirigami.FormData.label: i18n("Readings:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.CheckBox {
+                        objectName: "tooltipSameChoice"
+                        enabled: page.tooltipReadingsEnabled
+                        text: i18n("Same as the Usage tab")
+                        checked: page.tooltipChoice === null
+                        onToggled: page.setTooltipSame(checked)
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Same as the Usage tab shows the readings ticked above, or each provider's main reading while all of its readings are ticked. Turn it off to choose the hover popup's readings for each tracked provider here. Claude Code has no daily limit: its Session is the 5-hour window, Weekly the 7-day one.")
+                    }
+                }
+
+                Repeater {
+                    model: page.tooltipChoice === null ? [] : page.tooltipProviders
+
+                    delegate: RowLayout {
+                        id: tooltipProviderRow
+                        required property var modelData
+                        Kirigami.FormData.label: i18nc("@label provider name", "%1:", tooltipProviderRow.modelData.display_name)
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Repeater {
+                            model: tooltipProviderRow.modelData.metrics || []
+
+                            delegate: QQC2.CheckBox {
+                                id: tooltipMetricCheck
+                                required property var modelData
+                                objectName: "tooltipMetric_" + tooltipProviderRow.modelData.provider_id
+                                    + "_" + tooltipMetricCheck.modelData.id
+                                enabled: page.tooltipReadingsEnabled
+                                text: tooltipMetricCheck.modelData.title
+                                checked: TooltipLogic.isChosen(page.tooltipChoice,
+                                    tooltipProviderRow.modelData.provider_id, tooltipMetricCheck.modelData.id)
+                                onToggled: page.setTooltipMetric(tooltipProviderRow.modelData.provider_id,
+                                    tooltipMetricCheck.modelData.id, checked)
+                            }
+                        }
+                    }
+                }
             }
             Item {
                 implicitHeight: Kirigami.Units.largeSpacing

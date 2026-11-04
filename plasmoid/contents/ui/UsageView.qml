@@ -5,17 +5,22 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
 import "SnapshotLogic.js" as SnapshotLogic
+import "UsageLogic.js" as UsageLogic
+import "ProviderCatalog.js" as Catalog
 
 // Usage tab body, moved verbatim from FullRepresentation.qml.
 // Names, plans, captions, errors and amounts come from the helper (and so
 // from provider servers): every label shows them as plain text only, never
 // as rich text that could load images or links.
+// Settings → AI Provider Settings → Usage tab picks the providers' order,
+// their readings (none ticked = all) and the compact layout.
 ColumnLayout {
     id: usage
 
     spacing: Kirigami.Units.smallSpacing
 
-    // Wall clock for the reset and retry countdowns; ticks only while open.
+    // Wall clock for the reset and retry countdowns and "Updated N min
+    // ago"; ticks only while open.
     property double nowMs: Date.now()
 
     Timer {
@@ -24,6 +29,34 @@ ColumnLayout {
         triggeredOnStart: true
         running: root.expanded
         onTriggered: usage.nowMs = Date.now()
+    }
+
+    // Refresh shows also while loading and after a failed first load.
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        PlasmaComponents.Label {
+            objectName: "usageUpdatedLabel"
+            Layout.fillWidth: true
+            visible: root.hasData
+            textFormat: Text.PlainText
+            text: usage.updatedText(root.lastUpdate.getTime(), usage.nowMs)
+            opacity: 0.6
+            font: Kirigami.Theme.smallFont
+            elide: Text.ElideRight
+        }
+        Item {
+            Layout.fillWidth: true
+            visible: !root.hasData
+        }
+        PlasmaComponents.ToolButton {
+            objectName: "usageRefreshButton"
+            text: i18n("Refresh")
+            icon.name: "view-refresh"
+            enabled: !root.refreshInFlight
+            onClicked: root.refresh()
+        }
     }
 
     PlasmaExtras.PlaceholderMessage {
@@ -88,19 +121,26 @@ ColumnLayout {
 
         ColumnLayout {
             width: providerScroll.availableWidth
-            spacing: Kirigami.Units.largeSpacing
+            spacing: root.usageCompact ? Kirigami.Units.smallSpacing : Kirigami.Units.largeSpacing
 
             Repeater {
-                model: root.snapshot.providers || []
+                model: root.shownProviders
 
                 delegate: ColumnLayout {
                     id: providerSection
                     required property var modelData
+                    // The readings ticked in settings; [] shows them all.
+                    readonly property var chosen: root.selectedMetrics(providerSection.modelData.provider_id)
+                    readonly property var windows: UsageLogic.shownWindows(
+                        providerSection.modelData.windows, providerSection.chosen)
+                    readonly property bool billingShown: UsageLogic.showsBilling(
+                        providerSection.modelData.billing_usage, providerSection.chosen)
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
+                    spacing: root.usageCompact ? 0 : Kirigami.Units.smallSpacing
 
                     RowLayout {
                         Layout.fillWidth: true
+                        visible: !root.usageCompact
                         spacing: Kirigami.Units.smallSpacing
 
                         Kirigami.Icon {
@@ -124,6 +164,37 @@ ColumnLayout {
                             textFormat: Text.PlainText
                             text: providerSection.modelData.plan || ""
                             opacity: 0.65
+                            elide: Text.ElideRight
+                        }
+                        Kirigami.Icon {
+                            visible: providerSection.modelData.status === "stale"
+                            source: "data-warning"
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            color: Kirigami.Theme.neutralTextColor
+                        }
+                    }
+
+                    // Compact: a small name line, no plan.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.usageCompact
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Kirigami.Icon {
+                            source: root.providerIconSource(
+                                providerSection.modelData.provider_id
+                            )
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            isMask: true
+                            color: Kirigami.Theme.textColor
+                        }
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: providerSection.modelData.display_name
+                            font.bold: true
                             elide: Text.ElideRight
                         }
                         Kirigami.Icon {
@@ -173,18 +244,36 @@ ColumnLayout {
                                 textFormat: Text.PlainText
                                 wrapMode: Text.Wrap
                                 text: usage.failureText(providerSection.modelData, usage.nowMs)
+                                // Compact: one line.
+                                maximumLineCount: root.usageCompact ? 1 : 2147483647
+                                elide: root.usageCompact ? Text.ElideRight : Text.ElideNone
+                                font: root.usageCompact ? Kirigami.Theme.smallFont : Kirigami.Theme.defaultFont
                             }
                         }
                     }
 
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: (providerSection.modelData.status === "ok"
+                                || providerSection.modelData.status === "stale")
+                            && providerSection.windows.length === 0 && !providerSection.billingShown
+                            && providerSection.chosen.length > 0
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: i18n("None of the chosen readings is available.")
+                        opacity: 0.65
+                        font: Kirigami.Theme.smallFont
+                    }
+
                     GridLayout {
                         Layout.fillWidth: true
+                        visible: !root.usageCompact
                         columns: 2
                         columnSpacing: Kirigami.Units.smallSpacing
                         rowSpacing: Kirigami.Units.smallSpacing
 
                         Repeater {
-                            model: providerSection.modelData.windows || []
+                            model: root.usageCompact ? [] : providerSection.windows
 
                             delegate: Rectangle {
                                 id: quotaCard
@@ -288,7 +377,7 @@ ColumnLayout {
 
                         Rectangle {
                             id: billingCard
-                            visible: !!providerSection.modelData.billing_usage
+                            visible: providerSection.billingShown
                             Layout.fillWidth: true
                             Layout.preferredWidth: (
                                 providerScroll.availableWidth
@@ -330,8 +419,93 @@ ColumnLayout {
                         }
                     }
 
+                    // Compact: one slim bar per reading.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: root.usageCompact
+                        spacing: 0
+
+                        Repeater {
+                            model: root.usageCompact ? providerSection.windows : []
+
+                            delegate: RowLayout {
+                                id: compactRow
+                                required property var modelData
+                                readonly property real rawUsed: Number(compactRow.modelData.used_percent)
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+
+                                PlasmaComponents.Label {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+                                    textFormat: Text.PlainText
+                                    text: usage.readingTitle(
+                                        providerSection.modelData.provider_id, compactRow.modelData
+                                    )
+                                    opacity: 0.72
+                                    elide: Text.ElideRight
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignVCenter
+                                    implicitHeight: Math.round(Kirigami.Units.gridUnit * 0.25)
+                                    radius: height / 2
+                                    color: Qt.rgba(
+                                        Kirigami.Theme.textColor.r,
+                                        Kirigami.Theme.textColor.g,
+                                        Kirigami.Theme.textColor.b,
+                                        0.14
+                                    )
+
+                                    Rectangle {
+                                        width: parent.width * Math.max(0, Math.min(1,
+                                            root.displayedPercent(compactRow.rawUsed) / 100))
+                                        height: parent.height
+                                        radius: height / 2
+                                        color: root.barColor(compactRow.rawUsed)
+                                    }
+                                }
+                                PlasmaComponents.Label {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                                    horizontalAlignment: Text.AlignRight
+                                    textFormat: Text.PlainText
+                                    text: Math.round(root.displayedPercent(compactRow.rawUsed)) + "%"
+                                    font.bold: true
+                                    color: root.valueColor(compactRow.rawUsed)
+                                }
+                                PlasmaComponents.Label {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3
+                                    textFormat: Text.PlainText
+                                    text: usage.shortReset(compactRow.modelData.resets_at, usage.nowMs)
+                                    opacity: 0.55
+                                    font: Kirigami.Theme.smallFont
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: providerSection.billingShown
+                            spacing: Kirigami.Units.smallSpacing
+
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                textFormat: Text.PlainText
+                                text: usage.billingTitle(providerSection.modelData.billing_usage)
+                                opacity: 0.72
+                                elide: Text.ElideRight
+                            }
+                            PlasmaComponents.Label {
+                                textFormat: Text.PlainText
+                                text: usage.billingValue(providerSection.modelData.billing_usage)
+                                font.bold: true
+                            }
+                        }
+                    }
+
                     Kirigami.Separator {
                         Layout.fillWidth: true
+                        Layout.topMargin: root.usageCompact ? Kirigami.Units.smallSpacing : 0
                         opacity: 0.45
                     }
                 }
@@ -363,6 +537,41 @@ ColumnLayout {
             return i18n("Resets in %1h %2m", hours, minutes % 60)
         var days = Math.floor(hours / 24)
         return i18n("Resets in %1d %2h", days, hours % 24)
+    }
+
+    // "Updated N min ago" from the time of the last helper reply.
+    function updatedText(updatedMs, nowMs) {
+        var parts = UsageLogic.updatedPhrase(updatedMs, nowMs)
+        if (!parts)
+            return ""
+        if (parts.kind === "now")
+            return i18n("Updated just now")
+        if (parts.kind === "minutes")
+            return i18np("Updated %1 min ago", "Updated %1 min ago", parts.minutes)
+        if (parts.kind === "hours")
+            return i18np("Updated %1 hour ago", "Updated %1 hours ago", parts.hours)
+        return i18np("Updated %1 day ago", "Updated %1 days ago", parts.days)
+    }
+
+    // The catalog's name for a reading, else the helper's caption.
+    function readingTitle(providerId, window) {
+        var metric = window ? Catalog.metric(providerId, window.kind) : null
+        return metric ? metric.title : String(window && window.caption ? window.caption : "")
+    }
+
+    // Compact: "2d 4h", "3h 5m", "12m", or "" when unknown.
+    function shortReset(iso, nowMs) {
+        var target = iso ? new Date(iso).getTime() : NaN
+        var parts = UsageLogic.shortCountdown(isFinite(target) ? target : null, nowMs)
+        if (!parts)
+            return ""
+        if (parts.days > 0)
+            return i18nc("@label short time until reset", "%1d %2h", parts.days, parts.hours)
+        if (parts.hours > 0)
+            return i18nc("@label short time until reset", "%1h %2m", parts.hours, parts.minutes)
+        if (parts.minutes > 0)
+            return i18nc("@label short time until reset", "%1m", parts.minutes)
+        return i18n("now")
     }
 
     function relativeRetry(iso, nowMs) {

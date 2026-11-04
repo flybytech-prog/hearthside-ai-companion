@@ -25,6 +25,10 @@ TestCase {
         return (count === 1 ? singular : plural).replace("%1", String(count))
     }
 
+    function i18nc(context, text) {
+        return i18n.apply(null, Array.prototype.slice.call(arguments, 1))
+    }
+
     // Port 9 on this computer: nothing listens, and the test never loads it.
     readonly property string marker: "<img src=\"http://127.0.0.1:9/beacon.png\"><b>Pro</b> &amp;"
 
@@ -38,6 +42,16 @@ TestCase {
         property var snapshot: ({})
         property bool expanded: true
         property string usageMode: "used"
+        property var shownProviders: snapshot.providers || []
+        property bool usageCompact: false
+        property bool refreshInFlight: false
+        property date lastUpdate: new Date(0)
+        property var metricChoice: ({})
+        property int refreshCalls: 0
+        function refresh() { refreshCalls += 1 }
+        function selectedMetrics(providerId) {
+            return Array.isArray(metricChoice[providerId]) ? metricChoice[providerId] : []
+        }
         function providerIconSource(providerId) { return "" }
         function displayedPercent(value) { return value }
         function valueColor(value) { return "black" }
@@ -94,6 +108,156 @@ TestCase {
         root.hasData = true
         root.lastError = ""
         root.snapshot = ({})
+        root.usageCompact = false
+        root.refreshInFlight = false
+        root.lastUpdate = new Date(0)
+        root.metricChoice = ({})
+        root.refreshCalls = 0
+    }
+
+    function findNamed(name) {
+        var items = []
+        collect(usage, items)
+        return items.filter(function (item) { return item.objectName === name })[0] || null
+    }
+
+    // Visible plain labels' texts.
+    function shownTexts() {
+        var items = []
+        collect(usage, items)
+        var result = []
+        for (var index = 0; index < items.length; index++) {
+            var item = items[index]
+            var shown = item.visible
+            for (var parent = item.parent; shown && parent && parent !== usage; parent = parent.parent)
+                shown = parent.visible
+            if (shown && typeof item.text === "string" && item.textFormat === Text.PlainText)
+                result.push(item.text)
+        }
+        return result
+    }
+
+    function claudeSnapshot() {
+        return {
+            installed_provider_ids: ["claude", "codex"],
+            providers: [{
+                provider_id: "claude", display_name: "Claude Code", plan: "Max", status: "ok",
+                windows: [
+                    { kind: "session", caption: "5-hour window", used_percent: 10, resets_at: null },
+                    { kind: "weekly", caption: "7-day window", used_percent: 70, resets_at: null }
+                ],
+                billing_usage: { kind: "bounded_spend", used_amount: 1, limit_amount: 5 }
+            }, {
+                provider_id: "codex", display_name: "Codex", status: "ok",
+                windows: [{ kind: "weekly", caption: "Codex week", used_percent: 5, resets_at: null }]
+            }]
+        }
+    }
+
+    function test_emptyChoiceShowsEveryReading() {
+        root.snapshot = claudeSnapshot()
+        wait(20)
+        var texts = shownTexts()
+        verify(texts.indexOf("5-hour window") >= 0, texts)
+        verify(texts.indexOf("7-day window") >= 0, texts)
+        verify(texts.indexOf("Extra Usage") >= 0, texts)
+        verify(texts.indexOf("Max") >= 0, texts)
+    }
+
+    function test_chosenReadingsFilterTheCards() {
+        root.metricChoice = {claude: ["weekly"]}
+        root.snapshot = claudeSnapshot()
+        wait(20)
+        var texts = shownTexts()
+        verify(texts.indexOf("7-day window") >= 0, texts)
+        verify(texts.indexOf("5-hour window") < 0, texts)
+        verify(texts.indexOf("Extra Usage") < 0, texts)
+        verify(texts.indexOf("Codex week") >= 0, texts)
+    }
+
+    function test_missingChosenReadingSaysSo() {
+        root.metricChoice = {codex: ["spark"]}
+        root.snapshot = claudeSnapshot()
+        wait(20)
+        verify(shownTexts().indexOf("None of the chosen readings is available.") >= 0)
+    }
+
+    function test_providersFollowTheGivenOrder() {
+        root.snapshot = claudeSnapshot()
+        root.shownProviders = [root.snapshot.providers[1], root.snapshot.providers[0]]
+        wait(20)
+        var texts = shownTexts()
+        verify(texts.indexOf("Codex") >= 0 && texts.indexOf("Claude Code") > texts.indexOf("Codex"), texts)
+        root.shownProviders = Qt.binding(function () { return root.snapshot.providers || [] })
+    }
+
+    function test_compactShowsTitlesNotCaptionsOrPlans() {
+        root.usageCompact = true
+        root.snapshot = claudeSnapshot()
+        wait(20)
+        var texts = shownTexts()
+        verify(texts.indexOf("Session") >= 0, texts)
+        verify(texts.indexOf("Weekly") >= 0, texts)
+        verify(texts.indexOf("5-hour window") < 0, texts)
+        verify(texts.indexOf("Max") < 0, texts)
+        verify(texts.indexOf("Extra Usage") >= 0, texts)
+        verify(texts.indexOf("70%") >= 0, texts)
+    }
+
+    function test_compactProviderTextIsPlain() {
+        root.usageCompact = true
+        root.snapshot = hostileSnapshot("error")
+        wait(20)
+        var marked = markedItems()
+        // Name, error and credit amount.
+        verify(marked.length >= 3, "found " + marked.length)
+        var errorLines = 0
+        for (var index = 0; index < marked.length; index++) {
+            compare(marked[index].textFormat, Text.PlainText)
+            if (marked[index].wrapMode === Text.Wrap) {
+                compare(marked[index].maximumLineCount, 1)
+                errorLines += 1
+            }
+        }
+        compare(errorLines, 1)
+    }
+
+    // S1: Refresh also while loading and after a failed first load; the
+    // "Updated" line only with data.
+    function test_refreshWithoutData() {
+        root.hasData = false
+        root.lastError = "Helper exited with code 1"
+        wait(20)
+        var button = findNamed("usageRefreshButton")
+        verify(button !== null && button.visible && button.enabled)
+        verify(!findNamed("usageUpdatedLabel").visible)
+        mouseClick(button)
+        compare(root.refreshCalls, 1)
+        root.lastError = ""
+        wait(20)
+        verify(button.visible)
+        root.hasData = true
+        wait(20)
+        verify(findNamed("usageUpdatedLabel").visible)
+    }
+
+    function test_updatedLabelAndRefreshButton() {
+        root.snapshot = claudeSnapshot()
+        root.lastUpdate = new Date(Date.now() - 5 * 60000 - 1000)
+        usage.nowMs = Date.now()
+        wait(20)
+        var label = findNamed("usageUpdatedLabel")
+        verify(label !== null)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.text, "Updated 5 min ago")
+        var button = findNamed("usageRefreshButton")
+        verify(button !== null && button.enabled)
+        mouseClick(button)
+        compare(root.refreshCalls, 1)
+        root.refreshInFlight = true
+        verify(!button.enabled)
+        mouseClick(button)
+        compare(root.refreshCalls, 1)
     }
 
     function test_providerTextIsPlain() {

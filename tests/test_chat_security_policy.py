@@ -94,6 +94,11 @@ GENERAL_CONFIG_KEYS = {
     # The hover tooltip's reset times and its own readings ("" = same as Usage).
     "tooltipShowsReset": ("Bool", "true"),
     "tooltipMetrics": ("String", ""),
+    # Usage tab: provider order ("" = catalog order), compact rows, bar colours.
+    "providerOrder": ("String", ""),
+    "usageCompact": ("Bool", "false"),
+    "usageWarnPercent": ("Int", "60"),
+    "usageCriticalPercent": ("Int", "85"),
     # Plan R1: what the global shortcut opens, and the usage alerts.
     "shortcutOpens": ("String", "popup"),
     "alertLowEnabled": ("Bool", "false"),
@@ -1260,10 +1265,11 @@ def test_proof_missing_page_key_is_caught():
 
 # Keys main.qml may write: the profile generation, the schema and first-run
 # flags, the normalized refresh interval, the popup's Left/Used buttons and
-# the debounced per-site zoom map.
+# the debounced per-site zoom map, and (only in the one-time schema 2 -> 3
+# migration, see _main_migration_problems) the two reading choices.
 MAIN_WRITABLE_KEYS = {
     "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
-    "chatSiteZoom",
+    "chatSiteZoom", "tooltipMetrics", "providerMetrics",
 }
 
 
@@ -4871,78 +4877,229 @@ def test_proof_split_view_rule_catches(path, old, new):
     assert _split_view_problems(web, view)
 
 
-# Hover tooltip settings: only configGeneral.qml writes them, through its
-# reset checkbox and the two readings helpers; main.qml only reads them.
+# Usage and hover tooltip settings: only configUsage.qml writes them, each
+# through its own checkbox or helper function; main.qml and the other pages
+# only read them.
 TOOLTIP_LOGIC_JS = UI / "TooltipLogic.js"
+USAGE_LOGIC_JS = UI / "UsageLogic.js"
 CONFIG_GENERAL = CONFIG_PAGES[0]
-TOOLTIP_KEYS = ("tooltipShowsReset", "tooltipMetrics")
-TOOLTIP_WRITE = (r"\b(?:cfg_)?(tooltipShowsReset|tooltipMetrics)\s*"
-                 r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)")
-TOOLTIP_RESET_WRITE = r"(?m)^\s*onToggled\s*:\s*page\s*\.\s*cfg_tooltipShowsReset\s*=\s*checked\s*$"
+# key -> objectName of the CheckBox whose onToggled writes it, or the helper
+# functions that may write it (each of them must).
+USAGE_PAGE_WRITERS = {
+    "tooltipShowsUsage": "tooltipUsageChoice",
+    "tooltipShowsReset": "tooltipResetChoice",
+    "usageCompact": "usageCompactChoice",
+    "tooltipMetrics": ("setTooltipSame", "setTooltipMetric"),
+    "providerMetrics": ("setMetric",),
+    "providerOrder": ("moveProvider",),
+    "usageWarnPercent": ("setThresholds",),
+    "usageCriticalPercent": ("setThresholds",),
+}
+_USAGE_KEYS = "|".join(USAGE_PAGE_WRITERS)
+# main.qml rewrites these once, in migrateUsageMetrics().
+MIGRATED_KEYS = ("tooltipMetrics", "providerMetrics")
+USAGE_KEY_WRITE = (rf"\b(?:cfg_)?({_USAGE_KEYS})\s*"
+                   r"(?:\+\+|--|(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=))")
+USAGE_CONFIG_WRITE = (rf"\b[Pp]lasmoid\s*\.\s*configuration\s*\.\s*({_USAGE_KEYS})\s*"
+                      r"(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))")
 
 
-def _tooltip_writer_problems(sources):
+def _usage_writer_problems(sources):
     problems = []
     for name, code in sources.items():
-        hits = [(match.start(), match.group(1)) for match in re.finditer(TOOLTIP_WRITE, code)]
-        hits += [(match.start(), match.group(1)) for match in re.finditer(
-            r"\b[Pp]lasmoid\s*\.\s*configuration\s*\.\s*(tooltipShowsReset|tooltipMetrics)\s*"
-            r"(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))", code)]
-        if _base(name) != CONFIG_GENERAL.name:
-            problems += [f"{name}:{_line_of(code, at)}: only configGeneral.qml writes {key}" for at, key in hits]
+        hits = [(match.start(), match.group(1))
+                for pattern in (USAGE_KEY_WRITE, USAGE_CONFIG_WRITE) for match in re.finditer(pattern, code)]
+        if _base(name) == CONFIG_GENERAL.name and _hits(r"\bTooltipLogic\b", code):
+            problems.append(f"{name}: the tooltip settings moved to configUsage.qml; no TooltipLogic here")
+        if _base(name) == MAIN_QML.name:
+            # The schema 2 -> 3 migration; its exact form is pinned by _main_migration_problems.
+            migration = _block_spans(code, r"\bfunction\s+migrateUsageMetrics\s*\(\s*\)\s*\{")
+            hits = [(at, key) for at, key in hits
+                    if not (key in MIGRATED_KEYS and len(migration) == 1
+                            and migration[0][0] <= at < migration[0][1])]
+        if _base(name) != CONFIG_USAGE.name:
+            problems += sorted({f"{name}:{_line_of(code, at)}: only configUsage.qml writes {key}" for at, key in hits})
             continue
-        boxes = [(start, start + len(body)) for start, body in _blocks(code, r"\bQQC2\s*\.\s*CheckBox\s*\{")
-                 if re.search(r'(?m)^\s*objectName\s*:\s*"tooltipResetChoice"\s*$', body)]
-        helpers = [span for helper in ("setTooltipSame", "setTooltipMetric")
-                   for span in _block_spans(code, rf"\bfunction\s+{helper}\s*\([^)]*\)\s*\{{")]
-        resets = [at for at, key in hits if key == "tooltipShowsReset"]
-        good_reset = _hits(TOOLTIP_RESET_WRITE, code)
-        if len(boxes) != 1 or len(resets) != 1 or len(good_reset) != 1 \
-                or not boxes[0][0] <= resets[0] < boxes[0][1] or _line_of(code, resets[0]) != good_reset[0]:
-            problems.append(f"{name}: cfg_tooltipShowsReset only as `onToggled: page.cfg_tooltipShowsReset = "
-                            "checked` in the tooltipResetChoice CheckBox")
-        metrics = [at for at, key in hits if key == "tooltipMetrics"]
-        if len(helpers) != 2 or not metrics:
-            problems.append(f"{name}: setTooltipSame( and setTooltipMetric( must each be defined once")
-        for at in metrics:
-            if not any(start <= at < end for start, end in helpers):
-                problems.append(f"{name}:{_line_of(code, at)}: cfg_tooltipMetrics is written only in "
-                                "setTooltipSame and setTooltipMetric")
-        for start, end in helpers:
-            if not any(start <= at < end for at in metrics):
-                problems.append(f"{name}:{_line_of(code, start)}: each tooltip helper writes cfg_tooltipMetrics")
+        boxes = {}
+        for start, body in _blocks(code, r"\bQQC2\s*\.\s*CheckBox\s*\{"):
+            label = re.search(r'(?m)^\s*objectName\s*:\s*"(\w+)"\s*$', body)
+            if label:
+                boxes.setdefault(label.group(1), []).append((start, start + len(body)))
+        for key, writer in USAGE_PAGE_WRITERS.items():
+            at_key = [at for at, hit in hits if hit == key]
+            if isinstance(writer, str):
+                good = _hits(rf"(?m)^\s*onToggled\s*:\s*page\s*\.\s*cfg_{key}\s*=\s*checked\s*$", code)
+                spans = boxes.get(writer, [])
+                if len(spans) != 1 or len(at_key) != 1 or len(good) != 1 \
+                        or not spans[0][0] <= at_key[0] < spans[0][1] or _line_of(code, at_key[0]) != good[0]:
+                    problems.append(f"{name}: cfg_{key} only as `onToggled: page.cfg_{key} = checked` "
+                                    f"in the {writer} CheckBox")
+                continue
+            helpers = [span for helper in writer
+                       for span in _block_spans(code, rf"\bfunction\s+{helper}\s*\([^)]*\)\s*\{{")]
+            if len(helpers) != len(writer):
+                problems.append(f"{name}: {', '.join(writer)} must each be defined once")
+            for at in at_key:
+                if not any(start <= at < end for start, end in helpers):
+                    problems.append(f"{name}:{_line_of(code, at)}: cfg_{key} is written only in {', '.join(writer)}")
+            for start, end in helpers:
+                if not any(start <= at < end for at in at_key):
+                    problems.append(f"{name}:{_line_of(code, start)}: {', '.join(writer)} must write cfg_{key}")
     return problems
 
 
-def test_tooltip_settings_are_written_only_by_the_general_page():
-    problems = _tooltip_writer_problems(_all_code())
+def test_usage_and_tooltip_settings_are_written_only_by_the_usage_page():
+    problems = _usage_writer_problems(_all_code())
     assert not problems, problems
 
 
-TOOLTIP_WRITER_MUTATIONS = [
-    (CONFIG_GENERAL, "onToggled: page.cfg_tooltipShowsReset = checked", "onToggled: page.cfg_tooltipShowsReset = true"),
-    (CONFIG_GENERAL, "            onToggled: page.cfg_tooltipShowsReset = checked\n",
-     "            onToggled: page.cfg_tooltipShowsUsage = checked\n"),
-    (CONFIG_GENERAL, "                onToggled: page.setTooltipSame(checked)",
-     "                onToggled: page.cfg_tooltipMetrics = \"\""),
-    (CONFIG_GENERAL, "    function setTooltipSame(same) {\n",
+USAGE_WRITER_MUTATIONS = [
+    (CONFIG_USAGE, "onToggled: page.cfg_tooltipShowsReset = checked", "onToggled: page.cfg_tooltipShowsReset = true"),
+    (CONFIG_USAGE, "                    onToggled: page.cfg_tooltipShowsReset = checked\n",
+     "                    onToggled: page.cfg_tooltipShowsUsage = checked\n"),
+    (CONFIG_USAGE, "onToggled: page.cfg_tooltipShowsUsage = checked", "onToggled: page.cfg_tooltipShowsUsage = true"),
+    (CONFIG_USAGE, "onToggled: page.cfg_usageCompact = checked", "onToggled: page.cfg_usageCompact = !checked"),
+    (CONFIG_USAGE, 'objectName: "usageCompactChoice"', 'objectName: "usageDenseChoice"'),
+    (CONFIG_USAGE, "onToggled: page.setTooltipSame(checked)", 'onToggled: page.cfg_tooltipMetrics = ""'),
+    (CONFIG_USAGE, "    function setTooltipSame(same) {\n",
      "    function clear() { page.cfg_tooltipShowsReset = false }\n    function setTooltipSame(same) {\n"),
-    (CONFIG_USAGE, "    property string cfg_tooltipMetricsDefault: \"\"\n",
-     "    property string cfg_tooltipMetricsDefault: \"\"\n    function f() { page.cfg_tooltipMetrics = \"{}\" }\n"),
+    (CONFIG_USAGE, "    function lastShownMetric(providerId, metricId) {\n",
+     "    function reset() { page.cfg_providerMetrics = \"{}\" }\n    function lastShownMetric(providerId, metricId) {\n"),
+    (CONFIG_USAGE, "        page.cfg_providerMetrics = JSON.stringify(metrics)\n", "\n"),
+    (CONFIG_USAGE, "    function setThresholds(warn, critical) {\n",
+     "    function setOrder() { page.cfg_providerOrder = \"\" }\n    function setThresholds(warn, critical) {\n"),
+    (CONFIG_USAGE, "        page.cfg_usageCriticalPercent = next.critical\n", "\n"),
+    (CONFIG_USAGE, "    function moveProvider(providerId, direction) {\n",
+     "    function warn() { page.cfg_usageWarnPercent++ }\n    function moveProvider(providerId, direction) {\n"),
+    (CONFIG_GENERAL, "    property bool cfg_usageCompactDefault: false\n",
+     "    property bool cfg_usageCompactDefault: false\n    function f() { page.cfg_usageCompact = true }\n"),
+    (CONFIG_GENERAL, "    property bool cfg_tooltipShowsUsageDefault: true\n",
+     "    property bool cfg_tooltipShowsUsageDefault: true\n    function f() { page.cfg_tooltipShowsUsage = false }\n"),
+    (CONFIG_GENERAL, 'import "SettingsLogic.js" as SettingsLogic\n',
+     'import "SettingsLogic.js" as SettingsLogic\nimport "TooltipLogic.js" as TooltipLogic\n'),
     (UI / "configChat.qml", "    property bool cfg_tooltipShowsResetDefault: true\n",
      "    property bool cfg_tooltipShowsResetDefault: true\n    function f() { page.cfg_tooltipShowsReset = false }\n"),
+    (UI / "configChat.qml", "    property string cfg_providerOrderDefault: \"\"\n",
+     "    property string cfg_providerOrderDefault: \"\"\n    function f() { page.cfg_providerOrder = \"[]\" }\n"),
     (MAIN_QML, "    function chatNext() {",
      "    function x() { Plasmoid.configuration.tooltipMetrics = \"\" }\n    function chatNext() {"),
     (MAIN_QML, "    function chatNext() {",
-     "    function x() { Plasmoid.configuration.tooltipShowsReset = false }\n    function chatNext() {"),
-    (MAIN_QML, "    function chatNext() {", "    function x() { root.tooltipMetrics = \"\" }\n    function chatNext() {"),
+     "    function x() { Plasmoid.configuration.providerMetrics = \"{}\" }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.providerOrder = \"\" }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.usageWarnPercent = 1 }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.usageCompact = true }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {", "    function x() { root.usageCriticalPercent = 1 }\n    function chatNext() {"),
+    (USAGE_VIEW, "            onClicked: root.refresh()\n",
+     "            onClicked: { Plasmoid.configuration.usageCompact = true; root.refresh() }\n"),
 ]
 
 
-@pytest.mark.parametrize(("path", "old", "new"), TOOLTIP_WRITER_MUTATIONS,
-                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(TOOLTIP_WRITER_MUTATIONS)])
-def test_proof_tooltip_writer_rule_catches(path, old, new):
-    assert _tooltip_writer_problems(_sources_with(path, old, new))
+@pytest.mark.parametrize(("path", "old", "new"), USAGE_WRITER_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(USAGE_WRITER_MUTATIONS)])
+def test_proof_usage_writer_rule_catches(path, old, new):
+    assert _usage_writer_problems(_sources_with(path, old, new))
+
+
+# providerMetrics now defaults to "{}" (every reading shown) in main.xml and on every page.
+def _provider_metrics_default_problems(entries, pages):
+    problems = []
+    if entries.get("providerMetrics") != {"group": "General", "type": "String", "default": "{}"}:
+        problems.append(f"{_rel(MAIN_XML)}: providerMetrics must be String \"{{}}\", got {entries.get('providerMetrics')}")
+    for name, code in pages.items():
+        for prop in ("cfg_providerMetrics", "cfg_providerMetricsDefault"):
+            value = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{prop}\s*:\s*(.+?)\s*$", code)
+            if value != [("string", '"{}"')]:
+                problems.append(f"{name}: `property string {prop}: \"{{}}\"` once, got {value}")
+    return problems
+
+
+def test_provider_metrics_defaults_to_an_empty_object():
+    problems = _provider_metrics_default_problems(
+        _main_xml_entries(), {page.name: _read_code(page) for page in CONFIG_PAGES})
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
+@pytest.mark.parametrize("new", ['"{\\"claude\\": [\\"weekly\\"]}"', '""'])
+def test_proof_provider_metrics_default_rule_catches(page, new):
+    pages = {other.name: _read_code(other) for other in CONFIG_PAGES}
+    pages[page.name] = _mutated(page, 'property string cfg_providerMetricsDefault: "{}"',
+                                f"property string cfg_providerMetricsDefault: {new}")
+    assert _provider_metrics_default_problems(_main_xml_entries(), pages)
+
+
+def test_proof_provider_metrics_xml_default_is_caught():
+    entries = _main_xml_entries()
+    entries["providerMetrics"] = dict(entries["providerMetrics"], default='{"claude": ["weekly"]}')
+    assert _provider_metrics_default_problems(entries, {})
+
+
+def test_usage_logic_js_is_a_pure_library():
+    problems = _alert_logic_problems(_read_code(USAGE_LOGIC_JS))
+    assert not problems, f"{_rel(USAGE_LOGIC_JS)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '.import "SnapshotLogic.js" as SnapshotLogic',
+    "function f() { return Qt.formatDateTime(new Date()) }",
+    "function f() { console.log(1) }",
+    "function f() { return new XMLHttpRequest() }",
+    "function f() { return Plasmoid.configuration.providerOrder }",
+])
+def test_proof_usage_logic_rule_catches(snippet):
+    assert _alert_logic_problems(_read_code(USAGE_LOGIC_JS) + "\n" + snippet + "\n")
+
+
+def test_proof_usage_logic_needs_pragma():
+    code = re.sub(r"^\s*\.pragma\s+library\b", "", _read_code(USAGE_LOGIC_JS), count=1)
+    assert _alert_logic_problems(code)
+
+
+# The Usage tab's Refresh button only asks main.qml for a refresh (which
+# itself returns at once while Usage is hidden), and the "Updated" line
+# next to it is plain text.
+USAGE_REFRESH_CLICK = r"(?m)^\s*onClicked\s*:\s*root\s*\.\s*refresh\s*\(\s*\)\s*$"
+
+
+def _usage_refresh_problems(code):
+    problems = []
+    buttons = [body for _, body in _blocks(code, r"\bPlasmaComponents\s*\.\s*ToolButton\s*\{")
+               if re.search(r'(?m)^\s*objectName\s*:\s*"usageRefreshButton"\s*$', body)]
+    if len(buttons) != 1:
+        return [f"UsageView.qml: one usageRefreshButton ToolButton, found {len(buttons)}"]
+    button = _strip_comments(buttons[0], blank_strings=True)
+    calls = re.findall(r"([\w.]+)\s*\(", button)
+    if len(_hits(USAGE_REFRESH_CLICK, buttons[0])) != 1 or len(_hits(r"\bon[A-Z]\w*\s*:", button)) != 1 \
+            or sorted(calls) != ["i18n", "root.refresh"]:
+        problems.append("UsageView.qml: usageRefreshButton does only `onClicked: root.refresh()`")
+    if len(re.findall(r"\brefresh\s*\(", code)) != 1:
+        problems.append("UsageView.qml: root.refresh() only from usageRefreshButton")
+    labels = [_top_level(body) for _, body in _blocks(code, TEXT_ELEMENT)
+              if re.search(r'(?m)^\s*objectName\s*:\s*"usageUpdatedLabel"\s*$', body)]
+    if len(labels) != 1 or len(re.findall(PLAIN_TEXT_FORMAT, labels[0])) != 1:
+        problems.append("UsageView.qml: usageUpdatedLabel must be one label with `textFormat: Text.PlainText`")
+    return problems
+
+
+def test_usage_refresh_button_only_refreshes():
+    problems = _usage_refresh_problems(_read_code(USAGE_VIEW))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("            onClicked: root.refresh()\n", "            onClicked: { root.refreshInFlight = true; root.refresh() }\n"),
+    ("            onClicked: root.refresh()\n", "            onClicked: root.refresh()\n            onPressed: root.chatNext()\n"),
+    ("            onClicked: root.refresh()\n", "            onClicked: Qt.openUrlExternally(\"https://example.invalid\")\n"),
+    ('            objectName: "usageRefreshButton"\n', '            objectName: "refreshButton"\n'),
+    ("            textFormat: Text.PlainText\n            text: usage.updatedText(",
+     "            textFormat: Text.StyledText\n            text: usage.updatedText("),
+    ("            textFormat: Text.PlainText\n            text: usage.updatedText(", "            text: usage.updatedText("),
+])
+def test_proof_usage_refresh_rule_catches(old, new):
+    assert _usage_refresh_problems(_mutated(USAGE_VIEW, old, new))
 
 
 def test_tooltip_logic_js_is_a_pure_library():
@@ -5029,3 +5186,141 @@ TOOLTIP_CLOCK_MUTATIONS = [
 def test_proof_tooltip_clock_rule_catches(path, old, new):
     sources = _sources_with(path, snippet=new) if old is None else _sources_with(path, old, new)
     assert _tooltip_clock_problems(sources)
+
+
+# Settings schema 2 -> 3 runs once: main.qml migrates the reading choices
+# only for a set-up widget still below 3, then stamps 3. main.xml and every
+# page keep the default 2 (a default of 3 would skip the migration for
+# upgrading users), and a page only ever stamps 3, never 2 (2 would run the
+# migration again and wipe the Usage tab choices).
+MIGRATION_CALL = (r"\bif\s*\(\s*Plasmoid\s*\.\s*configuration\s*\.\s*initialSetupComplete\s*&&\s*"
+                  r"Number\s*\(\s*Plasmoid\s*\.\s*configuration\s*\.\s*configSchemaVersion\s*\)\s*<\s*3\s*\)\s*"
+                  r"root\s*\.\s*migrateUsageMetrics\s*\(\s*\)\s*;?\s*"
+                  r"if\s*\(\s*Plasmoid\s*\.\s*configuration\s*\.\s*configSchemaVersion\s*!==\s*3\s*\)\s*"
+                  r"Plasmoid\s*\.\s*configuration\s*\.\s*configSchemaVersion\s*=\s*3\b")
+ON_COMPLETED = r"\bComponent\s*\.\s*onCompleted\s*:\s*\{"
+
+
+def _main_migration_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        if _base(name) != MAIN_QML.name and re.search(r"\bmigrateUsageMetrics\b", code):
+            problems.append(f"{name}: migrateUsageMetrics belongs to main.qml")
+    main = sources[_rel(MAIN_QML)]
+    body = _function_body(main, "migrateUsageMetrics")
+    if body is None:
+        return problems + ["main.qml: `function migrateUsageMetrics(` must be defined once"]
+    if len(re.findall(r"\bvar\s+next\s*=\s*UsageLogic\s*\.\s*migratedUsageMetrics\s*\(", body)) != 1:
+        problems.append("main.qml: migrateUsageMetrics takes its values from UsageLogic.migratedUsageMetrics")
+    for key in MIGRATED_KEYS:
+        writes = _hits(rf"\bPlasmoid\s*\.\s*configuration\s*\.\s*{key}\s*(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))", main)
+        good = _hits(rf"\bif\s*\(\s*Plasmoid\s*\.\s*configuration\s*\.\s*{key}\s*!==\s*next\s*\.\s*{key}\s*\)\s*"
+                     rf"Plasmoid\s*\.\s*configuration\s*\.\s*{key}\s*=\s*next\s*\.\s*{key}\s*;?\s*(?m:$)", body)
+        if len(writes) != 1 or len(good) != 1 or len(_hits(rf"\bconfiguration\s*\.\s*{key}\s*=(?!=)", body)) != 1:
+            problems.append(f"main.qml: {key} is written once, as `Plasmoid.configuration.{key} = next.{key}` "
+                            "in migrateUsageMetrics")
+    completed = [body for _, body in _blocks(main, ON_COMPLETED)]
+    if len(re.findall(r"\bmigrateUsageMetrics\s*\(", main)) != 2 or len(completed) != 1 \
+            or len(re.findall(MIGRATION_CALL, completed[0])) != 1:
+        problems.append("main.qml: migrateUsageMetrics() runs once, from Component.onCompleted, under "
+                        "`initialSetupComplete && Number(configSchemaVersion) < 3`, right before stamping 3")
+    if len(_hits(r"\bconfiguration\s*\.\s*configSchemaVersion\s*=(?!=)", main)) != 1:
+        problems.append("main.qml: configSchemaVersion is written only as the stamp to 3")
+    return problems
+
+
+def test_main_migrates_usage_metrics_once():
+    problems = _main_migration_problems(_all_code())
+    assert not problems, problems
+
+
+MIGRATION_MUTATIONS = [
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.providerMetrics = \"{}\" }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.tooltipMetrics = \"\" }\n    function chatNext() {"),
+    (MAIN_QML, " && Number(Plasmoid.configuration.configSchemaVersion) < 3)\n            root.migrateUsageMetrics()",
+     ")\n            root.migrateUsageMetrics()"),
+    (MAIN_QML, "Number(Plasmoid.configuration.configSchemaVersion) < 3)", "Number(Plasmoid.configuration.configSchemaVersion) < 4)"),
+    (MAIN_QML, "        if (Plasmoid.configuration.initialSetupComplete && Number(",
+     "        root.migrateUsageMetrics()\n        if (Plasmoid.configuration.initialSetupComplete && Number("),
+    (MAIN_QML, "    function chatNext() {", "    function x() { root.migrateUsageMetrics() }\n    function chatNext() {"),
+    (MAIN_QML, "Plasmoid.configuration.tooltipMetrics = next.tooltipMetrics", 'Plasmoid.configuration.tooltipMetrics = ""'),
+    (MAIN_QML, "Plasmoid.configuration.providerMetrics = next.providerMetrics",
+     'Plasmoid.configuration.providerMetrics = "{}"'),
+    (MAIN_QML, "Plasmoid.configuration.providerMetrics = next.providerMetrics",
+     "Plasmoid.configuration.providerMetrics = next.tooltipMetrics"),
+    (MAIN_QML, "            Plasmoid.configuration.providerMetrics = next.providerMetrics\n",
+     "            Plasmoid.configuration.providerMetrics = next.providerMetrics\n"
+     "        Plasmoid.configuration.providerMetrics = next.providerMetrics\n"),
+    (MAIN_QML, "UsageLogic.migratedUsageMetrics(", "UsageLogic.normalizeOrder("),
+    (MAIN_QML, "        if (Plasmoid.configuration.configSchemaVersion !== 3)\n"
+     "            Plasmoid.configuration.configSchemaVersion = 3\n", ""),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.configSchemaVersion = 2 }\n    function chatNext() {"),
+    (CONFIG_USAGE, "        page.cfg_configSchemaVersion = 3\n",
+     "        page.cfg_configSchemaVersion = 3\n        root.migrateUsageMetrics()\n"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), MIGRATION_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(MIGRATION_MUTATIONS)])
+def test_proof_main_migration_rule_catches(path, old, new):
+    assert _main_migration_problems(_sources_with(path, old, new))
+
+
+def _schema_version_problems(entries, sources):
+    problems = []
+    if entries.get("configSchemaVersion") != {"group": "General", "type": "Int", "default": "2"}:
+        problems.append(f"{_rel(MAIN_XML)}: configSchemaVersion must stay Int 2, got {entries.get('configSchemaVersion')}")
+    for name, code in sources.items():
+        if _base(name) in {page.name for page in CONFIG_PAGES}:
+            for prop in ("cfg_configSchemaVersion", "cfg_configSchemaVersionDefault"):
+                value = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{prop}\s*:\s*(.+?)\s*$", code)
+                if value != [("int", "2")]:
+                    problems.append(f"{name}: `property int {prop}: 2` once, got {value}")
+        writes = [match.start() for match in re.finditer(
+            r"\bcfg_configSchemaVersion\s*(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))", code)]
+        if _base(name) != CONFIG_USAGE.name:
+            problems += [f"{name}:{_line_of(code, at)}: only configUsage.qml stamps cfg_configSchemaVersion"
+                         for at in writes]
+            continue
+        completed = _block_spans(code, ON_COMPLETED)
+        good = _hits(r"(?m)^[ \t]*page\s*\.\s*cfg_configSchemaVersion\s*=\s*3\s*;?\s*$", code)
+        if len(writes) != 1 or len(completed) != 1 or len(good) != 1 \
+                or not completed[0][0] <= writes[0] < completed[0][1] or _line_of(code, writes[0]) != good[0]:
+            problems.append(f"{name}: cfg_configSchemaVersion only as `page.cfg_configSchemaVersion = 3` "
+                            "in Component.onCompleted (never 2)")
+    return problems
+
+
+def test_schema_version_defaults_to_2_and_pages_stamp_only_3():
+    problems = _schema_version_problems(_main_xml_entries(), _all_code())
+    assert not problems, problems
+
+
+SCHEMA_VERSION_MUTATIONS = [
+    (CONFIG_USAGE, "        page.cfg_configSchemaVersion = 3\n", "        page.cfg_configSchemaVersion = 2\n"),
+    (CONFIG_USAGE, "        page.cfg_configSchemaVersion = 3\n", ""),
+    (CONFIG_USAGE, "    function detectProviders() {\n",
+     "    function reset() { page.cfg_configSchemaVersion = 3 }\n    function detectProviders() {\n"),
+    (CONFIG_USAGE, "    property int cfg_configSchemaVersionDefault: 2\n", "    property int cfg_configSchemaVersionDefault: 3\n"),
+    (CONFIG_USAGE, "    property int cfg_configSchemaVersion: 2\n", "    property int cfg_configSchemaVersion: 3\n"),
+    (CONFIG_PAGES[0], "    property int cfg_configSchemaVersion: 2\n", "    property int cfg_configSchemaVersion: 3\n"),
+    (UI / "configChat.qml", "    property int cfg_configSchemaVersionDefault: 2\n",
+     "    property int cfg_configSchemaVersionDefault: 3\n"),
+    (UI / "configChat.qml", "    property int cfg_configSchemaVersionDefault: 2\n",
+     "    property int cfg_configSchemaVersionDefault: 2\n    function f() { page.cfg_configSchemaVersion = 2 }\n"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), SCHEMA_VERSION_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(SCHEMA_VERSION_MUTATIONS)])
+def test_proof_schema_version_rule_catches(path, old, new):
+    assert _schema_version_problems(_main_xml_entries(), _sources_with(path, old, new))
+
+
+def test_proof_schema_version_xml_default_3_is_caught():
+    entries = _main_xml_entries()
+    entries["configSchemaVersion"] = dict(entries["configSchemaVersion"], default="3")
+    assert _schema_version_problems(entries, {})

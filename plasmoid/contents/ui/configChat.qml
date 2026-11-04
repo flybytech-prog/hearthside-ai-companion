@@ -15,10 +15,8 @@ KCM.SimpleKCM {
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
     property string cfg_trackedProvidersDefault:
         "[\"claude\",\"codex\",\"cursor\",\"antigravity\",\"copilot\",\"devin\",\"grok\"]"
-    property string cfg_providerMetrics:
-        "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
-    property string cfg_providerMetricsDefault:
-        "{\"claude\":[\"weekly\"],\"codex\":[\"weekly\"]}"
+    property string cfg_providerMetrics: "{}"
+    property string cfg_providerMetricsDefault: "{}"
     property string cfg_usageMode: "remaining"
     property string cfg_usageModeDefault: "remaining"
     property int cfg_refreshInterval: 300
@@ -75,6 +73,14 @@ KCM.SimpleKCM {
     property int cfg_alertLowPercentDefault: 20
     property bool cfg_alertResetEnabled: false
     property bool cfg_alertResetEnabledDefault: false
+    property string cfg_providerOrder: ""
+    property string cfg_providerOrderDefault: ""
+    property bool cfg_usageCompact: false
+    property bool cfg_usageCompactDefault: false
+    property int cfg_usageWarnPercent: 60
+    property int cfg_usageWarnPercentDefault: 60
+    property int cfg_usageCriticalPercent: 85
+    property int cfg_usageCriticalPercentDefault: 85
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
