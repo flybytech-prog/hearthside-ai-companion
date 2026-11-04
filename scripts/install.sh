@@ -21,7 +21,9 @@ esac
 # (there is no unencrypted copy). The helper from this checkout does the work
 # (the installed one may be older or gone): it refuses symlinks, never follows
 # links, refuses while the encrypted folder is mounted, and replies with
-# category names only.
+# category names only. It also deletes the folder's KDE Wallet unlock slot and,
+# when the wallet holds it, the key in the wallet (which may show KWallet's own
+# password prompt if the wallet is locked).
 if [ "$uninstall_web_data" = true ]; then
     if ! command -v python3 >/dev/null 2>&1; then
         echo "Required command not found: python3" >&2
@@ -43,9 +45,16 @@ if [ "$uninstall_web_data" = true ]; then
             remove_notifyrc
             echo "No Hearthside chat sign-in data found."
             ;;
-        '{"ok":true,"removed":["vault"]}')
+        '{"ok":true,"removed":["'*'"]}')
+            # Categories, in this order: vault, vault-keys, wallet-entry.
             remove_notifyrc
-            echo "Deleted: encrypted chat folder (saved chat sign-ins)."
+            case "$reply" in *'"vault"'*) echo "Deleted: encrypted chat folder (saved chat sign-ins)." ;; esac
+            case "$reply" in *'"vault-keys"'*) echo "Deleted: KDE Wallet unlock slot of the encrypted chat folder." ;; esac
+            case "$reply" in *'"wallet-entry"'*) echo "Deleted: the encrypted chat folder's key in KDE Wallet." ;; esac
+            ;;
+        '{"ok":false,"error":"wallet-failed"}')
+            echo "Deleted the Hearthside chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Run this again, or remove it in KWalletManager." >&2
+            exit 1
             ;;
         '{"ok":false,"error":"not-locked"}')
             echo "Lock the encrypted folder in Hearthside first, then run this again. Nothing was deleted." >&2
