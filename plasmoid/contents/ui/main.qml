@@ -12,6 +12,7 @@ import "SnapshotLogic.js" as SnapshotLogic
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
+import "PromptLibrary.js" as PromptLibrary
 import "SettingsLogic.js" as SettingsLogic
 import "AlertLogic.js" as AlertLogic
 
@@ -91,6 +92,34 @@ PlasmoidItem {
     // message box (FullRepresentation.takePendingDrop). Runtime only, never
     // sent from here.
     property string pendingDrop: ""
+    // Why a file dropped on the chat or the icon gave no text (a
+    // PromptLibrary error code), until the popup shows it.
+    property string pendingDropError: ""
+    property string droppedSourceName: ""
+    property int droppedRun: 0
+
+    // Prompt library (saved prompts and personalities). Saved only inside
+    // the unlocked encrypted folder; the helper lists them and main.qml
+    // keeps the copy in memory, cleared as soon as the folder is locked.
+    // Never in the configuration.
+    readonly property bool libraryAvailable:
+        root.chatVaultState === "unlocked" && root.chatStorageMode === "encrypted"
+    property var libraryItems: []
+    // {"m:<model>": persona id}
+    property var libraryPersonas: ({})
+    // "", loading, ready, error
+    property string libraryState: ""
+    property string libraryError: ""
+    property var libraryQueue: []
+    property string libraryOp: ""
+    property string librarySourceName: ""
+    property int libraryRun: 0
+    // Prompts and personalities kept for this session only (the folder is
+    // locked or Stay signed in is off): [{id (negative), kind, text}].
+    property var sessionLibrary: []
+    property int sessionLibraryNext: -1
+    // Everything the popup lists: saved items, then this session's.
+    readonly property var promptItems: root.libraryItems.concat(root.sessionLibrary)
 
     // Usage alerts, memory only: after a Plasma restart the first reading is
     // a baseline again.
@@ -116,6 +145,13 @@ PlasmoidItem {
     // "", absent, locked, unlocked, unavailable, error
     property string chatVaultState: ""
     property var chatVaultMissing: []
+    // The KDE Wallet key slot as status reports it: "", set-up, off, unavailable.
+    property string chatVaultWallet: ""
+    // Settings → General → Unlock with; used only when the slot is set up.
+    readonly property string chatUnlockSetting:
+        ChatStorage.normalizeUnlockMethod(Plasmoid.configuration.chatVaultUnlock)
+    readonly property string chatUnlockMethod:
+        ChatStorage.effectiveUnlockMethod(root.chatUnlockSetting, root.chatVaultWallet)
     // Generation the helper prepared inside the verified mount; -1 = none.
     property int chatPreparedGeneration: -1
     // The user locked or cleared: don't reopen saved sign-ins by itself.
@@ -130,7 +166,9 @@ PlasmoidItem {
     property int chatOpGeneration: -1
     // Seeded in Component.onCompleted; see ChatStorage.firstRun.
     property int chatOpRun: 0
+    // A passphrase or KDE Wallet window may be open.
     readonly property bool chatVaultPrompting: root.chatOp === "create" || root.chatOp === "unlock"
+        || root.chatOp === "unlock-wallet" || root.chatOp === "add-key"
     // A helper step runs or waits to run; Lock automatically holds off.
     readonly property bool chatStorageBusy: root.chatOp !== "" || root.chatQueue.length > 0
     // Lock automatically after this many idle minutes; 0 = never.
@@ -148,7 +186,10 @@ PlasmoidItem {
         mode: root.chatStorageMode,
         state: root.chatVaultState,
         // Quiet re-checks while the saved profile is open don't show a card.
-        op: root.chatOp === "keep" ? "" : ChatStorage.stepOperation(root.chatOp),
+        // Wallet steps keep their own name, for their own busy text.
+        op: root.chatOp === "keep" ? ""
+            : root.chatOp === "unlock-wallet" || root.chatOp === "auto-unlock" || root.chatOp === "add-key"
+            ? root.chatOp : ChatStorage.stepOperation(root.chatOp),
         error: root.chatVaultError,
         hold: root.chatVaultHold,
         privateSession: root.chatPrivateSession,
@@ -417,7 +458,8 @@ PlasmoidItem {
             return ChatStorage.webDataCommand("remove", "encrypted",
                 root.chatAppletId, null, null, run)
         default:
-            return ChatStorage.vaultCommand(ChatStorage.stepOperation(step), run, root.chatAppletId)
+            return ChatStorage.vaultCommand(ChatStorage.stepOperation(step), run, root.chatAppletId,
+                ChatStorage.stepMethod(step))
         }
     }
 
@@ -428,7 +470,9 @@ PlasmoidItem {
         var next = ChatStorage.nextStep(root.chatQueue, {
             mode: root.chatStorageMode,
             state: root.chatVaultState,
-            wantsSaved: root.chatWantsSaved()
+            wantsSaved: root.chatWantsSaved(),
+            wallet: root.chatVaultWallet,
+            hold: root.chatVaultHold
         })
         root.chatQueue = next.queue
         var step = next.step
@@ -475,6 +519,7 @@ PlasmoidItem {
             if (reply.ok && reply.state) {
                 root.chatVaultState = reply.state
                 root.chatVaultMissing = reply.missing || []
+                root.chatVaultWallet = reply.wallet || ""
             } else {
                 root.chatVaultState = "error"
                 root.chatVaultError = reply.error || "failed"
@@ -506,8 +551,26 @@ PlasmoidItem {
             if (!reply.ok && root.chatStorageMode === "encrypted")
                 root.chatVaultError = "remove-failed"
             break
+        case "auto-unlock":
+            // Plasma start: a closed wallet (or another widget busy with the
+            // folder) just leaves the Unlock card; other problems are said.
+            if (!reply.ok && reply.error !== "wallet-closed" && reply.error !== "busy")
+                root.chatVaultError = reply.error || "failed"
+            root.chatEnqueue(["status"])
+            break
+        case "add-key":
+            // Set up again from the card: unlock with the new key at once.
+            if (reply.ok) {
+                root.chatVaultError = ""
+                root.chatEnqueue(["status", "unlock-wallet"])
+            } else {
+                root.chatVaultError = reply.error === "cancelled" ? "" : reply.error || "failed"
+                root.chatEnqueue(["status"])
+            }
+            break
         case "create":
         case "unlock":
+        case "unlock-wallet":
         case "lock":
             var automatic = step === "lock" && root.chatAutoLocking
             if (step === "lock")
@@ -573,10 +636,29 @@ PlasmoidItem {
             root.chatEnqueue(["status"])
             break
         case "create":
-        case "unlock":
             root.chatVaultHold = false
             root.chatVaultError = ""
             root.chatEnqueue([action])
+            break
+        case "unlock":
+            // The configured method; one click, also after Lock.
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatEnqueue([root.chatUnlockMethod === "wallet" ? "unlock-wallet" : "unlock"])
+            break
+        case "unlock-passphrase":
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatEnqueue(["unlock"])
+            break
+        case "wallet-setup":
+            // The wallet's key no longer fits (or is gone): set it up again,
+            // with the passphrase window, then unlock with it.
+            if (root.chatUnlockSetting !== "wallet" || root.chatVaultWallet === "unavailable")
+                break
+            root.chatVaultHold = false
+            root.chatVaultError = ""
+            root.chatEnqueue(["add-key"])
             break
         case "private":
             root.chatPrivateSession = true
@@ -690,6 +772,125 @@ PlasmoidItem {
         root.popupTab = "chat"
         root.chatSiteId = OllamaChat.ENTRY.id
         root.expanded = true
+    }
+
+    // A single text file dropped on the icon: open the popup on Ollama and
+    // read it there (hex is the path, see PromptLibrary.hexPath).
+    function dropFileToOllama(hex) {
+        if (!root.ollamaDropTarget)
+            return
+        root.popupTab = "chat"
+        root.chatSiteId = OllamaChat.ENTRY.id
+        root.expanded = true
+        root.readDroppedFile(hex)
+    }
+
+    // The helper reads the file (regular, at most 128 KiB, UTF-8 text) and
+    // returns its text, which goes into the message box like dropped text.
+    function readDroppedFile(hex) {
+        if (!root.ollamaDropTarget || root.droppedSourceName !== "")
+            return
+        root.droppedRun = ChatStorage.nextRun(root.droppedRun)
+        var command = PromptLibrary.readDroppedCommand(hex, root.droppedRun, Math.max(0, root.chatAppletId))
+        if (command === "") {
+            root.pendingDropError = "not-file"
+            return
+        }
+        root.droppedSourceName = command
+        droppedSource.connectSource(command)
+    }
+
+    function droppedDone(reply) {
+        root.droppedSourceName = ""
+        if (reply.ok && reply.text !== "")
+            root.pendingDrop = reply.text
+        else
+            root.pendingDropError = reply.ok ? "not-text" : reply.error
+    }
+
+    // --- Prompt library: helper jobs, one at a time ------------------------
+
+    // op: list, add {kind}, replace {id}, remove {id}, set-persona {model, id|null}
+    function libraryRequest(op, args) {
+        root.libraryQueue = root.libraryQueue.concat([{ op: op, args: args || {} }])
+        if (root.libraryOp === "")
+            Qt.callLater(root.libraryNext)
+    }
+
+    function libraryNext() {
+        if (root.libraryOp !== "" || root.libraryQueue.length === 0)
+            return
+        var job = root.libraryQueue[0]
+        root.libraryQueue = root.libraryQueue.slice(1)
+        if (!root.libraryAvailable) {
+            Qt.callLater(root.libraryNext)
+            return
+        }
+        root.libraryRun = ChatStorage.nextRun(root.libraryRun)
+        var command = PromptLibrary.promptsCommand(job.op, root.libraryRun, Math.max(0, root.chatAppletId), job.args)
+        if (command === "") {
+            root.libraryError = "failed"
+            Qt.callLater(root.libraryNext)
+            return
+        }
+        if (job.op === "list" && root.libraryState !== "ready")
+            root.libraryState = "loading"
+        root.libraryOp = job.op
+        root.librarySourceName = command
+        librarySource.connectSource(command)
+    }
+
+    function libraryFinish(op, exitCode, stdout) {
+        root.libraryOp = ""
+        root.librarySourceName = ""
+        if (op === "list") {
+            var list = PromptLibrary.parseList(exitCode, stdout)
+            if (!root.libraryAvailable || (!list.ok && list.error === "locked")) {
+                root.libraryClear()
+            } else if (list.ok) {
+                root.libraryItems = list.items
+                root.libraryPersonas = list.personas
+                root.libraryState = "ready"
+            } else {
+                root.libraryState = "error"
+                root.libraryError = list.error
+            }
+        } else {
+            var change = PromptLibrary.parseChange(exitCode, stdout)
+            root.libraryError = change.ok || change.error === "cancelled" ? "" : change.error
+            root.libraryRequest("list")
+        }
+        Qt.callLater(root.libraryNext)
+    }
+
+    // Locked (or Stay signed in off): the saved items leave memory.
+    function libraryClear() {
+        root.libraryQueue = root.libraryQueue.filter(function (job) { return job.op === "list" })
+        root.libraryItems = []
+        root.libraryPersonas = ({})
+        root.libraryState = ""
+        gc()
+    }
+
+    function addSessionItem(kind, text) {
+        if (PromptLibrary.KINDS.indexOf(kind) < 0 || typeof text !== "string" || text.trim() === ""
+                || text.length > PromptLibrary.MAX_CHARS[kind]
+                || root.sessionLibrary.length >= PromptLibrary.MAX_ITEMS)
+            return false
+        root.sessionLibrary = root.sessionLibrary.concat([{ id: root.sessionLibraryNext, kind: kind, text: text }])
+        root.sessionLibraryNext -= 1
+        return true
+    }
+
+    function removeSessionItem(id) {
+        root.sessionLibrary = root.sessionLibrary.filter(function (item) { return item.id !== id })
+    }
+
+    onLibraryAvailableChanged: {
+        if (root.libraryAvailable)
+            root.libraryRequest("list")
+        else
+            root.libraryClear()
     }
 
     function finishShortcut() {
@@ -820,6 +1021,32 @@ PlasmoidItem {
         }
     }
 
+    // Prompt library jobs; only stdout's checked fields are used.
+    Plasma5Support.DataSource {
+        id: librarySource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            librarySource.disconnectSource(source)
+            if (source !== root.librarySourceName)
+                return
+            root.libraryFinish(root.libraryOp, data["exit code"], data["stdout"])
+        }
+    }
+
+    // Reads one dropped text file; only stdout's checked text is used.
+    Plasma5Support.DataSource {
+        id: droppedSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            droppedSource.disconnectSource(source)
+            if (source !== root.droppedSourceName)
+                return
+            root.droppedDone(PromptLibrary.parseDropped(data["exit code"], data["stdout"]))
+        }
+    }
+
     Plasma5Support.DataSource {
         id: storageSource
         engine: "executable"
@@ -916,7 +1143,14 @@ PlasmoidItem {
         root.chatGeneration = root.chatConfiguredGeneration
         root.chatModeSeen = root.chatStorageMode
         root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
+        root.libraryRun = ChatStorage.firstRun(Date.now(), Math.random())
+        root.droppedRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
+        // Plasma start, Unlock with KDE Wallet: open the folder silently when
+        // the wallet is already open (the helper never prompts here). The
+        // step is dropped unless status says locked with a wallet slot.
+        if (root.chatStorageMode === "encrypted" && root.chatUnlockSetting === "wallet")
+            root.chatEnqueue(["status", "auto-unlock"])
     }
 
     // The zoom map changed outside this widget (e.g. Defaults in the

@@ -72,6 +72,17 @@ plasmashell's memory.
   recovery. A new sign-in is saved within about 30 seconds, and at once when
   you lock: lock or wait half a minute after signing in before restarting
   Plasma or logging out.
+  - **Unlock with KDE Wallet** (Settings → General → Privacy): the folder
+    opens with a key kept in your KDE Wallet, silently at Plasma start when
+    the wallet is already open, else with one click. The passphrase always
+    still works ("Use passphrase instead…"). Anyone who can use your open
+    wallet can open the folder too.
+- **Prompt library**: the Chat toolbar's **Prompts** button keeps prompts and
+  personalities you reuse. With Stay signed in → Encrypted they are saved
+  inside the encrypted folder (typed into a KDE text window); otherwise they
+  last for this session only. With Ollama a prompt goes into the message box
+  and a saved personality can be a model's default; on a web site a click
+  copies the prompt to the clipboard.
 - **Google sign-in** works on Google's sign-in page (Hearthside presents
   itself as Firefox there only, because Google refuses embedded browsers).
 - **Keep open / Minimize**: the popup closes when you click elsewhere unless
@@ -140,9 +151,9 @@ starts with Plasma while it remains on a panel.
     model's turn. Both models stay loaded until Clear, so this needs memory
     for both. The panes sit side by side when the popup is wide enough
     (**Settings → General → Size: Large**), else one above the other.
-  - **Drag and drop**: drag text from another program onto the chat or onto
-    the panel icon, and it lands in the message box (nothing is sent until you
-    press Send). Files are refused for now. Hearthside never starts Ollama: if
+  - **Drag and drop**: drag text, or one text file (up to 128 KB), from
+    another program onto the chat or onto the panel icon, and it lands in the
+    message box (nothing is sent until you press Send). Hearthside never starts Ollama: if
   it isn't running, the Chat tab says so and shows
   `systemctl start ollama` (or `ollama serve`). The address is
   `http://127.0.0.1:11434` unless you change it under **Show advanced

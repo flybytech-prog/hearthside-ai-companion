@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.kirigami as Kirigami
+import "PromptLibrary.js" as PromptLibrary
 
 MouseArea {
     id: compactRoot
@@ -23,20 +24,24 @@ MouseArea {
             root.expanded = !root.expanded
     }
 
-    // Text dragged from another program onto the icon opens the Ollama chat
-    // with the text in its message box; nothing is sent until Send. Only
-    // text: drags with files or links are refused.
+    // Text (or one text file) dragged from another program onto the icon
+    // opens the Ollama chat with the text in its message box; nothing is
+    // sent until Send. Several files and links are refused.
     DropArea {
         anchors.fill: parent
         enabled: root.ollamaDropTarget
         onEntered: (drag) => {
-            if (drag.hasText && !drag.hasUrls)
+            if (drag.hasText || drag.hasUrls)
                 drag.accept(Qt.CopyAction)
             else
                 drag.accepted = false
         }
         onDropped: (drop) => {
-            if (drop.hasText && !drop.hasUrls) {
+            var hex = drop.hasUrls && drop.urls.length === 1 ? PromptLibrary.hexPath(drop.urls[0]) : ""
+            if (hex !== "") {
+                root.dropFileToOllama(hex)
+                drop.accept(Qt.CopyAction)
+            } else if (drop.hasText && !drop.hasUrls) {
                 root.dropToOllama(drop.text)
                 drop.accept(Qt.CopyAction)
             } else {

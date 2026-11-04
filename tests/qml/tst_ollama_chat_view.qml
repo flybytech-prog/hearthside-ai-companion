@@ -1780,4 +1780,152 @@ TestCase {
         view.takeDrop("off")
         compare(input(view).text, "")
     }
+
+    // --- R4: file drops, prompts, saved personalities ------------------------------
+
+    function test_singleFileDropAsksMainToReadIt() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var files = []
+        view.fileDropped.connect(function (hex) { files.push(hex) })
+        var before = testCase.requests.length
+        verify(view.textDropped(true, true, "/tmp/a.txt", "2f746d702f612e747874"))
+        compare(files, ["2f746d702f612e747874"])
+        compare(view.problem, "")
+        // Several files or a link: refused, nothing read.
+        verify(!view.textDropped(true, true, "x", ""))
+        compare(view.problem, "drop-file")
+        compare(files.length, 1)
+        // The text comes back through takeDrop; nothing is sent.
+        view.takeDrop("file text")
+        compare(input(view).text, "file text")
+        compare(testCase.requests.length, before)
+        var codes = [["too-large", "drop-too-large"], ["too-long", "drop-too-long"], ["not-text", "drop-not-text"],
+                     ["absent", "drop-unreadable"], ["bad-reply", "drop-unreadable"]]
+        for (var index = 0; index < codes.length; index++) {
+            view.dropFailed(codes[index][0])
+            compare(view.problem, codes[index][1])
+            compare(findChild(view, "problemText").textFormat, Text.PlainText)
+        }
+    }
+
+    function test_insertPromptAtTheCursor() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var field = input(view)
+        field.text = "Hello world"
+        field.cursorPosition = 6
+        view.insertPrompt("big ")
+        compare(field.text, "Hello big world")
+        compare(field.cursorPosition, 10)
+        view.insertPrompt("x".repeat(32000))
+        compare(view.problem, "insert-too-long")
+        compare(field.text, "Hello big world")
+        compare(testCase.requests.length, 2)
+    }
+
+    function test_savedPersonalityIsTheDefault() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var chosen = []
+        view.personaDefaultChosen.connect(function (model, id) { chosen.push([model, id]) })
+        view.libraryItems = [{ id: 4, kind: "persona", text: "Saved persona" }, { id: 5, kind: "prompt", text: "P" },
+                             { id: -1, kind: "persona", text: "Session persona" }]
+        view.libraryPersonas = { "m:llama3:latest": 4 }
+        view.libraryReady = true
+        compare(view.personaFor("llama3:latest"), "Saved persona")
+        compare(view.personaFor("qwen3:8b"), "")
+        compare(view.personaChoices.length, 3)
+        var request = sendText(view, "Hi")
+        compare(messagesOf(request)[0], { role: "system", content: "Saved persona" })
+        reply(request, "ok")
+        // Choosing in the picker: the session's text and the saved default.
+        view.editingPersona = true
+        var picker = findChild(view, "personaPicker")
+        verify(picker.visible)
+        compare(picker.displayText, "Choose a saved personality…")
+        view.choosePersona(view.personaChoices[2])
+        compare(view.personaFor("llama3:latest"), "Session persona")
+        compare(chosen, [])
+        view.choosePersona(view.personaChoices[1])
+        compare(chosen, [["llama3:latest", 4]])
+        view.choosePersona(view.personaChoices[0])
+        compare(chosen[1], ["llama3:latest", -1])
+        // Not saved (folder locked): nothing is asked of the helper.
+        view.libraryReady = false
+        view.choosePersona(view.personaChoices[1])
+        compare(chosen.length, 2)
+    }
+
+    function test_personaPickerShowsTextAsPlainText() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.libraryItems = [{ id: 4, kind: "persona", text: "<b>bold</b> <img src=\"http://127.0.0.1:9/\">" }]
+        view.editingPersona = true
+        var picker = findChild(view, "personaPicker")
+        picker.popup.open()
+        wait(50)
+        var items = []
+        collect(picker.popup.contentItem, items)
+        var found = null
+        for (var index = 0; index < items.length; index++) {
+            if (typeof items[index].text === "string" && items[index].text.indexOf("<b>") === 0)
+                found = items[index]
+        }
+        verify(found !== null)
+        compare(found.textFormat, Text.PlainText)
+        picker.popup.close()
+    }
+
+    Component {
+        id: panelComponent
+        PromptLibraryPanel {
+            width: 400
+        }
+    }
+
+    function test_libraryPanelCopiesOnClickAndKeepsSessionItems() {
+        var panel = createTemporaryObject(panelComponent, testCase, {
+            items: [{ id: 1, kind: "prompt", text: "<i>Summarize</i>\nthis" }, { id: -2, kind: "persona", text: "Kind" }]
+        })
+        verify(panel !== null)
+        wait(30)
+        // Only plain text, never the library text as markup.
+        var items = []
+        collect(panel, items)
+        var shown = 0
+        for (var index = 0; index < items.length; index++) {
+            if (items[index].objectName === "libraryItemText") {
+                compare(items[index].textFormat, Text.PlainText)
+                shown += 1
+            }
+        }
+        compare(shown, 2)
+        compare(named(panel, "libraryNote").text,
+                "Kept for this session only. To save prompts, turn on Stay signed in → Encrypted in the settings.")
+        // A web site: Copy puts the whole text on the clipboard, on a click.
+        var copy = named(panel, "libraryUseButton")
+        compare(copy.text, "Copy")
+        copy.clicked()
+        compare(pasted(), "<i>Summarize</i>\nthis")
+        verify(named(panel, "copiedNote").visible)
+        // Ollama: insert instead.
+        var used = []
+        panel.useRequested.connect(function (text) { used.push(text) })
+        panel.forOllama = true
+        named(panel, "libraryUseButton").clicked()
+        compare(used, ["<i>Summarize</i>\nthis"])
+        // Session items are typed here.
+        var kept = []
+        panel.sessionAddRequested.connect(function (kind, text) { kept.push([kind, text]) })
+        var field = named(panel, "sessionLibraryInput")
+        compare(field.textFormat, TextEdit.PlainText)
+        field.text = "New one"
+        named(panel, "keepPromptButton").clicked()
+        compare(kept, [["prompt", "New one"]])
+        compare(field.text, "")
+        // Saved: kdialog through the helper, no typing field.
+        panel.saved = true
+        verify(named(panel, "sessionLibraryInput") === null)
+    }
 }

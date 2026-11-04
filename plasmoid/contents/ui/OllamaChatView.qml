@@ -6,6 +6,7 @@ import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.kirigami as Kirigami
 import "OllamaChat.js" as OllamaChat
 import "ChatStorage.js" as ChatStorage
+import "PromptLibrary.js" as PromptLibrary
 
 // Built-in chat with the Ollama server on this computer. Prompts, replies
 // and personalities live only in this view's memory (the transcript models
@@ -83,6 +84,15 @@ ColumnLayout {
     // Whose personality the panel edits while comparing: "a" or "b".
     property string personaTarget: "a"
     property bool personaLoading: false
+    // The prompt library from main.qml (saved and this session's items),
+    // its saved per-model personalities ({"m:<model>": id}) and whether it
+    // is saved (the folder is unlocked).
+    property var libraryItems: []
+    property var libraryPersonas: ({})
+    property bool libraryReady: false
+    // Saved personalities for the picker: "None" first.
+    readonly property var personaChoices: [{ id: 0, kind: "persona", text: "" }].concat(
+        PromptLibrary.itemsOf(ollamaView.libraryItems, "persona"))
     // Models used in this conversation; unloaded on Clear.
     property var usedModels: []
     property var unloadNames: []
@@ -137,6 +147,11 @@ ColumnLayout {
 
     // +1, -1 or 0 (reset), handled by main.qml.
     signal zoomRequested(int direction)
+    // A single text file was dropped (hex: its path, PromptLibrary.hexPath);
+    // main.qml reads it and the text comes back through takeDrop.
+    signal fileDropped(string hex)
+    // Save (id > 0) or clear (-1) the default personality of a model.
+    signal personaDefaultChosen(string model, int id)
 
     spacing: 0
     // Nothing of the view paints outside it (e.g. over the popup's tabs).
@@ -236,11 +251,41 @@ ColumnLayout {
 
     // --- personalities (memory only) -----------------------------------------
 
+    // This session's personality of a model, else its saved default.
     function personaFor(name) {
         var key = "m:" + name
-        return OllamaChat.isModelName(name)
-            && Object.prototype.hasOwnProperty.call(ollamaView.sessionPersonas, key)
-            ? ollamaView.sessionPersonas[key] : ""
+        if (!OllamaChat.isModelName(name))
+            return ""
+        if (Object.prototype.hasOwnProperty.call(ollamaView.sessionPersonas, key))
+            return ollamaView.sessionPersonas[key]
+        return PromptLibrary.defaultPersona(ollamaView.libraryItems, ollamaView.libraryPersonas, name)
+    }
+
+    // A personality from the library (or None) for the model the panel
+    // shows; a saved one also becomes that model's saved default.
+    function choosePersona(entry) {
+        var model = ollamaView.personaModel
+        if (!OllamaChat.isModelName(model) || !entry)
+            return
+        ollamaView.setPersona(model, entry.id === 0 ? "" : entry.text)
+        if (ollamaView.libraryReady && (entry.id === 0 || entry.id > 0))
+            ollamaView.personaDefaultChosen(model, entry.id === 0 ? -1 : entry.id)
+        ollamaView.loadPersona()
+    }
+
+    // A prompt from the library, put into the message box at the cursor.
+    function insertPrompt(text) {
+        if (!ollamaView.siteEnabled || input.readOnly)
+            return
+        var result = PromptLibrary.insertAt(input.text, input.cursorPosition, text, OllamaChat.MAX_PROMPT_CHARS)
+        if (!result.ok) {
+            ollamaView.problem = "insert-too-long"
+            ollamaView.problemDetail = ""
+            return
+        }
+        input.text = result.text
+        input.cursorPosition = result.cursor
+        ollamaView.focusLater()
     }
 
     function setPersona(name, text) {
@@ -855,7 +900,7 @@ ColumnLayout {
             ollamaView.problemDetail = ""
             return
         }
-        if (ollamaView.problem === "drop-file" || ollamaView.problem === "drop-too-long")
+        if (ollamaView.problem.indexOf("drop-") === 0 || ollamaView.problem === "insert-too-long")
             ollamaView.problem = ""
         input.text = result.text
         input.cursorPosition = input.length
@@ -863,10 +908,17 @@ ColumnLayout {
     }
 
     // From the drop areas: true when the drop was taken (as a copy, so the
-    // source never deletes anything).
-    function textDropped(hasText, hasUrls, text) {
+    // source never deletes anything). hex is the path of a single local
+    // file (else ""): main.qml reads it. Other files and links are refused.
+    function textDropped(hasText, hasUrls, text, hex) {
         if (!ollamaView.current || !ollamaView.siteEnabled)
             return false
+        if (hasUrls && typeof hex === "string" && hex !== "" && !input.readOnly) {
+            if (ollamaView.problem.indexOf("drop-") === 0)
+                ollamaView.problem = ""
+            ollamaView.fileDropped(hex)
+            return true
+        }
         if (hasUrls) {
             ollamaView.problem = "drop-file"
             ollamaView.problemDetail = ""
@@ -876,6 +928,24 @@ ColumnLayout {
             return false
         ollamaView.takeDrop(text)
         return true
+    }
+
+    // A dropped file gave no text (PromptLibrary error code).
+    function dropFailed(code) {
+        switch (code) {
+        case "too-large":
+            ollamaView.problem = "drop-too-large"
+            break
+        case "too-long":
+            ollamaView.problem = "drop-too-long"
+            break
+        case "not-text":
+            ollamaView.problem = "drop-not-text"
+            break
+        default:
+            ollamaView.problem = "drop-unreadable"
+        }
+        ollamaView.problemDetail = ""
     }
 
     // Fixed texts only; the address is never shown, only its port.
@@ -905,6 +975,15 @@ ColumnLayout {
             return i18n("Drop text, not files.")
         case "drop-too-long":
             return i18n("This text is too long to drop here. A message can have at most %1 characters.",
+                OllamaChat.MAX_PROMPT_CHARS)
+        case "drop-too-large":
+            return i18n("This file is too big. Drop a text file of at most 128 KB.")
+        case "drop-not-text":
+            return i18n("This file isn't plain text.")
+        case "drop-unreadable":
+            return i18n("Couldn't read this file.")
+        case "insert-too-long":
+            return i18n("This prompt doesn't fit: a message can have at most %1 characters.",
                 OllamaChat.MAX_PROMPT_CHARS)
         default:
             return i18n("Ollama reported an error.")
@@ -1150,6 +1229,40 @@ ColumnLayout {
                 QQC2.ToolTip.visible: hovered
             }
         }
+        // Saved personalities (and this session's) from the prompt library.
+        // QQC2's: Plasma's ComboBox loops on its implicit height here.
+        QQC2.ComboBox {
+            id: personaPicker
+            objectName: "personaPicker"
+            Layout.fillWidth: true
+            // Fixed: sizing to the choices (user text) loops.
+            implicitWidth: Kirigami.Units.gridUnit * 10
+            visible: ollamaView.personaChoices.length > 1
+            enabled: ollamaView.personaModel !== ""
+            model: ollamaView.personaChoices
+            currentIndex: -1
+            // A fixed text: the choices are user text, shown only by the
+            // delegate below as plain text.
+            displayText: i18n("Choose a saved personality…")
+            onActivated: (index) => {
+                ollamaView.choosePersona(ollamaView.personaChoices[index])
+                personaPicker.currentIndex = -1
+            }
+
+            delegate: PlasmaComponents.ItemDelegate {
+                id: personaDelegate
+                required property var modelData
+                required property int index
+                width: ListView.view ? ListView.view.width : implicitWidth
+                highlighted: personaPicker.highlightedIndex === personaDelegate.index
+                contentItem: PlasmaComponents.Label {
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: personaDelegate.modelData.id === 0 ? i18n("None")
+                        : PromptLibrary.label(personaDelegate.modelData.text)
+                }
+            }
+        }
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 4
@@ -1393,7 +1506,8 @@ ColumnLayout {
                 drag.accepted = false
         }
         onDropped: (drop) => {
-            if (ollamaView.textDropped(drop.hasText, drop.hasUrls, drop.hasText ? drop.text : ""))
+            if (ollamaView.textDropped(drop.hasText, drop.hasUrls, drop.hasText ? drop.text : "",
+                    drop.hasUrls && drop.urls.length === 1 ? PromptLibrary.hexPath(drop.urls[0]) : ""))
                 drop.accept(Qt.CopyAction)
             else
                 drop.accepted = false

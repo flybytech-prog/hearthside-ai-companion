@@ -197,6 +197,68 @@ Hiding the Chat tab (Settings → General → Show tabs) closes the chat pages
 and, if saved sign-ins are open, locks the folder as the lock button does.
 While Chat is hidden no chat page, web engine or Ollama chat starts.
 
+#### Unlock with KDE Wallet
+
+Settings → General → Privacy → **Unlock with** chooses **Passphrase** (the
+default) or **KDE Wallet**. Choosing KDE Wallet sets it up at once: the helper
+makes a second key slot (a copy of the folder's `gocryptfs.conf`, in
+`~/.local/share/hearthside/vault-keys/wallet.conf`) that opens with a random
+256-bit key, stores that key in your KDE Wallet (folder `Hearthside`, entry
+`encrypted-chat-folder`), and asks for the passphrase once to do it. The key
+moves only between KDE's and gocryptfs's own programs through pipes; it never
+passes through Hearthside, process arguments, the environment, logs or the
+widget's configuration (only the word `wallet` is saved, as
+`chatVaultUnlock`).
+
+- At Plasma start, if the wallet is already open, the folder is unlocked
+  silently. If the wallet is closed nothing is asked; the Chat tab shows the
+  locked card, whose **Unlock with KDE Wallet** may show KDE Wallet's own
+  password window. After Lock or Lock automatically it takes that one click
+  again; it never re-opens by itself.
+- The locked card always offers **Use passphrase instead…**: the passphrase
+  slot is never changed and stays the way back in. If the wallet's key no
+  longer fits (for example after the folder was re-created), the card offers
+  **Set up KDE Wallet again…**.
+- Choosing **Passphrase** again removes the wallet's key slot and its wallet
+  entry (after a confirmation). Deleting the folder, turning Stay signed in
+  Off, and `scripts/install.sh --uninstall-web-data` remove both too.
+- **Change passphrase…** changes only the passphrase slot; the wallet slot
+  keeps working.
+
+| | Passphrase | KDE Wallet |
+| --- | --- | --- |
+| What opens the folder | The passphrase you type | The key in your KDE Wallet, so whatever opens the wallet (usually your login password) |
+| While it is open | Programs running as you can read the folder | Same, and they can also read the key from the open wallet: KDE Wallet trusts every program's own claim of who it is |
+| At Plasma start | Locked until you unlock | Unlocked if the wallet is open; with autologin, or a wallet password different from your login password, the wallet usually starts closed |
+| Stolen, powered-off computer | Protected by the passphrase | Protected by the wallet's password; the weakest slot wins |
+
+A key slot is a file: an old copy of `wallet.conf` in a backup still opens the
+folder with the wallet key that was valid then, even after you removed it
+here.
+
+#### Prompt library
+
+The **Prompts** button in the Chat toolbar opens your saved prompts and
+personalities. They are saved only inside the unlocked encrypted folder, in
+`library/` (one text file per item and `personas.json`, which maps model names
+to a saved personality), so they exist only with Stay signed in → Encrypted.
+Otherwise, or while the folder is locked, prompts and personalities you add
+are kept in Plasma's memory for this session only. Nothing of them is ever in
+the widget's configuration (that file is readable by other users here).
+
+- New and replaced items are typed into a KDE text window (kdialog) that the
+  helper starts; kdialog writes the text straight into the folder, and it
+  never passes through process arguments.
+- To show them, the helper reads the files and hands the text to the widget
+  (`--prompts list`): this is the one place where your text passes through the
+  helper process, in memory only, never to disk or logs. The widget keeps
+  that copy in Plasma's memory and drops it as soon as the folder is locked.
+- With Ollama, a prompt is put into the message box (nothing is sent until
+  Send), and a saved personality can be made a model's default. On a web site
+  a click copies the prompt to the clipboard ("Copied — paste with Ctrl+V");
+  the page is never scripted. A clipboard manager such as Klipper may keep
+  what you copy (see below).
+
 Small files in `$XDG_RUNTIME_DIR/hearthside/` (in memory, mode `0600`):
 `vault.lock`, an empty lock file, and briefly `passwd.status`, which holds only
 the exit status of the first passphrase dialog while you change the
@@ -230,8 +292,11 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled`), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), and the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `tooltipShowsUsage`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled`, and
+`chatVaultUnlock`, Passphrase or KDE Wallet), in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
+| Prompt library | This session's prompts and personalities in Plasma memory only | Saved in the encrypted folder (`library/`); in Plasma memory only while unlocked; never in the configuration |
+| KDE Wallet key | Not used | With Unlock with KDE Wallet: a random key in your KDE Wallet and a key slot file `vault-keys/wallet.conf` next to the encrypted folder |
 | Ollama address | `chatOllamaUrl` in the Plasma configuration file, plain text; only a loopback `http://` address with a port is ever saved | Same |
 | Downloads | Only files you approve, saved to your Downloads folder | Same |
 | Uploads | Read-only, from files you pick in the file dialog | Same |
@@ -346,10 +411,19 @@ none of the web profile rules above apply to it; these do:
   the panel icon (which opens the Ollama chat), goes into the message box
   after what you typed; nothing is sent until you press Send. The dragged
   text passes through the compositor like any drag and drop, as plain text
-  only (no HTML or files are read); control characters other than tab and
-  line feed are removed. Nothing is written anywhere. Files are refused
-  ("Drop text, not files."), and so is text that would make the message
-  longer than 32000 characters. Dropping is off while Ollama is off.
+  only (no HTML is read); control characters other than tab and line feed
+  are removed. Nothing is written anywhere. Text that would make the message
+  longer than 32000 characters is refused. Dropping is off while Ollama is
+  off.
+- **Dropped files.** One local text file (at most 128 KB, UTF-8) can be
+  dropped too: the helper reads it (`--read-dropped`) and hands back only its
+  text, which goes into the message box the same way. Its path is passed to
+  the helper as hexadecimal digits, so for that moment it is visible in the
+  helper's process arguments (other users can't see them with the usual
+  `hidepid`, but programs running as you can). Symlinks, pipes, devices,
+  `/proc` and `/sys` files, empty or larger files and anything that isn't
+  text are refused, as are several files at once and links ("Drop text, not
+  files.").
 - **What Ollama keeps.** Ollama holds the conversation in its memory (the
   model's context cache, also in GPU memory) until the model is unloaded,
   5 minutes after the last message by default. **Clear conversation** asks
@@ -488,7 +562,8 @@ The Chat tab protects against:
 - with Off: leftovers on disk after a Plasma restart or Clear chat data;
 - with Encrypted: someone who reads your disk while the folder is locked
   (for example a stolen, powered-off laptop), apart from the metadata listed
-  above;
+  above; with Unlock with KDE Wallet, only as well as your wallet's password
+  protects it;
 - chat content in logs.
 
 It does not protect against:

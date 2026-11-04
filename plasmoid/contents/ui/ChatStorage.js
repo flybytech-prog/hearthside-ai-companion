@@ -8,22 +8,47 @@
 var MODES = ["memory", "encrypted"]
 var MAX_INT = 2147483648
 
-var VAULT_OPERATIONS = ["status", "create", "unlock", "lock", "change-passphrase", "destroy"]
+var VAULT_OPERATIONS = ["status", "create", "unlock", "lock", "change-passphrase", "destroy",
+                        "add-key", "remove-key", "auto-unlock"]
+// How the folder is unlocked (Settings → General → Unlock with).
+var UNLOCK_METHODS = ["passphrase", "wallet"]
+// The operations that take --method; add-key and remove-key need wallet.
+var METHOD_OPERATIONS = ["unlock", "add-key", "remove-key"]
 var VAULT_STATES = ["absent", "locked", "unlocked", "unavailable", "damaged"]
+// The wallet key slot, as status reports it with locked and unlocked.
+var WALLET_STATES = ["set-up", "off", "unavailable"]
 var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3"]
+// Tools only the KDE Wallet unlock needs (reported with locked/unlocked).
+var WALLET_TOOLS = ["kwallet-query", "qdbus6", "openssl"]
 // Arch packages that provide each missing tool.
 var TOOL_PACKAGES = {
     "gocryptfs": "gocryptfs",
     "gocryptfs-v2": "gocryptfs",
     "kdialog": "kdialog",
-    "fusermount3": "fuse3"
+    "fusermount3": "fuse3",
+    "kwallet-query": "kwallet",
+    "qdbus6": "qt6-tools",
+    "openssl": "openssl"
 }
 var HELPER_ERRORS = [
     "symlink", "not-owned", "not-directory", "os-error", "missing-tool", "exists",
     "absent", "cancelled", "wrong-passphrase", "empty-passphrase", "init-failed",
     "mount-failed", "not-verified", "stale-mount", "busy", "not-locked", "no-runtime-dir",
-    "damaged"
+    "damaged", "not-set-up", "wallet-disabled", "wallet-closed", "wallet-failed",
+    "wallet-mismatch", "wallet-write-failed"
 ]
+
+// Only the exact word "wallet" means KDE Wallet; anything else (including
+// a later "fido2" this version doesn't know) is the passphrase.
+function normalizeUnlockMethod(value) {
+    return value === "wallet" ? "wallet" : "passphrase"
+}
+
+// The method the Chat tab's Unlock uses: KDE Wallet only when it is chosen
+// in the settings and the helper says its key slot is set up.
+function effectiveUnlockMethod(setting, wallet) {
+    return normalizeUnlockMethod(setting) === "wallet" && wallet === "set-up" ? "wallet" : "passphrase"
+}
 
 // Anything but the exact word "encrypted" (including the old "folder") means
 // the private in-memory profile.
@@ -97,11 +122,21 @@ function webDataCommand(op, store, applet, generation, keep, run) {
     return ""
 }
 
-function vaultCommand(op, run, applet) {
+// method: undefined or "" for none; unlock takes passphrase (the default,
+// left out) or wallet; add-key and remove-key take wallet only.
+function vaultCommand(op, run, applet, method) {
     var prefix = helperPrefix(run, applet)
     if (prefix === "" || VAULT_OPERATIONS.indexOf(op) < 0)
         return ""
-    return prefix + " --vault " + op
+    var command = prefix + " --vault " + op
+    var none = method === undefined || method === null || method === ""
+    if (op === "add-key" || op === "remove-key")
+        return method === "wallet" ? command + " --method wallet" : ""
+    if (none)
+        return command
+    if (op !== "unlock" || UNLOCK_METHODS.indexOf(method) < 0)
+        return ""
+    return method === "wallet" ? command + " --method wallet" : command
 }
 
 // The helper's stdout, reduced to known words. Anything unexpected is
@@ -128,6 +163,14 @@ function parseReply(stdout) {
     if (VAULT_STATES.indexOf(reply.state) < 0)
         return bad
     var result = {ok: true, state: reply.state}
+    if (reply.state === "locked" || reply.state === "unlocked") {
+        // An older or odd reply never offers the wallet.
+        result.wallet = WALLET_STATES.indexOf(reply.wallet) >= 0 ? reply.wallet : "unavailable"
+        var walletMissing = Array.isArray(reply.missing) ? reply.missing : []
+        result.missing = WALLET_TOOLS.filter(function (name) {
+            return walletMissing.indexOf(name) >= 0
+        })
+    }
     if (reply.state === "unavailable") {
         var missing = Array.isArray(reply.missing) ? reply.missing : []
         result.missing = MISSING_TOOLS.filter(function (name) {
@@ -180,8 +223,9 @@ function profilePath(runtimeDir, applet, generation) {
 function installCommand(missing) {
     var names = Array.isArray(missing) ? missing : []
     var packages = []
-    for (var index = 0; index < MISSING_TOOLS.length; index++) {
-        var tool = MISSING_TOOLS[index]
+    var tools = MISSING_TOOLS.concat(WALLET_TOOLS)
+    for (var index = 0; index < tools.length; index++) {
+        var tool = tools[index]
         if (names.indexOf(tool) >= 0 && packages.indexOf(TOOL_PACKAGES[tool]) < 0)
             packages.push(TOOL_PACKAGES[tool])
     }
@@ -209,7 +253,15 @@ function messageFor(error) {
     case "cleared":
     case "auto-locked":
     case "damaged":
+    case "not-set-up":
+    case "wallet-disabled":
+    case "wallet-failed":
+    case "wallet-mismatch":
+    case "wallet-write-failed":
         return error
+    // Plasma start found the wallet closed: the card just offers Unlock.
+    case "wallet-closed":
+        return ""
     case "not-verified":
     case "stale-mount":
     case "mount-failed":
@@ -299,14 +351,16 @@ function autoLockStep(context) {
 
 // --- Helper step queue (main.qml runs one step at a time) ----------------
 //
-// Steps: "status", "create", "unlock", "lock", "prepare", "keep", "remove",
+// Steps: "status", "create", "unlock" (passphrase), "unlock-wallet",
+// "auto-unlock" (Plasma start only), "add-key" (wallet set-up again from the
+// card), "lock", "prepare", "keep", "remove",
 // "wait", "destroy" (damaged folder only) while Stay signed in is on, and the leave-* steps queued when it is
 // turned off. Leave steps delete the encrypted folder, so they only ever run
 // while the mode is still off.
 
 var LEAVE_STEPS = ["leave-wait", "leave-remove", "leave-lock", "leave-status", "leave-destroy"]
 // Steps that only make sense while Stay signed in is on.
-var ENCRYPTED_STEPS = ["create", "unlock", "prepare", "keep"]
+var ENCRYPTED_STEPS = ["create", "unlock", "unlock-wallet", "auto-unlock", "add-key", "prepare", "keep"]
 
 function isLeaveStep(step) {
     return LEAVE_STEPS.indexOf(step) >= 0
@@ -340,7 +394,7 @@ function queueForMode(queue, mode) {
 }
 
 // Whether `step` should be skipped now.
-// context: {mode, state, wantsSaved}
+// context: {mode, state, wantsSaved, wallet, hold}
 function dropStep(step, context) {
     var value = context || {}
     var encrypted = normalizeMode(value.mode) === "encrypted"
@@ -351,6 +405,10 @@ function dropStep(step, context) {
         return true
     if (step === "prepare")
         return value.wantsSaved !== true
+    // Silent unlock at Plasma start: only a locked folder with a wallet slot,
+    // and never after the user locked it.
+    if (step === "auto-unlock")
+        return value.state !== "locked" || value.wallet !== "set-up" || value.hold === true
     // The Chat tab only deletes a folder the helper reported as damaged.
     if (step === "destroy")
         return value.state !== "damaged"
@@ -372,7 +430,14 @@ function nextStep(queue, context) {
 function stepOperation(step) {
     if (typeof step !== "string")
         return ""
+    if (step === "unlock-wallet")
+        return "unlock"
     return isLeaveStep(step) ? step.slice("leave-".length) : step
+}
+
+// The --method a step's operation takes ("" = none).
+function stepMethod(step) {
+    return step === "unlock-wallet" || step === "add-key" ? "wallet" : ""
 }
 
 // After the leave-destroy step: {state} to set when the folder is known to be

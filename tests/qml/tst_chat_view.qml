@@ -571,4 +571,39 @@ TestCase {
         keyClick(Qt.Key_0, Qt.ControlModifier)
         compare(asked, [])
     }
+
+    // --- R3: KDE Wallet on the locked card ----------------------------------------
+
+    function test_walletUnlockCardOffersThePassphrase() {
+        var view = make({ current: true, storageMode: "encrypted", card: {view: "unlock", message: ""} })
+        var unlock = findChild(view, "unlockButton")
+        var passphrase = findChild(view, "unlockPassphraseButton")
+        var setup = findChild(view, "walletSetupButton")
+        compare(unlock.text, "Unlock…")
+        verify(!passphrase.visible)
+        view.unlockMethod = "wallet"
+        compare(unlock.text, "Unlock with KDE Wallet")
+        verify(passphrase.visible)
+        verify(!setup.visible)
+        unlock.clicked()
+        passphrase.clicked()
+        compare(testCase.requests.slice(-2), ["unlock", "unlock-passphrase"])
+        // The key no longer fits: set up again, only when the wallet is chosen.
+        view.card = {view: "unlock", message: "wallet-mismatch"}
+        verify(!setup.visible)
+        view.walletChosen = true
+        verify(setup.visible)
+        verify(passphrase.visible)
+        setup.clicked()
+        compare(testCase.requests[testCase.requests.length - 1], "wallet-setup")
+        compare(findChild(view, "storageCard").message,
+                "The key in KDE Wallet no longer opens the encrypted folder. Set it up again, or use your passphrase.")
+        view.card = {view: "unlock", message: "not-set-up"}
+        verify(setup.visible)
+        view.card = {view: "unlock", message: "wallet-failed"}
+        verify(!setup.visible)
+        view.card = {view: "busy", message: "unlock-wallet"}
+        compare(findChild(view, "storageCard").message,
+                "Unlocking with KDE Wallet… If KDE Wallet asks for its password, answer its window.")
+    }
 }

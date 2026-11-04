@@ -118,9 +118,11 @@ TestCase {
 
     function test_parseReplyOk() {
         compare(ChatStorage.parseReply("{\"ok\":true}"), {ok: true})
-        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"locked\"}"), {ok: true, state: "locked"})
-        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"unlocked\"}\n"),
-                {ok: true, state: "unlocked"})
+        // An older reply without "wallet" never offers the wallet.
+        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"locked\"}"),
+                {ok: true, state: "locked", wallet: "unavailable", missing: []})
+        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"unlocked\",\"wallet\":\"set-up\"}\n"),
+                {ok: true, state: "unlocked", wallet: "set-up", missing: []})
         compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"absent\"}"), {ok: true, state: "absent"})
     }
 
@@ -505,5 +507,99 @@ TestCase {
         compare(ChatStorage.messageFor("auto-locked"), "auto-locked")
         compare(card({state: "locked", error: "auto-locked", hold: true}),
                 {view: "unlock", message: "auto-locked"})
+    }
+
+    // --- R3: KDE Wallet unlock ---------------------------------------------------
+
+    function test_unlockMethods() {
+        compare(ChatStorage.UNLOCK_METHODS, ["passphrase", "wallet"])
+        compare(ChatStorage.normalizeUnlockMethod("wallet"), "wallet")
+        var others = ["passphrase", "fido2", "Wallet", "", null, undefined, 1, "wallet "]
+        for (var index = 0; index < others.length; index++)
+            compare(ChatStorage.normalizeUnlockMethod(others[index]), "passphrase", String(others[index]))
+        compare(ChatStorage.effectiveUnlockMethod("wallet", "set-up"), "wallet")
+        compare(ChatStorage.effectiveUnlockMethod("wallet", "off"), "passphrase")
+        compare(ChatStorage.effectiveUnlockMethod("wallet", "unavailable"), "passphrase")
+        compare(ChatStorage.effectiveUnlockMethod("wallet", ""), "passphrase")
+        compare(ChatStorage.effectiveUnlockMethod("passphrase", "set-up"), "passphrase")
+    }
+
+    function test_walletVaultCommands() {
+        var prefix = "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --vault "
+        compare(ChatStorage.vaultCommand("unlock", 3, 5), prefix + "unlock")
+        compare(ChatStorage.vaultCommand("unlock", 3, 5, "passphrase"), prefix + "unlock")
+        compare(ChatStorage.vaultCommand("unlock", 3, 5, "wallet"), prefix + "unlock --method wallet")
+        compare(ChatStorage.vaultCommand("add-key", 3, 5, "wallet"), prefix + "add-key --method wallet")
+        compare(ChatStorage.vaultCommand("remove-key", 3, 5, "wallet"), prefix + "remove-key --method wallet")
+        compare(ChatStorage.vaultCommand("auto-unlock", 3, 5), prefix + "auto-unlock")
+        // add-key and remove-key need wallet; nothing else takes a method.
+        compare(ChatStorage.vaultCommand("add-key", 3, 5), "")
+        compare(ChatStorage.vaultCommand("add-key", 3, 5, "passphrase"), "")
+        compare(ChatStorage.vaultCommand("remove-key", 3, 5, "fido2"), "")
+        compare(ChatStorage.vaultCommand("unlock", 3, 5, "fido2"), "")
+        compare(ChatStorage.vaultCommand("unlock", 3, 5, "wallet --x"), "")
+        compare(ChatStorage.vaultCommand("status", 3, 5, "wallet"), "")
+        compare(ChatStorage.vaultCommand("auto-unlock", 3, 5, "wallet"), "")
+        compare(ChatStorage.vaultCommand("lock", 3, 5, "passphrase"), "")
+    }
+
+    function test_walletStatusReply() {
+        compare(ChatStorage.parseReply(
+            "{\"ok\":true,\"state\":\"locked\",\"wallet\":\"off\",\"missing\":[\"openssl\",\"x\",\"qdbus6\",\"kwallet-query\"]}"),
+            {ok: true, state: "locked", wallet: "off", missing: ["kwallet-query", "qdbus6", "openssl"]})
+        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"locked\",\"wallet\":\"maybe\"}").wallet,
+                "unavailable")
+        // Only locked/unlocked carry the wallet.
+        compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"absent\",\"wallet\":\"set-up\"}"),
+                {ok: true, state: "absent"})
+        compare(ChatStorage.installCommand(["kwallet-query", "qdbus6", "openssl"]),
+                "sudo pacman -S --needed kwallet qt6-tools openssl")
+        compare(ChatStorage.installCommand(["qdbus6"]), "sudo pacman -S --needed qt6-tools")
+    }
+
+    function test_walletErrors() {
+        var codes = ["not-set-up", "wallet-disabled", "wallet-failed", "wallet-mismatch", "wallet-write-failed"]
+        for (var index = 0; index < codes.length; index++) {
+            compare(ChatStorage.parseReply("{\"ok\":false,\"error\":\"" + codes[index] + "\"}"),
+                    {ok: false, error: codes[index]})
+            compare(ChatStorage.messageFor(codes[index]), codes[index])
+        }
+        // A closed wallet at Plasma start says nothing; the card offers Unlock.
+        compare(ChatStorage.parseReply("{\"ok\":false,\"error\":\"wallet-closed\"}").error, "wallet-closed")
+        compare(ChatStorage.messageFor("wallet-closed"), "")
+        compare(card({state: "locked", error: "wallet-mismatch"}), {view: "unlock", message: "wallet-mismatch"})
+        compare(ChatStorage.parseReply("{\"ok\":false,\"error\":\"wallet-other\"}").error, "failed")
+    }
+
+    function test_autoUnlockOnlyForALockedFolderWithAWalletSlot() {
+        var base = {mode: "encrypted", state: "locked", wallet: "set-up", hold: false}
+        verify(!ChatStorage.dropStep("auto-unlock", base))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {state: "unlocked"})))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {state: ""})))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {wallet: "off"})))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {wallet: "unavailable"})))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {hold: true})))
+        verify(ChatStorage.dropStep("auto-unlock", Object.assign({}, base, {mode: "memory"})))
+        // Status first, then the unlock only when it says so.
+        var next = ChatStorage.nextStep(["status", "auto-unlock"], {mode: "encrypted", state: ""})
+        compare(next.step, "status")
+        compare(ChatStorage.nextStep(next.queue, {mode: "encrypted", state: "locked", wallet: "off"}).step, "")
+        compare(ChatStorage.nextStep(next.queue, base).step, "auto-unlock")
+        // Wallet steps go when Stay signed in is turned off.
+        compare(ChatStorage.queueForMode(["unlock-wallet", "auto-unlock", "add-key", "status"], "memory"),
+                ["status"])
+    }
+
+    function test_walletStepOperations() {
+        compare(ChatStorage.stepOperation("unlock-wallet"), "unlock")
+        compare(ChatStorage.stepMethod("unlock-wallet"), "wallet")
+        compare(ChatStorage.stepOperation("auto-unlock"), "auto-unlock")
+        compare(ChatStorage.stepMethod("auto-unlock"), "")
+        compare(ChatStorage.stepOperation("add-key"), "add-key")
+        compare(ChatStorage.stepMethod("add-key"), "wallet")
+        compare(ChatStorage.stepMethod("unlock"), "")
+        compare(ChatStorage.vaultCommand(ChatStorage.stepOperation("unlock-wallet"), 1, 1,
+                ChatStorage.stepMethod("unlock-wallet")),
+                "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=1 python3 -P -m hearthside --vault unlock --method wallet")
     }
 }

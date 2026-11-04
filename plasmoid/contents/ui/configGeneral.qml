@@ -44,6 +44,8 @@ KCM.SimpleKCM {
     property int cfg_chatProfileGenerationDefault: 0
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
+    property string cfg_chatVaultUnlock: "passphrase"
+    property string cfg_chatVaultUnlockDefault: "passphrase"
     property bool cfg_chatKeepOpen: false
     property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"
@@ -112,6 +114,23 @@ KCM.SimpleKCM {
     // Only makes the helper's source name unique; 0 if the id is odd.
     readonly property int vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
     property string vaultMessage: ""
+    // The KDE Wallet key slot as status reports it: "", set-up, off, unavailable.
+    property string vaultWallet: ""
+    property bool confirmingWalletOff: false
+    // Unlock with: shown as KDE Wallet only while it is chosen and set up.
+    readonly property string unlockShown:
+        ChatStorage.effectiveUnlockMethod(page.cfg_chatVaultUnlock, page.vaultWallet)
+    // The choice needs an existing folder (locked or unlocked) under the
+    // applied Stay signed in → Encrypted, and a usable KDE Wallet.
+    readonly property bool unlockChoiceEnabled: page.signInMode === "encrypted"
+        && page.savedSignInMode === "encrypted"
+        && (page.vaultState === "locked" || page.vaultState === "unlocked")
+        && (page.vaultWallet === "set-up" || page.vaultWallet === "off")
+        && page.vaultOp === ""
+    // Tools only the KDE Wallet unlock needs, as status reports them.
+    readonly property var walletMissing: page.vaultMissing.filter(function (name) {
+        return ChatStorage.WALLET_TOOLS.indexOf(name) >= 0
+    })
 
     function normalizedRefresh(value) {
         var best = page.refreshChoices[0].value
@@ -147,11 +166,30 @@ KCM.SimpleKCM {
         page.cfg_chatSignInStorage = mode
     }
 
-    function runVault(op) {
+    function syncUnlockChoice() {
+        unlockChoice.currentIndex = page.unlockShown === "wallet" ? 1 : 0
+    }
+
+    // KDE Wallet is set up at once (the helper asks for the passphrase) and
+    // only then chosen; Passphrase removes the wallet's key after a confirm.
+    function chooseUnlock(method) {
+        page.confirmingWalletOff = false
+        if (method === "wallet") {
+            if (page.unlockShown !== "wallet")
+                page.runVault("add-key", "wallet")
+        } else if (page.vaultWallet === "set-up") {
+            page.confirmingWalletOff = true
+        } else {
+            page.cfg_chatVaultUnlock = "passphrase"
+        }
+        page.syncUnlockChoice()
+    }
+
+    function runVault(op, method) {
         if (page.vaultOp !== "")
             return
         page.vaultRun = ChatStorage.nextRun(page.vaultRun)
-        var command = ChatStorage.vaultCommand(op, page.vaultRun, page.vaultApplet)
+        var command = ChatStorage.vaultCommand(op, page.vaultRun, page.vaultApplet, method)
         if (command === "")
             return
         page.vaultOp = op
@@ -168,10 +206,17 @@ KCM.SimpleKCM {
         if (op === "status") {
             page.vaultState = reply.ok && reply.state ? reply.state : "error"
             page.vaultMissing = reply.missing || []
+            page.vaultWallet = reply.ok && reply.wallet ? reply.wallet : ""
+            page.syncUnlockChoice()
             return
         }
+        if (reply.ok && op === "add-key")
+            page.cfg_chatVaultUnlock = "wallet"
+        else if (reply.ok && op === "remove-key")
+            page.cfg_chatVaultUnlock = "passphrase"
         if (reply.ok)
-            page.vaultMessage = op === "destroy" ? "deleted" : "changed"
+            page.vaultMessage = op === "destroy" ? "deleted" : op === "add-key" ? "wallet-on"
+                : op === "remove-key" ? "wallet-off" : "changed"
         else
             page.vaultMessage = reply.error === "cancelled" || reply.error === "empty-passphrase"
                 ? "" : reply.error
@@ -186,6 +231,18 @@ KCM.SimpleKCM {
             return i18n("Passphrase changed.")
         case "deleted":
             return i18n("Encrypted folder deleted.")
+        case "wallet-on":
+            return i18n("KDE Wallet is set up. Apply to unlock with it.")
+        case "wallet-off":
+            return i18n("The key was removed from KDE Wallet. The passphrase unlocks the folder.")
+        case "missing-tool":
+            return i18n("A required tool is missing. Nothing was changed.")
+        case "wallet-disabled":
+            return i18n("KDE Wallet is turned off. Turn it on in System Settings first.")
+        case "wallet-failed":
+            return i18n("KDE Wallet didn't answer or was cancelled. Try again.")
+        case "wallet-write-failed":
+            return i18n("Couldn't set up KDE Wallet. The passphrase still unlocks the folder.")
         case "wrong-passphrase":
             return i18n("Wrong passphrase. Nothing was changed.")
         case "not-locked":
@@ -219,6 +276,7 @@ KCM.SimpleKCM {
     }
 
     onCfg_chatSignInStorageChanged: page.syncSignInChoice()
+    onUnlockShownChanged: page.syncUnlockChoice()
 
     Component.onCompleted: {
         page.cfg_refreshInterval = page.normalizedRefresh(page.cfg_refreshInterval)
@@ -496,6 +554,84 @@ KCM.SimpleKCM {
             Kirigami.ContextualHelpButton {
                 toolTipText: i18n("Locks the encrypted folder once Chat hasn't been shown for this long, as if you pressed Lock. New sign-ins are saved within about 30 seconds, and at once when the folder is locked; if Plasma is stopped abruptly before that, you may have to sign in again.")
             }
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Unlock with:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.ComboBox {
+                id: unlockChoice
+                objectName: "unlockChoice"
+                enabled: page.unlockChoiceEnabled
+                textRole: "text"
+                valueRole: "value"
+                model: [
+                    {value: "passphrase", text: i18n("Passphrase")},
+                    {value: "wallet", text: i18n("KDE Wallet")}
+                ]
+                onActivated: page.chooseUnlock(currentValue)
+            }
+            QQC2.BusyIndicator {
+                visible: page.vaultOp === "add-key" || page.vaultOp === "remove-key"
+                running: visible
+                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("KDE Wallet: a random key for the encrypted folder is kept in your wallet, so the folder opens without typing the passphrase: at Plasma start when the wallet is already open, else with one click (KDE Wallet may ask for its own password). Anyone who can use your open wallet can open the folder too. The passphrase keeps working and is always offered. Setting it up asks for the passphrase once. Choosing Passphrase again removes the key from the wallet. Needs an encrypted folder and KDE Wallet turned on.")
+            }
+        }
+
+        Kirigami.InlineMessage {
+            objectName: "walletOffConfirm"
+            Layout.fillWidth: true
+            visible: page.confirmingWalletOff
+            type: Kirigami.MessageType.Warning
+            text: i18n("Stop unlocking with KDE Wallet? Its key is removed from the wallet now; the passphrase unlocks the folder.")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Remove key")
+                    icon.name: "edit-delete"
+                    onTriggered: {
+                        page.confirmingWalletOff = false
+                        page.runVault("remove-key", "wallet")
+                    }
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: page.confirmingWalletOff = false
+                }
+            ]
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: page.signInMode === "encrypted" && page.walletMissing.length > 0
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: i18n("Unlocking with KDE Wallet needs tools that aren't installed. Install them with:")
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                readOnly: true
+                selectByMouse: true
+                text: ChatStorage.installCommand(page.walletMissing)
+            }
+        }
+
+        QQC2.Label {
+            Layout.fillWidth: true
+            // The folder actions' own label shows it while they are open.
+            visible: !page.showFolderActions && page.vaultMessage !== ""
+            wrapMode: Text.WordWrap
+            color: page.vaultMessage === "wallet-on" || page.vaultMessage === "wallet-off"
+                ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
+            text: page.vaultText(page.vaultMessage)
         }
 
         ColumnLayout {

@@ -72,7 +72,21 @@ PlasmaExtras.Representation {
         ollamaView.takeDrop(text)
     }
 
-    Component.onCompleted: full.takePendingDrop()
+    function takePendingDropError() {
+        if (root.pendingDropError === "")
+            return
+        var code = root.pendingDropError
+        root.pendingDropError = ""
+        ollamaView.dropFailed(code)
+    }
+
+    // The prompt library panel is open (runtime only).
+    property bool showPrompts: false
+
+    Component.onCompleted: {
+        full.takePendingDrop()
+        full.takePendingDropError()
+    }
 
     Layout.minimumWidth: Kirigami.Units.gridUnit * 18
     Layout.minimumHeight: Kirigami.Units.gridUnit * 15
@@ -93,6 +107,9 @@ PlasmaExtras.Representation {
         }
         function onPendingDropChanged() {
             full.takePendingDrop()
+        }
+        function onPendingDropErrorChanged() {
+            full.takePendingDropError()
         }
         // A hidden Chat tab keeps no web view or saved sign-ins open.
         function onChatShownChanged() {
@@ -249,6 +266,16 @@ PlasmaExtras.Representation {
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {
+                    objectName: "promptsButton"
+                    icon.name: "bookmarks"
+                    display: QQC2.AbstractButton.IconOnly
+                    checked: full.showPrompts
+                    text: i18n("Prompts")
+                    onClicked: full.showPrompts = !full.showPrompts
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered
+                }
+                PlasmaComponents.ToolButton {
                     objectName: "personaButton"
                     icon.name: "user-identity"
                     display: QQC2.AbstractButton.IconOnly
@@ -344,50 +371,90 @@ PlasmaExtras.Representation {
         }
     }
 
-    contentItem: StackLayout {
-        currentIndex: full.onChat ? 0 : 1
-        // No tab's content paints over the header and its tab bar.
-        clip: true
+    contentItem: ColumnLayout {
+        spacing: 0
 
-        StackLayout {
-            currentIndex: root.chatSiteId === "ollama" ? 1 : 0
-
-            ChatView {
-                id: chatView
-                siteIds: root.chatWebSiteIds
-                siteId: root.chatWebSiteId
-                customUrls: root.chatCustomUrls
-                appletId: Math.max(0, root.chatAppletId)
-                // Only while the popup is open and a web site is shown, so no
-                // web engine starts early or for Ollama alone.
-                current: full.onChat && root.expanded && root.chatSiteId !== "ollama"
-                storageMode: root.chatStorageMode
-                storageReady: root.chatStorageReady
-                storagePath: root.chatProfilePath
-                profileName: root.chatProfileName
-                card: root.chatCard
-                missingTools: root.chatVaultMissing
-                storageNotice: root.chatStorageNotice
-                autoLockMinutes: root.chatAutoLockMinutes
-                storageBusy: root.chatStorageBusy || root.chatDialogOpen
-                zoomMap: root.chatZoom
-                onStorageRequest: (action) => root.chatStorageRequest(action)
-                onZoomRequested: (direction) => root.stepSiteZoom(chatView.siteId, direction)
-                onSiteZoomRequested: (siteId, factor) => root.setSiteZoom(siteId, factor)
+        // Saved and this session's prompts, over either chat.
+        PromptLibraryPanel {
+            id: libraryPanel
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.largeSpacing
+            visible: full.onChat && full.showPrompts
+            items: root.promptItems
+            saved: root.libraryState === "ready"
+            libraryState: root.libraryState
+            error: root.libraryError
+            encryptedMode: root.chatStorageMode === "encrypted"
+            forOllama: full.onOllama
+            busy: root.libraryOp !== "" || root.libraryQueue.length > 0
+            onUseRequested: (text) => ollamaView.insertPrompt(text)
+            onPersonaRequested: (entry) => {
+                ollamaView.editingPersona = true
+                ollamaView.choosePersona(entry)
             }
-
-            OllamaChatView {
-                id: ollamaView
-                current: full.onOllama && root.expanded
-                siteEnabled: root.chatShown && root.chatSiteIds.indexOf("ollama") >= 0
-                address: root.chatOllamaAddress
-                appletId: Math.max(0, root.chatAppletId)
-                textScale: SettingsLogic.zoomFor(root.chatZoom, "ollama")
-                onZoomRequested: (direction) => root.stepSiteZoom("ollama", direction)
-            }
+            onAddRequested: (kind) => root.libraryRequest("add", { kind: kind })
+            onReplaceRequested: (id) => root.libraryRequest("replace", { id: id })
+            onRemoveRequested: (id) => root.libraryRequest("remove", { id: id })
+            onSessionAddRequested: (kind, text) => root.addSessionItem(kind, text)
+            onSessionRemoveRequested: (id) => root.removeSessionItem(id)
+            onCloseRequested: full.showPrompts = false
         }
 
-        UsageView {}
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: full.onChat ? 0 : 1
+            // No tab's content paints over the header and its tab bar.
+            clip: true
+
+            StackLayout {
+                currentIndex: root.chatSiteId === "ollama" ? 1 : 0
+
+                ChatView {
+                    id: chatView
+                    siteIds: root.chatWebSiteIds
+                    siteId: root.chatWebSiteId
+                    customUrls: root.chatCustomUrls
+                    appletId: Math.max(0, root.chatAppletId)
+                    // Only while the popup is open and a web site is shown, so no
+                    // web engine starts early or for Ollama alone.
+                    current: full.onChat && root.expanded && root.chatSiteId !== "ollama"
+                    storageMode: root.chatStorageMode
+                    storageReady: root.chatStorageReady
+                    storagePath: root.chatProfilePath
+                    profileName: root.chatProfileName
+                    card: root.chatCard
+                    missingTools: root.chatVaultMissing
+                    unlockMethod: root.chatUnlockMethod
+                    walletChosen: root.chatUnlockSetting === "wallet" && root.chatVaultWallet !== "unavailable"
+                    storageNotice: root.chatStorageNotice
+                    autoLockMinutes: root.chatAutoLockMinutes
+                    storageBusy: root.chatStorageBusy || root.chatDialogOpen
+                    zoomMap: root.chatZoom
+                    onStorageRequest: (action) => root.chatStorageRequest(action)
+                    onZoomRequested: (direction) => root.stepSiteZoom(chatView.siteId, direction)
+                    onSiteZoomRequested: (siteId, factor) => root.setSiteZoom(siteId, factor)
+                }
+
+                OllamaChatView {
+                    id: ollamaView
+                    current: full.onOllama && root.expanded
+                    siteEnabled: root.chatShown && root.chatSiteIds.indexOf("ollama") >= 0
+                    address: root.chatOllamaAddress
+                    appletId: Math.max(0, root.chatAppletId)
+                    textScale: SettingsLogic.zoomFor(root.chatZoom, "ollama")
+                    libraryItems: root.promptItems
+                    libraryPersonas: root.libraryPersonas
+                    libraryReady: root.libraryState === "ready"
+                    onZoomRequested: (direction) => root.stepSiteZoom("ollama", direction)
+                    onFileDropped: (hex) => root.readDroppedFile(hex)
+                    onPersonaDefaultChosen: (model, id) => root.libraryRequest("set-persona",
+                        { model: model, id: id > 0 ? id : null })
+                }
+            }
+
+            UsageView {}
+        }
     }
 
     Binding {

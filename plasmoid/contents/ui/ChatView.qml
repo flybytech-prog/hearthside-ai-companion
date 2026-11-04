@@ -35,6 +35,11 @@ ColumnLayout {
     property string profileName: ""
     property var card: ({view: "web", message: ""})
     property var missingTools: []
+    // "wallet" when Unlock uses KDE Wallet (chosen and set up), else "passphrase".
+    property string unlockMethod: "passphrase"
+    // KDE Wallet is chosen in the settings and usable: its key can be set up
+    // again from the card.
+    property bool walletChosen: false
     // Message code shown in memory mode too (e.g. the old folder is in use).
     property string storageNotice: ""
     // Lock automatically (minutes, 0 = never) and whether main.qml is running
@@ -259,6 +264,22 @@ ColumnLayout {
             return i18n("Creating the encrypted folder… Answer the passphrase window.")
         case "unlock":
             return i18n("Unlocking… Answer the passphrase window.")
+        case "unlock-wallet":
+            return i18n("Unlocking with KDE Wallet… If KDE Wallet asks for its password, answer its window.")
+        case "auto-unlock":
+            return i18n("Unlocking with KDE Wallet…")
+        case "add-key":
+            return i18n("Setting up KDE Wallet… Answer the passphrase window.")
+        case "not-set-up":
+            return i18n("KDE Wallet has no key for the encrypted folder. Set it up again, or use your passphrase.")
+        case "wallet-mismatch":
+            return i18n("The key in KDE Wallet no longer opens the encrypted folder. Set it up again, or use your passphrase.")
+        case "wallet-disabled":
+            return i18n("KDE Wallet is turned off. Use your passphrase instead.")
+        case "wallet-failed":
+            return i18n("Couldn't get the key from KDE Wallet. Use your passphrase instead.")
+        case "wallet-write-failed":
+            return i18n("Couldn't save the key in KDE Wallet. Use your passphrase.")
         case "wait":
         case "lock":
             return i18n("Locking the encrypted folder…")
@@ -730,7 +751,9 @@ ColumnLayout {
                     case "create":
                         return i18n("Your sign-ins are kept in an encrypted folder. You choose its passphrase now and enter it once per Plasma session. If you forget it, the saved data can't be recovered.")
                     case "unlock":
-                        return i18n("Enter your passphrase to open them for this Plasma session.")
+                        return chatView.unlockMethod === "wallet"
+                            ? i18n("Open them with KDE Wallet for this Plasma session.")
+                            : i18n("Enter your passphrase to open them for this Plasma session.")
                     case "install":
                         return i18n("The encrypted folder for saved sign-ins needs some tools that aren't installed. Install them with this command, then check again:")
                     case "damaged":
@@ -771,11 +794,31 @@ ColumnLayout {
                     onClicked: chatView.storageRequest("create")
                 }
                 PlasmaComponents.Button {
+                    objectName: "unlockButton"
                     Layout.fillWidth: true
                     visible: storageCard.view === "unlock"
                     icon.name: "unlock"
-                    text: chatView.card.message === "wrong-passphrase" ? i18n("Try again…") : i18n("Unlock…")
+                    text: chatView.unlockMethod === "wallet" ? i18n("Unlock with KDE Wallet")
+                        : chatView.card.message === "wrong-passphrase" ? i18n("Try again…") : i18n("Unlock…")
                     onClicked: chatView.storageRequest("unlock")
+                }
+                // The passphrase always works, also when the wallet doesn't (D47).
+                PlasmaComponents.Button {
+                    objectName: "unlockPassphraseButton"
+                    Layout.fillWidth: true
+                    visible: storageCard.view === "unlock" && chatView.unlockMethod === "wallet"
+                    icon.name: "dialog-password"
+                    text: i18n("Use passphrase instead…")
+                    onClicked: chatView.storageRequest("unlock-passphrase")
+                }
+                PlasmaComponents.Button {
+                    objectName: "walletSetupButton"
+                    Layout.fillWidth: true
+                    visible: storageCard.view === "unlock" && chatView.walletChosen
+                        && (chatView.card.message === "wallet-mismatch" || chatView.card.message === "not-set-up")
+                    icon.name: "configure"
+                    text: i18n("Set up KDE Wallet again…")
+                    onClicked: chatView.storageRequest("wallet-setup")
                 }
                 PlasmaComponents.Button {
                     Layout.fillWidth: true

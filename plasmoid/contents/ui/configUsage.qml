@@ -42,6 +42,8 @@ KCM.ScrollViewKCM {
     property int cfg_chatProfileGenerationDefault: 0
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
+    property string cfg_chatVaultUnlock: "passphrase"
+    property string cfg_chatVaultUnlockDefault: "passphrase"
     property bool cfg_chatKeepOpen: false
     property bool cfg_chatKeepOpenDefault: false
     property string cfg_chatOllamaUrl: "http://127.0.0.1:11434"

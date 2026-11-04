@@ -630,6 +630,24 @@ the slot (`add-key`): 9 `cancelled` (the current-passphrase window), 12
 `wrong-passphrase`, 6 and 11 `absent`, 24 and anything else
 `wallet-write-failed`.
 
+### How the plasmoid uses the wallet jobs
+
+`chatVaultUnlock` (String, default `passphrase`; only the exact word `wallet`
+means KDE Wallet, anything else is the passphrase) is written only by
+Settings → General (`cfg_chatVaultUnlock`), and only after the helper answered:
+`add-key --method wallet` succeeded → `wallet`; `remove-key --method wallet`
+succeeded (or no slot was set up) → `passphrase`. The Chat tab uses the wallet
+only when the setting is `wallet` **and** `status` says `"wallet":"set-up"`
+(`ChatStorage.effectiveUnlockMethod`); a missing or unknown `wallet` field
+counts as `unavailable`. `auto-unlock` is queued only once, from main.qml's
+`Component.onCompleted`, behind a `status`, and runs only when that status is
+`locked` with `wallet: set-up` and nothing locked it on purpose
+(`ChatStorage.dropStep`); `wallet-closed` and `busy` from it show nothing. The
+card's **Unlock** runs `unlock --method wallet` (or the passphrase), **Use
+passphrase instead…** runs `unlock`, and after `wallet-mismatch` or
+`not-set-up` **Set up KDE Wallet again…** runs `add-key --method wallet`,
+then the wallet unlock.
+
 ## Prompt library helper
 
 Saved prompts and personas live only inside the unlocked encrypted folder
@@ -675,6 +693,18 @@ open), `cancelled` (Cancel, or an empty answer), `too-long`, `not-text`
 lock held), `missing-tool` (no kdialog), `os-error` (anything else, including
 a symlink or non-folder in place of `library/`).
 
+The plasmoid builds these commands only in `PromptLibrary.js`
+(`promptsCommand`), with the same `env HEARTHSIDE_RUN=… HEARTHSIDE_APPLET=…
+python3 -P -m hearthside` prefix, from fixed words, ids (1 to 2147483648) and a
+model name checked against the helper's rule; anything else builds nothing.
+main.qml runs one job at a time, lists the library whenever the folder turns
+unlocked and after every change, and drops its copy (and queued changes) as
+soon as the folder is not unlocked. Replies are reduced by `parseList` (at
+most 100 items with a valid id, kind and non-empty text within its cap,
+duplicates dropped; defaults kept only for valid model names pointing at a
+listed persona) and `parseChange`. The text is shown as plain text only and
+never written to the configuration.
+
 ## Dropped file helper
 
 For a single local `file://` URL dropped on the Ollama chat, the plasmoid
@@ -697,6 +727,14 @@ Reply: `{"ok":true,"text":"..."}` (the text only, never the path), or
 `{"ok":false,"error":E}` with `absent` (missing), `unreadable` (permission),
 `not-file` (not a regular file, a symlink, empty, `/proc`/`/sys`, or a bad
 argument), `too-large`, `not-text`, `too-long`, `os-error`.
+
+The plasmoid runs it only for a drop of exactly one URL on the Ollama chat or
+the panel icon, with `PromptLibrary.hexPath(url)`: `file:///` URLs only (no
+host, query or fragment), percent-decoded as UTF-8, absolute, no NUL, at most
+8192 hex digits; anything else is "Drop text, not files." and runs nothing.
+`parseDropped` accepts only a string of at most 32000 characters without NUL;
+that text then goes through `OllamaChat.dropText` into the message box and is
+never sent by itself.
 
 ## Port owner helper
 
