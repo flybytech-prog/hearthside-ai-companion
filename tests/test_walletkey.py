@@ -405,6 +405,9 @@ def test_status_wallet_field(stubs, capsys):
     stubs.remove("qdbus6")
     assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable",
                                        "missing": ["kwallet-query", "qdbus6"]}
+    stubs.remove("openssl")
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable",
+                                       "missing": ["kwallet-query", "qdbus6", "openssl"]}
     # Core tools missing: only those are listed, no wallet field.
     stubs.remove("gocryptfs")
     assert reply("status", capsys) == {"ok": True, "state": "unavailable", "missing": ["gocryptfs"]}
@@ -413,7 +416,12 @@ def test_status_wallet_field(stubs, capsys):
 def test_status_never_needs_openssl(stubs, capsys):
     enrolled(stubs, capsys)
     stubs.remove("openssl")
-    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "set-up"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "set-up", "missing": ["openssl"]}
+    assert reply("remove-key", capsys) == {"ok": False, "error": "missing-tool"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off", "missing": ["openssl"]}
+    stubs.install("openssl")
+    assert reply("add-key", capsys) == {"ok": True}
+    stubs.remove("openssl")
     assert unlock_wallet(capsys) == {"ok": True}
     assert reply("add-key", capsys) == {"ok": False, "error": "missing-tool"}
 

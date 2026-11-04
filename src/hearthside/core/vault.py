@@ -818,11 +818,16 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         # Outside the lock: a qdbus6 query may take up to its timeout.
         if ctx.wallet_missing:
             reply["wallet"] = "unavailable"
-            reply["missing"] = list(ctx.wallet_missing)
         elif walletkey.is_enabled(ctx.wallet_tools["qdbus6"]) is not True:
             reply["wallet"] = "unavailable"
         else:
             reply["wallet"] = "set-up" if slot else "off"
+        # openssl is needed only to set up or remove the key, so it is listed but
+        # never makes the wallet method unavailable.
+        missing = [*ctx.wallet_missing,
+                   *([walletkey.KEYGEN_TOOL] if walletkey.KEYGEN_TOOL not in ctx.wallet_tools else [])]
+        if missing:
+            reply["missing"] = missing
     return reply
 
 

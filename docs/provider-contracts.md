@@ -454,8 +454,10 @@ accepts only `encrypted`; there is no unencrypted store.
 when there is none (or anything else is in its place), and `unavailable` when
 `kwallet-query` or `qdbus6` is missing, KWallet is disabled
 (`isEnabled` = false), or `qdbus6` did not answer within 2 seconds. When a
-tool is missing the reply also has `"missing"` with `kwallet-query` and/or
-`qdbus6` (packages `kwallet` and `qt6-tools`). `status` never checks the
+tool is missing the reply also has `"missing"` with any of `kwallet-query`,
+`qdbus6` and `openssl`, in that order (packages `kwallet`, `qt6-tools` and
+`openssl`). `openssl` is needed only by `add-key` and `remove-key`, so when
+only it is missing `wallet` still says `set-up` or `off`. `status` never checks the
 wallet entry or opens the wallet; `unlock --method wallet` does.
 
 Wallet unlock, step by step (all queries through `qdbus6` with a 2 second
@@ -489,7 +491,10 @@ that pipe become the stdin of `gocryptfs -passwd -q -config
 runs and gocryptfs all exited 0 (kwallet-query prints its errors on stdout, so
 a failed read must never reach gocryptfs). On a failure after the new key
 was stored, the copy, any older slot (it no longer fits) and the wallet entry
-(overwritten with a fresh value first) are removed. `remove-key` removes the
+(overwritten with a fresh value first) are removed. Setting up again
+replaces any existing slot, so a failed re-setup leaves the wallet method
+off; set it up again (the passphrase always still opens the folder).
+`remove-key` removes the
 slot first in every case; if it then fails (`missing-tool`,
 `wallet-disabled`, `wallet-failed`), only the wallet entry may remain. The
 entry is deleted through `org.kde.KWallet.open(<wallet>, 0, Hearthside)` →
