@@ -16,6 +16,12 @@ unmount, so a pipe would block its reader (Plasma's DataSource) for hours.
 A mount is trusted only after ``/proc/self/mountinfo`` shows our gocryptfs
 mount of our cipher directory, owned by us and without ``allow_other``.
 Replies are short state or error codes: never paths, names or counts.
+
+Besides the passphrase (``gocryptfs.conf``, always kept as the recovery slot)
+the folder may have a KDE Wallet key slot, ``vault-keys/wallet.conf``: a copy
+of ``gocryptfs.conf`` re-keyed with ``gocryptfs -passwd -config`` to a random
+key kept in the wallet (``walletkey.py``). That key, too, only ever moves
+between children through pipes this process never reads.
 """
 
 from __future__ import annotations
@@ -31,9 +37,10 @@ import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from . import walletkey
 from .webdata import (
     APP_DIR,
     PRIVATE_MODE,
@@ -48,7 +55,14 @@ from .webdata import (
     remove_entry,
 )
 
-OPERATIONS = ("status", "create", "unlock", "lock", "change-passphrase", "destroy")
+OPERATIONS = (
+    "status", "create", "unlock", "lock", "change-passphrase", "destroy",
+    "add-key", "remove-key", "auto-unlock",
+)
+# Unlock methods (--method); add-key and remove-key take only "wallet".
+METHODS = ("passphrase", "wallet")
+METHOD_OPERATIONS = ("unlock", "add-key", "remove-key")
+KEYS_DIR = walletkey.KEYS_DIR
 VAULT_DIR = "vault"
 LOCK_FILE = "vault.lock"
 # Holds only the first -passwd dialog's exit status (see extpass_relay.py).
@@ -94,12 +108,13 @@ PROMPT_CURRENT = "Enter the current passphrase for the Hearthside encrypted chat
 PROMPT_NEW = "Choose a new passphrase for the Hearthside encrypted chat folder."
 
 # Allow-list of the dash arguments each gocryptfs phase may pass, checked before every
-# run; everything else (key material, -ko/-o mount options, -config, -fsname, debug
-# output, ...) is refused. "-version" is only ever the sole argument.
+# run; everything else (key material, -ko/-o mount options, -fsname, debug output,
+# ...) is refused. "-version" is only ever the sole argument. "-config" is accepted
+# only with the one key-slot path the caller computed (see _check_argv).
 PHASE_FLAGS = {
     "init": frozenset({"-init", "-q", "-extpass"}),
-    "mount": frozenset({"-q", "-nosyslog", "-extpass"}),
-    "passwd": frozenset({"-passwd", "-q", "-extpass"}),
+    "mount": frozenset({"-q", "-nosyslog", "-extpass", "-config"}),
+    "passwd": frozenset({"-passwd", "-q", "-extpass", "-config"}),
 }
 # Positional arguments (absolute paths) per phase: the cipher dir, plus the mountpoint.
 PHASE_POSITIONALS = {"init": 1, "mount": 2, "passwd": 1}
@@ -111,13 +126,25 @@ PHASE_POSITIONALS = {"init": 1, "mount": 2, "passwd": 1}
 # -init not empty / already initialised (extpass not called); 11 no
 # gocryptfs.conf; 19 fusermount3 refused, or already mounted ("busy" when a
 # mount is present afterwards, see _mount).
+#
+# With the wallet slot (spike KS1): mounting with -config wallet.conf and kwallet-query
+# as extpass, 9 means the extpass failed (any kwallet-query error or an empty value:
+# denied, cancelled, locked, no entry) and 12 that the wallet's value does not fit
+# the slot; 11 is a missing slot file. Re-keying the copy (-passwd -config), 24 is
+# gocryptfs's own "<config>.tmp" being in the way (it writes that, fsyncs and
+# renames over the copy).
 EXIT_CODES = {
     "init": {6: "exists", 9: "cancelled"},
     "mount": {6: "absent", 9: "cancelled", 10: "mount-failed", 11: "absent", 12: "wrong-passphrase",
               19: "mount-failed"},
     "passwd": {6: "absent", 9: "cancelled", 11: "absent", 12: "wrong-passphrase"},
+    "wallet-mount": {6: "absent", 9: "wallet-failed", 10: "mount-failed", 11: "not-set-up",
+                     12: "wallet-mismatch", 19: "mount-failed"},
+    "wallet-passwd": {6: "absent", 9: "cancelled", 11: "absent", 12: "wrong-passphrase",
+                      24: "wallet-write-failed"},
 }
-EXIT_FALLBACK = {"init": "init-failed", "mount": "mount-failed", "passwd": "os-error"}
+EXIT_FALLBACK = {"init": "init-failed", "mount": "mount-failed", "passwd": "os-error",
+                 "wallet-mount": "mount-failed", "wallet-passwd": "wallet-write-failed"}
 EXIT_ALREADY_MOUNTED = 19
 
 # gocryptfs -passwd calls extpass ONCE, for the old passphrase (with stdin on
@@ -179,6 +206,25 @@ def passwd_argv(gocryptfs: str, python: str, marker: str, kdialog: str, cipher: 
     return [gocryptfs, "-passwd", "-q", *relay, cipher]
 
 
+def wallet_mount_argv(gocryptfs: str, kwallet_query: str, wallet: str, config: str, cipher: str,
+                      mountpoint: str) -> list[str]:
+    """Mount with the wallet slot; gocryptfs runs ``kwallet-query -r`` itself (no dialog of ours)."""
+    return [
+        gocryptfs, "-q", "-nosyslog", "-config", config,
+        *extpass_args(*walletkey.read_argv(kwallet_query, wallet)),
+        cipher, mountpoint,
+    ]
+
+
+def wallet_passwd_argv(gocryptfs: str, kdialog: str, config: str, cipher: str) -> list[str]:
+    """Re-key the slot copy: the old passphrase via kdialog, the new key on stdin (a pipe)."""
+    return [
+        gocryptfs, "-passwd", "-q", "-config", config,
+        *extpass_args(kdialog, "--title", TITLE, "--password", PROMPT_CURRENT),
+        cipher,
+    ]
+
+
 def new_passphrase_argv(kdialog: str) -> list[str]:
     """The second -passwd dialog; its stdout is gocryptfs's stdin."""
     return [kdialog, "--title", TITLE, "--newpassword", PROMPT_NEW]
@@ -205,6 +251,17 @@ class Context:
     cipher: str
     runtime: str
     mountpoint: str
+    # kwallet-query, qdbus6 and openssl when found; the missing walletkey.TOOLS.
+    wallet_tools: dict[str, str] = field(default_factory=dict)
+    wallet_missing: tuple[str, ...] = ()
+
+    @property
+    def slot(self) -> str:
+        return os.path.join(self.data_base, APP_DIR, KEYS_DIR, walletkey.SLOT_FILE)
+
+    @property
+    def new_slot(self) -> str:
+        return os.path.join(self.data_base, APP_DIR, KEYS_DIR, walletkey.SLOT_NEW)
 
 
 @dataclass(frozen=True)
@@ -227,12 +284,29 @@ def _gocryptfs_phase(arguments: Sequence[str]) -> str:
     return "mount"
 
 
-def _check_gocryptfs_argv(arguments: Sequence[str]) -> None:
+def _check_extpass(values: Sequence[str]) -> None:
+    """The extpass program is kdialog, the relay, or exactly ``kwallet-query -r``."""
+    if not values:
+        return
+    program = os.path.basename(values[0])
+    if program == "kwallet-query":
+        if not walletkey.is_read_argv(values):
+            raise HelperError("os-error")
+    elif program == "kdialog":
+        if not os.path.isabs(values[0]):
+            raise HelperError("os-error")
+    elif not (len(values) > 1 and values[1] == RELAY and os.path.isabs(values[0])):
+        raise HelperError("os-error")
+
+
+def _check_gocryptfs_argv(arguments: Sequence[str], config: Optional[str]) -> None:
     if list(arguments) == list(VERSION_ARGS):
         return
     phase = _gocryptfs_phase(arguments)
     allowed = PHASE_FLAGS[phase]
     positionals = 0
+    configs = 0
+    extpass = []
     index = 0
     while index < len(arguments):
         argument = arguments[index]
@@ -242,20 +316,28 @@ def _check_gocryptfs_argv(arguments: Sequence[str]) -> None:
             # start with a single dash (dash duplication).
             if index >= len(arguments) or _single_dash(arguments[index]):
                 raise HelperError("os-error")
+            extpass.append(arguments[index])
             index += 1
             continue
         if argument.startswith("-"):
             if argument not in allowed:
                 raise HelperError("os-error")
+            if argument == "-config":
+                # Only the key-slot path the caller computed and checked.
+                if config is None or index >= len(arguments) or arguments[index] != config:
+                    raise HelperError("os-error")
+                configs += 1
+                index += 1
             continue
         if not os.path.isabs(argument):
             raise HelperError("os-error")
         positionals += 1
-    if positionals != PHASE_POSITIONALS[phase]:
+    if positionals != PHASE_POSITIONALS[phase] or configs > 1:
         raise HelperError("os-error")
+    _check_extpass(extpass)
 
 
-def _check_argv(argv: Sequence[str]) -> None:
+def _check_argv(argv: Sequence[str], *, config: Optional[str] = None) -> None:
     """Refuse any child argv that is not one of the contract's shapes (defence in depth).
 
     gocryptfs gets only its phase's allow-listed flags; fusermount3 only ``-u
@@ -278,21 +360,24 @@ def _check_argv(argv: Sequence[str]) -> None:
     if any("allow_" in argument for argument in plain):
         raise HelperError("os-error")
     if tool == "gocryptfs":
-        _check_gocryptfs_argv(arguments)
+        _check_gocryptfs_argv(arguments, config)
     elif tool == "fusermount3":
         if len(arguments) != 2 or arguments[0] != "-u" or not os.path.isabs(arguments[1]):
             raise HelperError("os-error")
     elif tool == "kdialog":
         if arguments != new_passphrase_argv(argv[0])[1:]:
             raise HelperError("os-error")
+    elif tool in ("kwallet-query", "qdbus6", "openssl"):
+        walletkey.check_argv(argv)
     else:
         raise HelperError("os-error")
 
 
 def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-         timeout: Optional[float] = None) -> int:
+         timeout: Optional[float] = None, config: Optional[str] = None,
+         timeout_error: str = "os-error") -> int:
     """Run one child: argv list, no shell, stderr always on /dev/null."""
-    _check_argv(argv)
+    _check_argv(argv, config=config)
     try:
         completed = subprocess.run(
             list(argv),
@@ -304,7 +389,7 @@ def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEV
             check=False,
         )
     except subprocess.TimeoutExpired:
-        raise HelperError("os-error") from None
+        raise HelperError(timeout_error) from None
     except OSError:
         raise HelperError("missing-tool") from None
     return completed.returncode
@@ -422,6 +507,7 @@ def runtime_dir(environ: Optional[Mapping[str, str]] = None) -> str:
 
 def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = True) -> Context:
     tools, missing = _find_tools() if find_tools else ({}, ())
+    wallet_tools, wallet_missing = walletkey.find_tools() if find_tools else ({}, ())
     runtime = runtime_dir(environ)
     base = os.path.realpath(data_base(environ))
     return Context(
@@ -431,6 +517,8 @@ def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = T
         cipher=os.path.join(base, APP_DIR, VAULT_DIR),
         runtime=runtime,
         mountpoint=os.path.join(runtime, APP_DIR, VAULT_DIR),
+        wallet_tools=wallet_tools,
+        wallet_missing=wallet_missing,
     )
 
 
@@ -723,7 +811,297 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     if ctx.missing:
         return {"ok": True, "state": "unavailable", "missing": list(ctx.missing)}
     with vault_lock(ctx) as app:
-        return {"ok": True, "state": settle(ctx, app)}
+        state = settle(ctx, app)
+        slot = _slot_present(ctx) if state in ("locked", "unlocked") else False
+    reply: dict[str, object] = {"ok": True, "state": state}
+    if state in ("locked", "unlocked"):
+        # Outside the lock: a qdbus6 query may take up to its timeout.
+        if ctx.wallet_missing:
+            reply["wallet"] = "unavailable"
+        elif walletkey.is_enabled(ctx.wallet_tools["qdbus6"]) is not True:
+            reply["wallet"] = "unavailable"
+        else:
+            reply["wallet"] = "set-up" if slot else "off"
+        # openssl is needed only to set up or remove the key, so it is listed but
+        # never makes the wallet method unavailable.
+        missing = [*ctx.wallet_missing,
+                   *([walletkey.KEYGEN_TOOL] if walletkey.KEYGEN_TOOL not in ctx.wallet_tools else [])]
+        if missing:
+            reply["missing"] = missing
+    return reply
+
+
+# --- key slots (vault-keys/) ---------------------------------------------------------------------
+
+
+@contextmanager
+def _keys_dir(ctx: Context, *, create: bool) -> Iterator[Optional[int]]:
+    """``$XDG_DATA_HOME/hearthside/vault-keys`` (0700), opened without following links.
+
+    Yields None when it (or a parent) does not exist and ``create`` is false.
+    """
+    with _descriptors() as opened:
+        base = open_base(ctx.data_base, create=create)
+        if base is None:
+            yield None
+            return
+        opened.append(base)
+        app = open_child_dir(base, APP_DIR, create=create)
+        if app is None:
+            yield None
+            return
+        opened.append(app)
+        keys = open_child_dir(app, KEYS_DIR, create=create)
+        if keys is not None:
+            opened.append(keys)
+        yield keys
+
+
+def _slot_ready(keys: int) -> bool:
+    """wallet.conf is a regular file of ours, mode 0400 (as gocryptfs writes it)."""
+    try:
+        info = os.stat(walletkey.SLOT_FILE, dir_fd=keys, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise HelperError("os-error") from None
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == walletkey.SLOT_MODE
+    )
+
+
+def _slot_present(ctx: Context) -> bool:
+    """For status: a usable wallet slot; anything odd in the way counts as none."""
+    try:
+        with _keys_dir(ctx, create=False) as keys:
+            return keys is not None and _slot_ready(keys)
+    except HelperError:
+        return False
+
+
+def _unlink(keys: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=keys)
+    except FileNotFoundError:
+        pass
+    except IsADirectoryError:
+        raise HelperError("not-directory") from None
+    except OSError:
+        raise HelperError("os-error") from None
+
+
+def _clear_new_slot(keys: int) -> None:
+    for name in (walletkey.SLOT_NEW, walletkey.SLOT_NEW + walletkey.GOCRYPTFS_TEMPORARY_SUFFIX):
+        _unlink(keys, name)
+
+
+def _remove_slot(keys: int) -> None:
+    _clear_new_slot(keys)
+    _unlink(keys, walletkey.SLOT_FILE)
+
+
+_MAX_CONF_SIZE = 65536
+
+
+def _copy_conf(ctx: Context, keys: int) -> None:
+    """Copy ``gocryptfs.conf`` to ``vault-keys/wallet.conf.new`` (O_EXCL, 0600, fsynced).
+
+    The conf holds the master key wrapped by the passphrase (gocryptfs keeps it
+    0400 inside the 0700 cipher dir); the copy gets the same protection.
+    """
+    read_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    with _descriptors() as opened:
+        parent = open_base(ctx.data_base, create=False)
+        if parent is None:
+            raise HelperError("absent")
+        opened.append(parent)
+        for name in (APP_DIR, VAULT_DIR):
+            parent = open_child_dir(parent, name, create=False)
+            if parent is None:
+                raise HelperError("absent")
+            opened.append(parent)
+        try:
+            source = os.open(CONF_FILE, read_flags, dir_fd=parent)
+        except FileNotFoundError:
+            raise HelperError("absent") from None
+        except OSError as error:
+            raise (HelperError("symlink") if error.errno == errno.ELOOP else HelperError("os-error")) from None
+        opened.append(source)
+        info = os.fstat(source)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > _MAX_CONF_SIZE:
+            raise HelperError("os-error")
+        content = b""
+        while len(content) <= _MAX_CONF_SIZE:
+            chunk = os.read(source, _MAX_CONF_SIZE + 1)
+            if not chunk:
+                break
+            content += chunk
+        if not content or len(content) > _MAX_CONF_SIZE:
+            raise HelperError("os-error")
+        try:
+            target = os.open(walletkey.SLOT_NEW, write_flags, 0o600, dir_fd=keys)
+        except OSError:
+            raise HelperError("wallet-write-failed") from None
+        opened.append(target)
+        view = memoryview(content)
+        while view:
+            written = os.write(target, view)
+            view = view[written:]
+        os.fsync(target)
+
+
+def _install_slot(keys: int) -> None:
+    """Make the re-keyed copy 0400, fsync it and rename it over ``wallet.conf``."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        descriptor = os.open(walletkey.SLOT_NEW, flags, dir_fd=keys)
+    except OSError:
+        raise HelperError("wallet-write-failed") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size == 0:
+            raise HelperError("wallet-write-failed")
+        if stat.S_IMODE(info.st_mode) != walletkey.SLOT_MODE:
+            os.fchmod(descriptor, walletkey.SLOT_MODE)
+        os.fsync(descriptor)
+        os.rename(walletkey.SLOT_NEW, walletkey.SLOT_FILE, src_dir_fd=keys, dst_dir_fd=keys)
+        os.fsync(keys)
+    except OSError:
+        raise HelperError("wallet-write-failed") from None
+    finally:
+        _close(descriptor)
+
+
+def _wallet_tools(ctx: Context, *, keygen: bool) -> None:
+    if ctx.wallet_missing or (keygen and walletkey.KEYGEN_TOOL not in ctx.wallet_tools):
+        raise HelperError("missing-tool")
+
+
+def _forget_slot_and_entry(ctx: Context, keys: int, wallet: str, *, entry: bool) -> None:
+    """After a failed set-up the old slot no longer fits the entry: drop both (best effort)."""
+    try:
+        _remove_slot(keys)
+    except HelperError:
+        pass
+    if entry:
+        try:
+            walletkey.remove_entry(ctx.wallet_tools, wallet)
+        except HelperError:
+            pass
+
+
+def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
+    """Set up (or replace) the wallet slot; the folder may be locked or unlocked (D66).
+
+    1. Copy gocryptfs.conf to vault-keys/wallet.conf.new.
+    2. ``openssl rand -hex 32`` -> ``kwallet-query -w`` (a fresh key in the wallet).
+    3. ``kwallet-query -r`` into a pipe; only after it exited 0 does that pipe
+       become the stdin of ``gocryptfs -passwd -config wallet.conf.new``, whose
+       extpass is the current-passphrase dialog.
+    4. Every exit status 0: the copy is renamed to wallet.conf. Otherwise the
+       copy, any old slot and (once a new key went in) the entry are removed.
+    """
+    ctx = context(environ)
+    _require_tools(ctx, "gocryptfs", "kdialog")
+    _wallet_tools(ctx, keygen=True)
+    with vault_lock(ctx, wait=True) as app:
+        state = settle(ctx, app)
+        if state in ("absent", "damaged"):
+            raise HelperError(state)
+        wallet = walletkey.preflight(ctx.wallet_tools)
+        with _keys_dir(ctx, create=True) as keys:
+            if keys is None:
+                raise HelperError("os-error")
+            _clear_new_slot(keys)
+            try:
+                _copy_conf(ctx, keys)
+            except (HelperError, OSError):
+                _clear_new_slot(keys)
+                raise
+            try:
+                walletkey.write_new_key(ctx.wallet_tools, wallet)
+            except HelperError:
+                # The wallet could not be written (or was not answered): it is not
+                # asked again; whatever slot was there no longer fits.
+                _forget_slot_and_entry(ctx, keys, wallet, entry=False)
+                raise
+            try:
+                reader = walletkey.read_key_into_pipe(ctx.wallet_tools["kwallet-query"], wallet)
+                try:
+                    argv = wallet_passwd_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.new_slot, ctx.cipher)
+                    code = _run(argv, stdin=reader, config=ctx.new_slot)
+                finally:
+                    _close(reader)
+                if code != 0:
+                    raise HelperError(exit_error("wallet-passwd", code))
+                _install_slot(keys)
+            except (HelperError, OSError) as error:
+                _forget_slot_and_entry(
+                    ctx, keys, wallet,
+                    entry=not (isinstance(error, HelperError) and error.code == "wallet-failed"),
+                )
+                raise
+    return {"ok": True}
+
+
+def remove_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
+    """Delete the wallet slot, then overwrite and delete the wallet entry.
+
+    The slot goes first in every case; an error after that means the entry may
+    still be in the wallet (the reply says which: missing-tool, wallet-disabled,
+    wallet-failed).
+    """
+    ctx = context(environ)
+    with vault_lock(ctx, wait=True):
+        with _keys_dir(ctx, create=False) as keys:
+            if keys is not None:
+                _remove_slot(keys)
+        _wallet_tools(ctx, keygen=True)
+        wallet = walletkey.preflight(ctx.wallet_tools)
+        missing = walletkey.key_missing(ctx.wallet_tools["qdbus6"], wallet)
+        if missing is None:
+            raise HelperError("wallet-failed")
+        if not missing:
+            walletkey.remove_entry(ctx.wallet_tools, wallet)
+    return {"ok": True}
+
+
+def _unlock_with_wallet(ctx: Context, app: int, *, automatic: bool) -> None:
+    """Pre-flight (non-secret qdbus6 answers only), then mount with the wallet slot.
+
+    ``automatic`` (Plasma start): unless the Secret Service says the wallet's
+    collection is unlocked, nothing more runs and the reply is wallet-closed,
+    so there is never a password prompt at login.
+    """
+    wallet = walletkey.preflight(ctx.wallet_tools)
+    with _keys_dir(ctx, create=False) as keys:
+        if keys is None or not _slot_ready(keys):
+            raise HelperError("not-set-up")
+    qdbus = ctx.wallet_tools["qdbus6"]
+    if automatic and walletkey.wallet_locked(qdbus, wallet) is not False:
+        raise HelperError("wallet-closed")
+    missing = walletkey.key_missing(qdbus, wallet)
+    if missing is None:
+        raise HelperError("wallet-failed")
+    if missing:
+        raise HelperError("not-set-up")
+    _mount(ctx, app, wallet)
+
+
+def auto_unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
+    ctx = context(environ)
+    _require_tools(ctx, "gocryptfs", "fusermount3")
+    _wallet_tools(ctx, keygen=False)
+    with vault_lock(ctx) as app:
+        state = settle(ctx, app)
+        if state in ("absent", "damaged"):
+            raise HelperError(state)
+        if state == "locked":
+            _unlock_with_wallet(ctx, app, automatic=True)
+    return {"ok": True}
 
 
 # Leftovers the bare mountpoint may hold: profile folders a widget's chat created in
@@ -793,17 +1171,41 @@ def _prepare_mountpoint(app: int) -> None:
         _close(descriptor)
 
 
-def _mount(ctx: Context, app: int) -> None:
+def _drop_mount(ctx: Context, app: int) -> None:
+    """Unmount whatever came up after a failed or unverified mount; best effort."""
+    try:
+        if mount_entry(ctx.mountpoint) is None:
+            _seal_mountpoint(ctx, app)
+        elif _unmount(ctx) == 0:
+            _seal_mountpoint(ctx, app)
+    except HelperError:
+        pass
+
+
+def _mount(ctx: Context, app: int, wallet: Optional[str] = None) -> None:
+    """Mount with the passphrase dialog, or with the wallet slot when ``wallet`` is given."""
     # Under the vault lock, right before mounting: 0700 (a sealed 0500 one is reset).
     _prepare_mountpoint(app)
-    code = _run(mount_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher, ctx.mountpoint))
+    if wallet is None:
+        phase = "mount"
+        code = _run(mount_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher, ctx.mountpoint))
+    else:
+        phase = "wallet-mount"
+        argv = wallet_mount_argv(ctx.tools["gocryptfs"], ctx.wallet_tools["kwallet-query"], wallet,
+                                 ctx.slot, ctx.cipher, ctx.mountpoint)
+        try:
+            # kwallet-query may wait for KWallet's own password prompt.
+            code = _run(argv, timeout=walletkey.PROMPT_TIMEOUT, config=ctx.slot, timeout_error="wallet-failed")
+        except HelperError:
+            _drop_mount(ctx, app)
+            raise
     if code != 0:
         mounted = mount_entry(ctx.mountpoint) is not None
         if not mounted:
             _seal_mountpoint(ctx, app)
         if code == EXIT_ALREADY_MOUNTED and mounted:
             raise HelperError("busy")
-        raise HelperError(exit_error("mount", code))
+        raise HelperError(exit_error(phase, code))
     entry = mount_entry(ctx.mountpoint)
     if entry is None:
         _seal_mountpoint(ctx, app)
@@ -865,6 +1267,8 @@ def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
             raise HelperError("damaged")
         if state != "absent":
             raise HelperError("exists")
+        # A wallet slot left from an older folder could never open the new one.
+        _remove_keys_dir(ctx)
         created = _make_cipher_dir(ctx)
         code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher))
         if code != 0:
@@ -875,15 +1279,24 @@ def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     return {"ok": True}
 
 
-def unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
+def unlock(environ: Optional[Mapping[str, str]] = None, method: str = "passphrase") -> dict[str, object]:
+    if method not in METHODS:
+        raise ValueError("Unsupported unlock method.")
     ctx = context(environ)
-    _require_tools(ctx)
+    if method == "wallet":
+        _require_tools(ctx, "gocryptfs", "fusermount3")
+        _wallet_tools(ctx, keygen=False)
+    else:
+        _require_tools(ctx)
     with vault_lock(ctx, wait=True) as app:
         state = settle(ctx, app)
         if state in ("absent", "damaged"):
             raise HelperError(state)
         if state == "locked":
-            _mount(ctx, app)
+            if method == "wallet":
+                _unlock_with_wallet(ctx, app, automatic=False)
+            else:
+                _mount(ctx, app)
     return {"ok": True}
 
 
@@ -1022,7 +1435,21 @@ def change_passphrase(environ: Optional[Mapping[str, str]] = None) -> dict[str, 
     return {"ok": True}
 
 
+def _remove_keys_dir(ctx: Context) -> None:
+    with _descriptors() as opened:
+        base = open_base(ctx.data_base, create=False)
+        data_app = None if base is None else open_child_dir(base, APP_DIR, create=False)
+        opened.extend(fd for fd in (base, data_app) if fd is not None)
+        if data_app is not None:
+            remove_entry(data_app, KEYS_DIR)
+
+
 def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
+    """Delete the cipher dir, the key slots and the bare mountpoint, then the wallet entry.
+
+    The files go first; wallet-failed afterwards means only the wallet entry
+    may remain (destroy again retries it).
+    """
     ctx = context(environ)
     _require_safe_rmtree()
     with vault_lock(ctx) as app:
@@ -1034,17 +1461,20 @@ def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
             opened.extend(fd for fd in (base, data_app) if fd is not None)
             if data_app is not None:
                 remove_entry(data_app, VAULT_DIR)
+                remove_entry(data_app, KEYS_DIR)
         # Not mounted (checked above), so this is the bare tmpfs mountpoint.
         remove_entry(app, VAULT_DIR)
+        walletkey.forget(ctx.wallet_tools)
     return {"ok": True}
 
 
 # --- purge (scripts/install.sh --uninstall-web-data) -------------------------------------------
 
 # What purge may delete below $XDG_DATA_HOME/hearthside, in reply order: the
-# encrypted folder's ciphertext. Saved sign-ins exist nowhere else (there is no
-# unencrypted store), so this is the only category.
-PURGE_CATEGORIES = (VAULT_DIR,)
+# encrypted folder's ciphertext (saved sign-ins exist nowhere else; there is no
+# unencrypted store) and its key slots. The wallet entry is reported after them.
+PURGE_CATEGORIES = (VAULT_DIR, KEYS_DIR)
+PURGE_WALLET_ENTRY = "wallet-entry"
 # Where systemd puts XDG_RUNTIME_DIR; also checked when the variable is unset
 # (e.g. install.sh run from a TTY), so a live mount is never missed.
 DEFAULT_RUNTIME = "/run/user/{uid}"
@@ -1083,37 +1513,40 @@ def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> li
     mountpoints = {os.path.join(runtime, APP_DIR, VAULT_DIR) for runtime in runtimes}
     if _vault_mounted(cipher_paths, mountpoints):
         raise HelperError("not-locked")
+    present: list[str] = []
     with _descriptors() as opened:
         base = open_base(base_path, create=False)
-        if base is None:
-            return []
-        opened.append(base)
-        app = open_child_dir(base, APP_DIR, create=False)
-        if app is None:
-            return []
-        opened.append(app)
+        app = None if base is None else open_child_dir(base, APP_DIR, create=False)
+        opened.extend(fd for fd in (base, app) if fd is not None)
         # Check every category before deleting any: a symlink, file or foreign
         # directory in the way refuses the whole purge.
-        present = []
-        for name in PURGE_CATEGORIES:
+        for name in PURGE_CATEGORIES if app is not None else ():
             child = open_child_dir(app, name, create=False)
             if child is not None:
                 _close(child)
                 present.append(name)
         for name in present:
             remove_entry(app, name)
-        try:
-            os.rmdir(APP_DIR, dir_fd=base)
-        except OSError:
-            pass  # Not empty or already gone: leave it.
-        return present
+        if app is not None:
+            try:
+                os.rmdir(APP_DIR, dir_fd=base)
+            except OSError:
+                pass  # Not empty or already gone: leave it.
+    # Last, so the files are gone even when the wallet cannot be reached; a
+    # wallet-failed reply means only the entry may remain (run purge again).
+    tools, _missing = walletkey.find_tools()
+    if walletkey.forget(tools):
+        present.append(PURGE_WALLET_ENTRY)
+    return present
 
 
 def purge(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """Delete the encrypted folder (every saved chat sign-in is inside it).
+    """Delete the encrypted folder (every saved chat sign-in is inside it) and its key slots.
 
     Refuses while anything is mounted at the vault mountpoint or from the
-    cipher dir. Runs no tool. The reply names only the deleted categories.
+    cipher dir. Runs no tool except, when kwallet-query and qdbus6 are there
+    and the wallet holds our entry, the ones that overwrite and delete it. The
+    reply names only the deleted categories.
     """
     try:
         _require_safe_rmtree()
@@ -1138,15 +1571,31 @@ _HANDLERS: dict[str, Callable[[Optional[Mapping[str, str]]], dict[str, object]]]
     "lock": lock,
     "change-passphrase": change_passphrase,
     "destroy": destroy,
+    "add-key": add_key,
+    "remove-key": remove_key,
+    "auto-unlock": auto_unlock,
 }
 
 
-def run(operation: str, environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """CLI entry: a reply object that never contains a path or name."""
+def run(
+    operation: str,
+    environ: Optional[Mapping[str, str]] = None,
+    method: Optional[str] = None,
+) -> dict[str, object]:
+    """CLI entry: a reply object that never contains a path or name.
+
+    ``method`` is only for unlock (passphrase|wallet, default passphrase) and
+    add-key / remove-key (wallet only, the default).
+    """
     handler = _HANDLERS.get(operation)
     if handler is None:
         raise ValueError("Unsupported vault operation.")
+    if method is not None and (operation not in METHOD_OPERATIONS or method not in METHODS
+                               or (operation != "unlock" and method != "wallet")):
+        raise ValueError("Unsupported unlock method.")
     try:
+        if operation == "unlock" and method is not None:
+            return unlock(environ, method)
         return handler(environ)
     except HelperError as error:
         return {"ok": False, "error": error.code}
@@ -1154,4 +1603,4 @@ def run(operation: str, environ: Optional[Mapping[str, str]] = None) -> dict[str
         return {"ok": False, "error": "os-error"}
 
 
-__all__ = ["OPERATIONS", "PRIVATE_MODE", "purge", "run", "status", "verified_mount"]
+__all__ = ["METHODS", "OPERATIONS", "PRIVATE_MODE", "purge", "run", "status", "verified_mount"]

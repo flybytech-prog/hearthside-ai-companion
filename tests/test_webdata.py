@@ -496,6 +496,9 @@ if sys.argv[1:4] != ["-P", "-m", "hearthside"]:
 from hearthside.core import vault
 vault.MOUNTINFO = os.environ["TEST_MOUNTINFO"]
 vault.DEFAULT_RUNTIME = os.environ["TEST_DEFAULT_RUNTIME"]
+# Never the real kwallet-query/qdbus6: purge finds no wallet tools here.
+from hearthside.core import walletkey
+walletkey.find_tools = lambda: ({{}}, walletkey.TOOLS)
 sys.argv = ["hearthside", *sys.argv[4:]]
 runpy.run_module("hearthside", run_name="__main__", alter_sys=True)
 ' "$@"
@@ -515,6 +518,7 @@ def run_install_script(tmp_path, *argv, runtime=None, mountinfo=""):
         "HOME": str(home),
         "TEST_MOUNTINFO": str(tmp_path / "mountinfo"),
         "TEST_DEFAULT_RUNTIME": str(tmp_path / "no-default-runtime-{uid}"),
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={tmp_path / 'no-bus'}",
     }
     if runtime is not None:
         env["XDG_RUNTIME_DIR"] = str(runtime)

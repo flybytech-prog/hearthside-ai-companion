@@ -406,8 +406,9 @@ each read), and once more when it ends.
 ## Stay signed in helper
 
 For **Stay signed in → Encrypted** the plasmoid runs the helper for a few
-fixed jobs. These commands touch no credentials, make no network requests,
-and pass no chat data. The plasmoid builds them in
+fixed jobs. These commands touch no provider credentials, make no network
+requests, and pass no chat data; the wallet jobs read and write only the
+folder's own key entry in KDE Wallet. The plasmoid builds them in
 `plasmoid/contents/ui/ChatStorage.js` from fixed words and integers only, as
 `env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -P -m hearthside ...`
 (`-P`: Python doesn't put the working folder on the module path).
@@ -427,9 +428,18 @@ told apart. The helper ignores both.
 - Profiles: `<mount>/web/applet-<N>-g<G>/`, one per widget id `N` and profile
   generation `G` (`chatProfileGeneration`, raised by Clear chat data). Folders
   are mode `0700`.
+- KDE Wallet key slot: `$XDG_DATA_HOME/hearthside/vault-keys/wallet.conf`
+  (folder `0700`, file `0400`, outside the cipher directory). It is a copy of
+  `gocryptfs.conf` whose master key is wrapped with a random key
+  (`openssl rand -hex 32`) kept in your KDE Wallet (`localWallet`, normally
+  `kdewallet`), folder `Hearthside`, entry `encrypted-chat-folder`. The
+  passphrase slot (`gocryptfs.conf`) is never changed by it and stays the
+  recovery slot. While being set up the copy is `wallet.conf.new` (gocryptfs
+  itself writes `wallet.conf.new.tmp`); both are cleared before and after.
 - Lock file: `$XDG_RUNTIME_DIR/hearthside/vault.lock` (`flock`). Jobs that
-  open a passphrase window (`create`, `unlock`, `change-passphrase`) wait for
-  it as long as needed; all others give up after 5 seconds with `busy`.
+  may open a window (`create`, `unlock`, `change-passphrase`, `add-key`,
+  `remove-key`) wait for it as long as needed; all others (including
+  `auto-unlock`) give up after 5 seconds with `busy`.
 
 A mount is used only after `/proc/self/mountinfo` shows a `fuse.gocryptfs`
 mount of exactly that cipher directory with your `user_id` and without
@@ -441,29 +451,99 @@ at a time without following symlinks.
 
 | Command | Does | Success reply |
 | --- | --- | --- |
-| `--vault status` | Reports the folder's state; cleans up a dead mount; never prompts | `{"ok":true,"state":"absent"}`, `"locked"`, `"unlocked"`, `"damaged"`, or `{"ok":true,"state":"unavailable","missing":[...]}` |
-| `--vault create` | Creates and initialises the folder (kdialog `--newpassword`), then mounts it (kdialog `--password`) | `{"ok":true}` |
-| `--vault unlock` | Mounts the folder (kdialog `--password`); already unlocked is success | `{"ok":true}` |
+| `--vault status` | Reports the folder's state; cleans up a dead mount; never prompts | `{"ok":true,"state":"absent"}`, `"damaged"`, `{"ok":true,"state":"locked","wallet":W}`, `{"ok":true,"state":"unlocked","wallet":W}` (optionally with `"missing"`, see below), or `{"ok":true,"state":"unavailable","missing":[...]}` |
+| `--vault create` | Creates and initialises the folder (kdialog `--newpassword`), then mounts it (kdialog `--password`); deletes a `vault-keys/` left from an older folder | `{"ok":true}` |
+| `--vault unlock [--method passphrase]` | Mounts the folder (kdialog `--password`); already unlocked is success | `{"ok":true}` |
+| `--vault unlock --method wallet` | Mounts the folder with the wallet slot: gocryptfs runs `kwallet-query -r` itself (KWallet's own password prompt if the wallet is locked; capped at 120 s); already unlocked is success | `{"ok":true}` |
+| `--vault auto-unlock` | For Plasma start: like `unlock --method wallet`, but only when the Secret Service says the wallet is unlocked; otherwise `wallet-closed` and nothing else runs, so it never prompts | `{"ok":true}` |
+| `--vault add-key --method wallet` | Sets up (or replaces) the wallet slot, folder locked or unlocked: copies `gocryptfs.conf`, stores a new random key in the wallet, re-keys the copy with `gocryptfs -passwd -config` (kdialog `--password` for the current passphrase) | `{"ok":true}` |
+| `--vault remove-key --method wallet` | Deletes the wallet slot, then overwrites the wallet entry with a fresh random value and deletes it; no slot and no entry is success | `{"ok":true}` |
 | `--vault lock` | `fusermount3 -u`; retried after 0.5 s and 1 s, never forced or lazy; already locked or a dead mount is success | `{"ok":true}` |
 | `--vault change-passphrase` | `gocryptfs -passwd`, only while locked (kdialog `--password`, then `--newpassword`) | `{"ok":true}` |
-| `--vault destroy` | Deletes the cipher directory and the bare mountpoint, only while not unlocked; nothing there is success | `{"ok":true}` |
+| `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when the wallet holds it; nothing there is success | `{"ok":true}` |
 | `--web-data prepare --store encrypted --applet N --generation G` | Creates `web/applet-N-gG/` inside the verified mount | `{"ok":true}` |
 | `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success | `{"ok":true}` |
-| `--web-data purge` | Deletes the encrypted folder for `scripts/install.sh --uninstall-web-data`; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no tool | `{"ok":true,"removed":[]}` or `{"ok":true,"removed":["vault"]}` |
+| `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
 
 `absent` means there is no cipher directory or it is empty. `damaged` means the
 cipher directory holds files but no regular `gocryptfs.conf`: gocryptfs can
 neither open nor initialise it, so `create`, `unlock`, and `change-passphrase`
 fail with `damaged` and only `destroy` (or `purge`) clears it.
 
-`missing` lists, in this order, whichever of `gocryptfs`, `gocryptfs-v2`
-(gocryptfs is older than 2.0, or its version can't be read), `kdialog`, and `fusermount3` are not found on
-`PATH`. `--store` accepts only `encrypted`; there is no unencrypted store.
+With `"state":"unavailable"`, `missing` lists, in this order, whichever of
+`gocryptfs`, `gocryptfs-v2` (gocryptfs is older than 2.0, or its version can't
+be read), `kdialog`, and `fusermount3` are not found on `PATH`. `--store`
+accepts only `encrypted`; there is no unencrypted store.
+
+`wallet` (only with `locked` and `unlocked`) is `set-up` when
+`vault-keys/wallet.conf` is a regular file of yours with mode `0400`, `off`
+when there is none (or anything else is in its place), and `unavailable` when
+`kwallet-query` or `qdbus6` is missing, KWallet is disabled
+(`isEnabled` = false), or `qdbus6` did not answer within 2 seconds. When a
+tool is missing the reply also has `"missing"` with any of `kwallet-query`,
+`qdbus6` and `openssl`, in that order (packages `kwallet`, `qt6-tools` and
+`openssl`). `openssl` is needed only by `add-key` and `remove-key`, so when
+only it is missing `wallet` still says `set-up` or `off`. `status` never checks the
+wallet entry or opens the wallet; `unlock --method wallet` does.
+
+Wallet unlock, step by step (all queries through `qdbus6` with a 2 second
+timeout, answers are booleans, the wallet's name or a handle):
+
+1. `org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.isEnabled`; false →
+   `wallet-disabled`. `localWallet` must match `^[A-Za-z0-9._ -]{1,64}$` and
+   not start with `-`.
+2. The slot must be set up (see above), else `not-set-up`.
+3. `auto-unlock` only: `org.freedesktop.secrets
+   /org/freedesktop/secrets/aliases/default Label` must equal the wallet's
+   name, then that alias's `Locked` is read (else the collection
+   `/org/freedesktop/secrets/collection/<name>` when the name is a valid path
+   element). Anything but `false` is `wallet-closed`. kwalletd6 `isOpen` is
+   never used: it is false right after a PAM login even with the wallet
+   unlocked.
+4. `keyDoesNotExist(<wallet>, Hearthside, encrypted-chat-folder)` (answers
+   while locked, without a prompt); true → `not-set-up`.
+5. `gocryptfs -q -nosyslog -config <slot> -extpass kwallet-query -extpass
+   --folder -extpass Hearthside -extpass --read-password -extpass
+   encrypted-chat-folder -extpass <wallet> <cipher> <mount>`, then the usual
+   mount checks.
+
+Setting up (`add-key`): after the same step 1, `openssl rand -hex 32` writes
+into `kwallet-query --folder Hearthside --write-password
+encrypted-chat-folder <wallet>` through a pipe; then `kwallet-query
+--read-password` writes into a second pipe, and only when it exited 0 does
+that pipe become the stdin of `gocryptfs -passwd -q -config
+<slot>.new -extpass kdialog ... <cipher>`. The copy is renamed to
+`wallet.conf` (mode `0400`, fsynced) only when openssl, both kwallet-query
+runs and gocryptfs all exited 0 (kwallet-query prints its errors on stdout, so
+a failed read must never reach gocryptfs). On a failure after the new key
+was stored, the copy, any older slot (it no longer fits) and the wallet entry
+(overwritten with a fresh value first) are removed. Setting up again
+replaces any existing slot, so a failed re-setup leaves the wallet method
+off; set it up again (the passphrase always still opens the folder).
+`remove-key` removes the
+slot first in every case; if it then fails (`missing-tool`,
+`wallet-disabled`, `wallet-failed`), only the wallet entry may remain. The
+entry is deleted through `org.kde.KWallet.open(<wallet>, 0, Hearthside)` →
+handle, `removeEntry(handle, Hearthside, encrypted-chat-folder, Hearthside)`,
+`close(handle, false, Hearthside)`, then checked with `keyDoesNotExist`.
+`destroy` and `purge` delete the files first and the entry last; there
+`wallet-failed` means only the entry may remain (run it again).
+
+Calls that may show KWallet's own password prompt (the wallet is locked):
+`kwallet-query` in `unlock --method wallet`, `add-key`, `remove-key`,
+`destroy` and `purge`, and `open` in the last three. Each is capped at 120
+seconds; a timeout is `wallet-failed`. The key never passes through the
+helper: it moves only between children through pipes the helper holds but
+never reads, and never appears in argv, the environment or a reply.
 
 Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 
-- `--web-data` and `--vault` cannot be combined with each other or with
-  `--json`, `--providers`, `--catalog`, or `--detect`.
+- `--web-data`, `--vault`, `--prompts`, `--read-dropped`, and `--port-owner`
+  cannot be combined with each other or with `--json`, `--providers`,
+  `--catalog`, or `--detect`.
+- `--method passphrase|wallet` needs `--vault unlock`, `add-key`, or
+  `remove-key`; `add-key` and `remove-key` need `--method wallet`; `unlock`
+  defaults to `passphrase`.
 - `--store`, `--applet`, `--generation`, and `--keep` need `--web-data`
   `prepare` or `remove`; `prepare` needs `--store`, `--applet`, and
   `--generation` and refuses `--keep`; `remove` needs `--store` and
@@ -474,19 +554,29 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 ### Replies and errors
 
 Every job prints one JSON object on stdout and exits 0. Replies never contain
-paths, names, counts, or passphrases; stderr carries only argparse usage.
+paths, names, counts, keys, or passphrases; stderr carries only argparse usage.
 Children get an argument list (no shell) with stdin, stdout, and stderr on
 `/dev/null`; the only exceptions are the pipe between the second
-change-passphrase dialog and gocryptfs, which the helper never reads, and the
-version line of `gocryptfs -version`. gocryptfs runs with `-q -nosyslog`
+change-passphrase dialog and gocryptfs and the wallet key's pipes (openssl →
+`kwallet-query -w`; `kwallet-query -r` → `gocryptfs -passwd -config`), which
+the helper never reads, the version line of `gocryptfs -version`, and the
+`qdbus6` answers. gocryptfs runs with `-q -nosyslog`
 (and `-init -q`, so the master key is never printed). Every child's arguments
 are checked against an allow-list before it starts: gocryptfs gets only
-`-init`, `-passwd`, `-q`, `-nosyslog`, and `-extpass` (each only in its phase,
-plus a lone `-version`) and absolute paths; `fusermount3` only `-u
-<mountpoint>`; kdialog only the new-passphrase dialog. Anything else (for
-example `-passfile`, `-masterkey`, `-ko`, `-o`, `-config`, `-fsname`,
-`-zerokey`, `-fusedebug`) and any argument containing `allow_` outside an
-`-extpass` value is refused with `os-error`. `gocryptfs -passwd`, and with it
+`-init`, `-passwd`, `-q`, `-nosyslog`, `-extpass`, and `-config` (each only in
+its phase, plus a lone `-version`) and absolute paths; `-config` only with the
+one slot path the helper computed (`wallet.conf` to mount, `wallet.conf.new`
+to re-key); the `-extpass` program is kdialog, the relay, or exactly
+`kwallet-query --folder Hearthside --read-password encrypted-chat-folder
+<wallet>`; `fusermount3` only `-u <mountpoint>`; kdialog only the
+new-passphrase dialog; `openssl` only `rand -hex 32`; `kwallet-query` only
+that read or the matching `--write-password`; `qdbus6` only the kwalletd6
+methods `isEnabled`, `localWallet`, `keyDoesNotExist`, `open`, `removeEntry`,
+`close` with our folder, entry and app id, and the Secret Service properties
+`Label` and `Locked`. Anything else (for example `-passfile`, `-masterkey`,
+`-ko`, `-o`, another `-config`, `-fsname`, `-zerokey`, `-fusedebug`) and any
+argument containing `allow_` outside an `-extpass` value is refused with
+`os-error`. `gocryptfs -passwd`, and with it
 the Python extpass relay, runs with every `PYTHON*` variable removed and
 `PYTHONNOUSERSITE=1` and `PYTHONSAFEPATH=1` set. A tool that `PATH` finds only
 through a relative entry counts as missing.
@@ -515,6 +605,12 @@ A failure is `{"ok":false,"error":"<code>"}`:
 | `busy` | The lock file is held by another job, the folder is mounted elsewhere, or `lock` found it still in use |
 | `not-locked` | `change-passphrase`, `destroy`, `purge`: the folder is unlocked (for `purge`: anything is mounted there) |
 | `symlink`, `not-directory`, `not-owned` | Something in the way is a symlink, not a folder, or not yours; nothing is followed or deleted |
+| `not-set-up` | `unlock --method wallet`, `auto-unlock`: no usable wallet slot, or the wallet has no entry for it (gocryptfs exit 11 with `-config`, too) |
+| `wallet-disabled` | Wallet jobs: KWallet is disabled (`isEnabled` = false) |
+| `wallet-closed` | `auto-unlock`: the wallet is locked (or its state is unknown); nothing was run |
+| `wallet-failed` | Wallet jobs: `kwallet-query` exited non-zero or did not finish within 120 s (denied, cancelled, locked and not answered, no entry), a `qdbus6` query failed or timed out, `localWallet` is not a valid name, or (gocryptfs exit 9 with the wallet extpass) an empty value; for `remove-key`, `destroy`, `purge`: the wallet entry may remain |
+| `wallet-mismatch` | `unlock --method wallet`, `auto-unlock`: the wallet's value does not open the slot (gocryptfs exit 12); set the wallet up again |
+| `wallet-write-failed` | `add-key`: openssl failed, gocryptfs could not write the slot (exit 24 or another code) or the slot could not be saved |
 | `os-error` | Any other failure, including unexpected errors (no traceback is printed) |
 
 The plasmoid accepts only these codes (plus `empty-passphrase`, which the
@@ -527,7 +623,80 @@ gocryptfs exit codes are mapped as measured with gocryptfs 2.6.1: 12
 `wrong-passphrase`; 9 `cancelled`; 10 `mount-failed`; 6 `absent` (`exists`
 for `create`); 11 `absent`; 19 `busy` when a mount is present afterwards,
 else `mount-failed`; anything else `init-failed` (`create`), `mount-failed`
-(mount), or `os-error` (`change-passphrase`).
+(mount), or `os-error` (`change-passphrase`). With the wallet slot (mount
+with `-config`): 9 `wallet-failed`, 12 `wallet-mismatch`, 11 `not-set-up`,
+10 and 19 `mount-failed`, 6 `absent`, anything else `mount-failed`. Re-keying
+the slot (`add-key`): 9 `cancelled` (the current-passphrase window), 12
+`wrong-passphrase`, 6 and 11 `absent`, 24 and anything else
+`wallet-write-failed`.
+
+## Prompt library helper
+
+Saved prompts and personas live only inside the unlocked encrypted folder
+(`src/hearthside/core/promptstore.py`):
+
+- `<mount>/library/` (`0700`) holds `prompt-<id>.txt` and `persona-<id>.txt`
+  (`0600`, UTF-8) and `personas.json` (`0600`, `{"<model>": <persona id>}`,
+  model names and integers only). Ids are integers from 1, unique across both
+  kinds, never reused below the highest id in use.
+- At most 100 items; a prompt holds at most 32000 characters, a persona 8000.
+- Nothing is written anywhere else. While the folder is locked every command
+  fails with `locked`.
+
+| Command | Does | Success reply |
+| --- | --- | --- |
+| `--prompts list` | Returns every saved item, sorted by id, and the per-model persona defaults (only those pointing at a listed persona). Files that are not regular files of yours, symlinks, odd names, invalid UTF-8 or over the cap are skipped | `{"ok":true,"items":[{"id":N,"kind":"prompt"\|"persona","text":"..."}],"personas":{"<model>":N}}` |
+| `--prompts add --kind prompt\|persona` | Opens `kdialog --title Hearthside --textinputbox "<fixed label>"` (no initial text) with its stdout on a new `O_EXCL` file inside `library/`; files it as the next id | `{"ok":true,"id":N}` |
+| `--prompts replace --id N` | The same dialog; replaces item `N` (same id and kind) | `{"ok":true,"id":N}` |
+| `--prompts remove --id N` | Deletes item `N` (and every persona default pointing at it) | `{"ok":true}` |
+| `--prompts set-persona --model <name> --id N` | Makes persona `N` the default for `<name>` | `{"ok":true}` |
+| `--prompts set-persona --model <name> --none` | Clears `<name>`'s default (nothing saved is success) | `{"ok":true}` |
+
+The dialog's answer is accepted only when kdialog exits 0 and the file is not
+empty: one trailing newline (kdialog adds it) is dropped; strict UTF-8, no
+NUL, not only whitespace, within the character cap. The helper does not hold
+the vault lock while the dialog is open (only before and after), so other
+widgets keep working; its open file keeps the mount busy, so a Lock at that
+moment answers `busy` until the dialog is closed. Afterwards the library must
+still be the same directory in a verified mount.
+
+`list` is the one reply that carries user text (plan D53); nothing is logged
+and no reply carries a path. Rules: `--kind` only and always with `add`;
+`--id N` (1 to 2147483648) with `replace` and `remove`, or with
+`set-persona` instead of `--none`; `--model` only and always with
+`set-persona`, matching `^[A-Za-z0-9._:/+-]{1,200}$` and not starting with
+`-`. Otherwise argparse exits 2.
+
+Errors (`{"ok":false,"error":"<code>"}`): `locked` (nothing is mounted),
+`not-verified` (a mount failed the checks, or vanished while the dialog was
+open), `cancelled` (Cancel, or an empty answer), `too-long`, `not-text`
+(invalid UTF-8 or NUL), `full` (100 items, or 200 persona defaults),
+`absent` (no such item, or `set-persona --id` names a prompt), `busy` (vault
+lock held), `missing-tool` (no kdialog), `os-error` (anything else, including
+a symlink or non-folder in place of `library/`).
+
+## Dropped file helper
+
+For a single local `file://` URL dropped on the Ollama chat, the plasmoid
+runs `--read-dropped <HEX>`, where `<HEX>` is the path's UTF-8 bytes as
+lowercase hex (`^([0-9a-f]{2}){1,4096}$`; the decoded path must be absolute
+and contain no NUL; otherwise argparse exits 2). It stands alone like the
+other helper modes (`src/hearthside/core/droppedfile.py`). It runs no
+program and writes nothing.
+
+- `lstat` first: anything but a regular file (symlink in the last
+  component, FIFO, device, directory) is refused before it is opened. Then
+  `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY`; the opened file must be
+  the same one.
+- Size 1 to 131072 bytes (`/proc` files report 0); files on the `/proc` and
+  `/sys` filesystems are refused by device as well. A file that grows while
+  being read is refused.
+- Strict UTF-8, no NUL, at most 32000 characters.
+
+Reply: `{"ok":true,"text":"..."}` (the text only, never the path), or
+`{"ok":false,"error":E}` with `absent` (missing), `unreadable` (permission),
+`not-file` (not a regular file, a symlink, empty, `/proc`/`/sys`, or a bad
+argument), `too-large`, `not-text`, `too-long`, `os-error`.
 
 ## Port owner helper
 

@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import portowner, vault, webdata
+from .core import droppedfile, portowner, promptstore, vault, webdata
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
@@ -28,6 +28,26 @@ def _port(value: str) -> int:
     if not _PORT_ARGUMENT.fullmatch(value) or not portowner.MIN_PORT <= int(value) <= portowner.MAX_PORT:
         raise argparse.ArgumentTypeError("expected a port from 1 to 65535")
     return int(value)
+
+
+def _item_id(value: str) -> int:
+    """A library item id: a plain decimal 1..2**31."""
+    number = _bounded_int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected an integer from 1 to 2147483648")
+    return number
+
+
+def _model(value: str) -> str:
+    if not promptstore.valid_model(value):
+        raise argparse.ArgumentTypeError("expected a model name ([A-Za-z0-9._:/+-], 1 to 200, no leading -)")
+    return value
+
+
+def _hex_path(value: str) -> str:
+    if droppedfile.decode_path(value) is None:
+        raise argparse.ArgumentTypeError("expected an absolute path as lowercase hex")
+    return value
 
 
 def parser() -> argparse.ArgumentParser:
@@ -71,6 +91,26 @@ def parser() -> argparse.ArgumentParser:
         help="Manage the passphrase-encrypted Chat folder (no network, no credentials).",
     )
     result.add_argument(
+        "--method",
+        choices=vault.METHODS,
+        help="Unlock method for --vault unlock (default passphrase); add-key and remove-key take wallet.",
+    )
+    result.add_argument(
+        "--prompts",
+        choices=promptstore.OPERATIONS,
+        help="Saved prompts and personas inside the unlocked encrypted folder (no network, no credentials).",
+    )
+    result.add_argument("--kind", choices=promptstore.KINDS, help="Item kind for --prompts add.")
+    result.add_argument("--id", type=_item_id, metavar="N", help="Item id for --prompts replace/remove/set-persona.")
+    result.add_argument("--model", type=_model, metavar="NAME", help="Ollama model for --prompts set-persona.")
+    result.add_argument("--none", action="store_true", help="Clear the model's persona (--prompts set-persona).")
+    result.add_argument(
+        "--read-dropped",
+        type=_hex_path,
+        metavar="HEX",
+        help="Print the text of one dropped text file (path as UTF-8 hex; no network, no credentials).",
+    )
+    result.add_argument(
         "--port-owner",
         type=_port,
         metavar="PORT",
@@ -81,8 +121,51 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _check_prompt_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
+    """--kind only for add; --id for replace/remove/set-persona; --model/--none for set-persona."""
+    operation = args.prompts
+    if operation is None:
+        for name, used in (("--kind", args.kind is not None), ("--id", args.id is not None),
+                           ("--model", args.model is not None), ("--none", args.none)):
+            if used:
+                argument_parser.error(f"{name} needs --prompts")
+        return
+    if (args.kind is not None) != (operation == "add"):
+        argument_parser.error("--prompts add needs --kind" if operation == "add" else "--kind is only for --prompts add")
+    if operation in ("replace", "remove") and args.id is None:
+        argument_parser.error(f"--prompts {operation} needs --id")
+    if operation in ("list", "add") and args.id is not None:
+        argument_parser.error(f"--id cannot be combined with --prompts {operation}")
+    if (args.model is not None) != (operation == "set-persona"):
+        argument_parser.error("--prompts set-persona needs --model" if operation == "set-persona"
+                              else "--model is only for --prompts set-persona")
+    if args.none and operation != "set-persona":
+        argument_parser.error("--none is only for --prompts set-persona")
+    if operation == "set-persona" and (args.id is None) == (not args.none):
+        argument_parser.error("--prompts set-persona needs exactly one of --id and --none")
+
+
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--web-data, --vault and --port-owner stand alone; the web options need --web-data."""
+    """--web-data, --vault, --prompts, --read-dropped and --port-owner stand alone."""
+    if args.method is not None and args.vault is None:
+        argument_parser.error("--method needs --vault")
+    if args.vault is not None:
+        if args.method is not None and args.vault not in vault.METHOD_OPERATIONS:
+            argument_parser.error(f"--method cannot be combined with --vault {args.vault}")
+        if args.vault in ("add-key", "remove-key") and args.method != "wallet":
+            argument_parser.error(f"--vault {args.vault} needs --method wallet")
+    _check_prompt_arguments(args, argument_parser)
+    modes = [
+        name for name, used in (
+            ("--web-data", args.web_data is not None),
+            ("--vault", args.vault is not None),
+            ("--prompts", args.prompts is not None),
+            ("--read-dropped", args.read_dropped is not None),
+            ("--port-owner", args.port_owner is not None),
+        ) if used
+    ]
+    if len(modes) > 1:
+        argument_parser.error(f"{modes[0]} and {modes[1]} cannot be combined")
     snapshot_options = [
         name for name, used in (
             ("--json", args.json),
@@ -99,15 +182,10 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--keep", args.keep is not None),
         ) if used
     ]
-    if args.port_owner is not None:
-        others = snapshot_options + web_options + [
-            name for name, used in (
-                ("--web-data", args.web_data is not None),
-                ("--vault", args.vault is not None),
-            ) if used
-        ]
+    if args.port_owner is not None or args.prompts is not None or args.read_dropped is not None:
+        others = snapshot_options + web_options
         if others:
-            argument_parser.error(f"{others[0]} cannot be combined with --port-owner")
+            argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
         return
     if args.web_data is None and args.vault is None:
         if web_options:
@@ -159,7 +237,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.web_data, args.store, args.applet, generation=args.generation, keep=args.keep,
         ))
     elif args.vault is not None:
-        payload = _helper_reply(lambda: vault.run(args.vault))
+        payload = _helper_reply(lambda: vault.run(args.vault, method=args.method))
+    elif args.prompts is not None:
+        payload = _helper_reply(lambda: promptstore.run(
+            args.prompts, kind=args.kind, item=args.id, model=args.model,
+        ))
+    elif args.read_dropped is not None:
+        payload = _dropped_reply(args.read_dropped)
     elif args.catalog:
         payload = catalog_snapshot()
     elif args.detect:
@@ -179,6 +263,14 @@ def _helper_reply(action) -> dict[str, object]:
     """
     try:
         return action()
+    except Exception:  # noqa: BLE001 - fail closed with a code only
+        return {"ok": False, "error": "os-error"}
+
+
+def _dropped_reply(value: str) -> dict[str, object]:
+    """The file's text or a code only; any surprise fails closed as os-error."""
+    try:
+        return droppedfile.run(value)
     except Exception:  # noqa: BLE001 - fail closed with a code only
         return {"ok": False, "error": "os-error"}
 

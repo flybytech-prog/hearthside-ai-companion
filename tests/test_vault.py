@@ -86,10 +86,14 @@ else:
     if args == ["-version"]:
         sys.stdout.write(env.get("STUB_VERSION", "gocryptfs v2.6.1; go-fuse [vendored]; 2025-08-11 go1.24.6 linux/amd64") + "\n")
         sys.exit(0)
-    extpass, positional, index = [], [], 0
+    extpass, positional, index, config = [], [], 0, None
     while index < len(args):
         if args[index] == "-extpass":
             extpass.append(args[index + 1])
+            index += 2
+            continue
+        if args[index] == "-config":
+            config = args[index + 1]
             index += 2
             continue
         if not args[index].startswith("-"):
@@ -107,7 +111,42 @@ else:
         record["extpass_got_answer"] = bool(answer.stdout.strip())
         return answer.returncode == 0 and bool(answer.stdout.strip())
 
-    if phase == "passwd":
+    import hashlib
+
+    def extpass_key():
+        # Measured (KS1): one trailing LF is trimmed; a second line, an empty answer
+        # or a non-zero exit (even with the right key printed) -> exit 9.
+        import subprocess
+        answer = subprocess.run(extpass, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        data = answer.stdout[:-1] if answer.stdout.endswith(b"\n") else answer.stdout
+        record["extpass_exit"] = answer.returncode
+        record["extpass_sha"] = hashlib.sha256(data).hexdigest()
+        if answer.returncode != 0 or not data or b"\n" in data:
+            return None
+        return data
+
+    if phase == "passwd" and config is not None:
+        # -passwd -config <copy>: re-wraps the copy; gocryptfs writes <config>.tmp
+        # with O_EXCL (exit 24 if it exists), then renames it over <config> as 0400.
+        if not os.path.exists(config):
+            code = 11
+        elif os.path.lexists(config + ".tmp"):
+            code = 24
+        elif code not in (6, 11):
+            if not run_extpass():
+                code = 9
+            elif code != 12:
+                line = sys.stdin.buffer.readline()
+                key = line[:-1] if line.endswith(b"\n") else line
+                record["stdin_sha"] = hashlib.sha256(key).hexdigest()
+                if not key:
+                    code = 9
+                elif code == 0:
+                    descriptor = os.open(config + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+                    os.write(descriptor, json.dumps({{"key_sha": record["stdin_sha"]}}).encode())
+                    os.close(descriptor)
+                    os.rename(config + ".tmp", config)
+    elif phase == "passwd":
         # Measured gocryptfs 2.6.1: 6/11 before extpass; extpass once for the old
         # passphrase; wrong old -> 12 without reading stdin; else one stdin line.
         if code not in (6, 11):
@@ -121,6 +160,18 @@ else:
                 record["new_received"] = bool(line.strip())
                 if not line.strip():
                     code = 9
+    elif phase == "mount" and config is not None and code == 0:
+        if not os.path.exists(config):
+            code = 11
+        else:
+            key = extpass_key()
+            with open(config) as handle:
+                expected = json.load(handle).get("key_sha")
+            if key is None:
+                code = 9
+            elif hashlib.sha256(key).hexdigest() != expected:
+                code = 12
+            record["config"] = config
     elif extpass and env.get("STUB_RUN_EXTPASS"):
         run_extpass()
     if code == 0 and phase == "init":
@@ -143,6 +194,120 @@ log(record)
 sys.exit(code)
 '''
 
+# Stub kwallet-query, qdbus6 and openssl (not a format string). The "wallet" is a JSON
+# file (STUB_WALLET) holding dummy values only. Records never hold a value, only
+# sha256 hashes, so tests can prove the key went fd-to-fd from openssl to the wallet
+# to gocryptfs without this process seeing it.
+WALLET_STUB = r'''#!PYTHON
+import hashlib, json, os, sys, time
+
+tool = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+env = os.environ
+KEY = "Hearthside/encrypted-chat-folder"
+
+
+def fd_target(fd):
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return "closed"
+
+
+def log(record):
+    with open(env["STUB_LOG"], "a") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def wallet():
+    try:
+        with open(env["STUB_WALLET"]) as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return {}
+
+
+def save(state):
+    with open(env["STUB_WALLET"], "w") as handle:
+        json.dump(state, handle)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+record = {"tool": tool, "argv": args, "fds": [fd_target(0), fd_target(1), fd_target(2)]}
+code = 0
+if tool == "openssl":
+    code = int(env.get("STUB_OPENSSL_EXIT", "0"))
+    value = os.urandom(32).hex() + "\n"
+    if code == 0:
+        sys.stdout.write(value)
+        record["sha"] = sha(value.encode())
+elif tool == "kwallet-query":
+    name = args[-1]
+    time.sleep(float(env.get("STUB_KWALLET_SLEEP", "0")))
+    if "--write-password" in args:
+        data = sys.stdin.buffer.read()
+        if data.endswith(b"\n"):
+            data = data[:-1]
+        code = int(env.get("STUB_KWALLET_WRITE_EXIT", "0"))
+        if code == 0:
+            state = wallet()
+            state[KEY] = data.decode()
+            save(state)
+            record["sha"] = sha(data)
+        else:
+            sys.stdout.write("Failed to write entry\n")
+    else:
+        code = int(env.get("STUB_KWALLET_READ_EXIT", "0"))
+        state = wallet()
+        if code == 0 and KEY not in state:
+            code = 4
+        if code == 0:
+            value = state[KEY]
+            sys.stdout.write(value + "\n")
+            record["sha"] = sha(value.encode())
+        else:
+            # Like kwallet-query: its error message goes to stdout.
+            sys.stdout.write(f"Failed to read entry {KEY} value from the {name} wallet.\n")
+elif tool == "qdbus6":
+    time.sleep(float(env.get("STUB_QDBUS_SLEEP", "0")))
+    code = int(env.get("STUB_QDBUS_EXIT", "0"))
+    name = env.get("STUB_WALLET_NAME", "kdewallet")
+    method = args[2].rsplit(".", 1)[-1] if len(args) > 2 else ""
+    answer = ""
+    if args[:2] == ["org.kde.kwalletd6", "/modules/kwalletd6"]:
+        state = wallet()
+        if method == "isEnabled":
+            answer = env.get("STUB_WALLET_ENABLED", "true")
+        elif method == "localWallet":
+            answer = name
+        elif method == "keyDoesNotExist":
+            answer = "false" if KEY in state and args[3] == name else "true"
+        elif method == "open":
+            answer = env.get("STUB_OPEN_HANDLE", "7")
+        elif method == "removeEntry":
+            answer = "0" if state.pop(KEY, None) is not None else "-1"
+            if env.get("STUB_REMOVE_KEEPS"):
+                answer = "-1"
+            else:
+                save(state)
+        elif method == "close":
+            answer = "1"
+    elif args[:1] == ["org.freedesktop.secrets"]:
+        if args[2] == "Label":
+            answer = env.get("STUB_ALIAS_LABEL", name)
+        elif args[2] == "Locked":
+            answer = env.get("STUB_WALLET_LOCKED", "false")
+    if code == 0:
+        sys.stdout.write(answer + "\n")
+log(record)
+sys.exit(code)
+'''
+
+WALLET_TOOLS = ("kwallet-query", "qdbus6", "openssl")
+
 # Unrelated mounts that must be ignored.
 BASE_MOUNTINFO = (
     "22 1 0:21 / / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw,ssd\n"
@@ -162,12 +327,14 @@ class Stubs:
         self.data = root / "data"
         self.runtime = runtime
         self.monkeypatch = monkeypatch
-        for name in vault.TOOLS:
+        for name in (*vault.TOOLS, *WALLET_TOOLS):
             self.install(name)
         monkeypatch.setenv("PATH", str(self.bin))
         monkeypatch.setenv("XDG_DATA_HOME", str(self.data))
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
         monkeypatch.setenv("STUB_LOG", str(self.log))
+        self.wallet = root / "wallet.json"
+        monkeypatch.setenv("STUB_WALLET", str(self.wallet))
         monkeypatch.setenv("STUB_MOUNTINFO", str(self.mountinfo))
         monkeypatch.setattr(vault, "MOUNTINFO", str(self.mountinfo))
         # The stub mountpoint is a plain directory, so its device equals its parent's.
@@ -178,7 +345,10 @@ class Stubs:
 
     def install(self, name):
         path = self.bin / name
-        path.write_text(STUB.format(python=sys.executable))
+        if name in WALLET_TOOLS:
+            path.write_text(WALLET_STUB.replace("PYTHON", sys.executable, 1))
+        else:
+            path.write_text(STUB.format(python=sys.executable))
         path.chmod(0o755)
 
     def remove(self, name):
@@ -225,8 +395,12 @@ def stubs(tmp_path, monkeypatch, _private_runtime_dir):
     return Stubs(tmp_path, monkeypatch, _private_runtime_dir)
 
 
-def reply(operation, capsys):
-    assert cli.main(["--vault", operation]) == 0
+def vault_argv(operation):
+    return ["--vault", operation, *(["--method", "wallet"] if operation in ("add-key", "remove-key") else [])]
+
+
+def reply(operation, capsys, *extra):
+    assert cli.main([*vault_argv(operation), *extra]) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.count("\n") == 1
@@ -308,8 +482,8 @@ def test_missing_tools_refuse_interactive_operations(stubs, capsys):
 def test_status_absent_then_locked(stubs, capsys):
     assert reply("status", capsys) == {"ok": True, "state": "absent"}
     stubs.make_locked()
-    assert reply("status", capsys) == {"ok": True, "state": "locked"}
-    assert stubs.calls() == []
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
+    assert [call for call in stubs.calls() if call["tool"] != "qdbus6"] == []
 
 
 @pytest.mark.parametrize("problem", ["unset", "relative", "group-readable", "symlink", "missing", "file"])
@@ -377,7 +551,7 @@ def test_create_initialises_and_mounts_with_extpass_argv(stubs, capsys):
     assert stubs.cipher.stat().st_mode & 0o777 == 0o700
     assert mount["mountpoint_mode"] == 0o700
     assert (stubs.mountpoint.parent / "vault.lock").stat().st_mode & 0o777 == 0o600
-    assert reply("status", capsys) == {"ok": True, "state": "unlocked"}
+    assert reply("status", capsys) == {"ok": True, "state": "unlocked", "wallet": "off"}
 
 
 def test_create_refuses_an_existing_folder(stubs, capsys):
@@ -413,7 +587,7 @@ def test_unlock_maps_mount_exit_codes(stubs, capsys, code, error):
     # The failed attempt still had a 0700 mountpoint; afterwards it is sealed again.
     assert stubs.calls("gocryptfs")[-1]["mountpoint_mode"] == 0o700
     assert stubs.mountpoint_mode() == vault.SEALED_MODE
-    assert reply("status", capsys) == {"ok": True, "state": "locked"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
 
 
 def test_unlock_exit_19_with_a_mount_present_is_busy(stubs, capsys):
@@ -426,14 +600,20 @@ def test_unlock_exit_19_with_a_mount_present_is_busy(stubs, capsys):
 
 
 def test_exit_code_table_matches_the_measured_contract():
-    assert set(vault.EXIT_CODES) == set(vault.EXIT_FALLBACK) == {"init", "mount", "passwd"}
+    assert set(vault.EXIT_CODES) == set(vault.EXIT_FALLBACK) == {
+        "init", "mount", "passwd", "wallet-mount", "wallet-passwd"}
     assert vault.EXIT_CODES == {
         "init": {6: "exists", 9: "cancelled"},
         "mount": {6: "absent", 9: "cancelled", 10: "mount-failed", 11: "absent", 12: "wrong-passphrase",
                   19: "mount-failed"},
         "passwd": {6: "absent", 9: "cancelled", 11: "absent", 12: "wrong-passphrase"},
+        "wallet-mount": {6: "absent", 9: "wallet-failed", 10: "mount-failed", 11: "not-set-up",
+                         12: "wallet-mismatch", 19: "mount-failed"},
+        "wallet-passwd": {6: "absent", 9: "cancelled", 11: "absent", 12: "wrong-passphrase",
+                          24: "wallet-write-failed"},
     }
-    assert vault.EXIT_FALLBACK == {"init": "init-failed", "mount": "mount-failed", "passwd": "os-error"}
+    assert vault.EXIT_FALLBACK == {"init": "init-failed", "mount": "mount-failed", "passwd": "os-error",
+                                   "wallet-mount": "mount-failed", "wallet-passwd": "wallet-write-failed"}
     assert vault.exit_error("mount", 4242) == "mount-failed"
     # Killed by a signal (negative return code): the operation's fallback.
     assert [vault.exit_error(phase, -9) for phase in ("init", "mount", "passwd")] == [
@@ -621,7 +801,7 @@ def test_verified_mount_with_escaped_spaces(stubs, capsys, tmp_path, monkeypatch
     stubs.make_locked()
     assert reply("unlock", capsys) == {"ok": True}
     assert "\\040" in stubs.mountinfo.read_text()
-    assert reply("status", capsys) == {"ok": True, "state": "unlocked"}
+    assert reply("status", capsys) == {"ok": True, "state": "unlocked", "wallet": "off"}
     assert webdata.run("prepare", "encrypted", 3, generation=1) == {"ok": True}
     assert (stubs.mountpoint / "web" / "applet-3-g1").is_dir()
 
@@ -653,7 +833,7 @@ def test_status_cleans_a_stale_mount_and_reports_locked(stubs, capsys, monkeypat
     stubs.make_locked()
     assert reply("unlock", capsys) == {"ok": True}
     _stale(monkeypatch)
-    assert reply("status", capsys) == {"ok": True, "state": "locked"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
     assert [call["argv"] for call in stubs.calls("fusermount3")] == [["-u", str(stubs.mountpoint)]]
     assert stubs.calls("fusermount3")[0]["fds"] == ["/dev/null"] * 3
     assert not stubs.mounted()
@@ -703,7 +883,7 @@ def test_lock_unmounts_and_is_idempotent(stubs, capsys):
     (call,) = stubs.calls("fusermount3")
     assert call["argv"] == ["-u", str(stubs.mountpoint)]
     assert call["fds"] == ["/dev/null"] * 3
-    assert reply("status", capsys) == {"ok": True, "state": "locked"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
 
 
 def test_lock_reports_busy_when_unmount_keeps_failing(stubs, capsys):
@@ -715,7 +895,7 @@ def test_lock_reports_busy_when_unmount_keeps_failing(stubs, capsys):
     assert len(calls) == 1 + len(vault.UNMOUNT_RETRY_DELAYS)
     # Plain unmount only: never lazy (-z), never forced.
     assert all(call["argv"] == ["-u", str(stubs.mountpoint)] for call in calls)
-    assert reply("status", capsys) == {"ok": True, "state": "unlocked"}
+    assert reply("status", capsys) == {"ok": True, "state": "unlocked", "wallet": "off"}
     assert stubs.mountpoint_mode() == 0o700
 
 
@@ -998,28 +1178,39 @@ def test_children_get_argv_lists_no_shell_and_devnull(stubs, capsys, monkeypatch
 
     monkeypatch.setattr(subprocess, "run", spy_run)
     monkeypatch.setattr(subprocess, "Popen", SpyPopen)
-    for operation in ("status", "create", "lock", "unlock", "lock", "change-passphrase", "destroy"):
+    for operation in ("status", "create", "lock", "unlock", "lock", "change-passphrase", "add-key",
+                      "status", "remove-key", "add-key", "destroy"):
         reply(operation, capsys)
     assert seen
+    tools = set()
     for kind, args, kwargs in seen:
         argv = args[0]
+        tool = Path(argv[0]).name
+        tools.add(tool)
         assert isinstance(argv, list) and all(isinstance(item, str) for item in argv)
         assert os.path.isabs(argv[0])
         assert not kwargs.get("shell")
         assert "capture_output" not in kwargs
         assert kwargs["stderr"] is subprocess.DEVNULL
+        assert kwargs.get("close_fds", True) is True
+        if tool == "qdbus6":
+            # walletkey._query: the one captured answer (booleans, names, a handle).
+            assert kwargs["stdout"] is subprocess.PIPE and kwargs["stdin"] is subprocess.DEVNULL
+            continue
         assert kwargs["stdin"] is subprocess.DEVNULL or isinstance(kwargs["stdin"], int)
         assert kwargs["stdout"] is subprocess.DEVNULL or isinstance(kwargs["stdout"], int)
         assert kwargs["stdin"] is not subprocess.PIPE and kwargs["stdout"] is not subprocess.PIPE
-        assert kwargs.get("close_fds", True) is True
         # The only non-/dev/null streams: -passwd's stdin pipe, the new-passphrase
-        # dialog writing into it, and the version line.
+        # dialog writing into it, the version line, and the wallet key's pipes
+        # (openssl -> kwallet-query -w; kwallet-query -r -> gocryptfs -passwd -config).
         if kwargs["stdin"] is not subprocess.DEVNULL:
-            assert kind == "popen" and argv[1:3] == ["-passwd", "-q"]
+            assert (argv[1:3] == ["-passwd", "-q"] or (tool == "kwallet-query" and "--write-password" in argv))
         if kwargs["stdout"] is not subprocess.DEVNULL:
             assert argv[1:] == ["-version"] or (
-                Path(argv[0]).name == "kdialog" and argv[1:] == vault.new_passphrase_argv("kdialog")[1:]
-            )
+                tool == "kdialog" and argv[1:] == vault.new_passphrase_argv("kdialog")[1:]
+            ) or (tool == "openssl" and argv[1:] == ["rand", "-hex", "32"]) or (
+                tool == "kwallet-query" and "--read-password" in argv)
+    assert {"gocryptfs", "kdialog", "fusermount3", "kwallet-query", "qdbus6", "openssl"} <= tools
 
 
 def test_every_gocryptfs_and_fusermount_stream_is_devnull(stubs, capsys, monkeypatch):
@@ -1103,7 +1294,19 @@ def test_argv_guard_accepts_exactly_the_contract_argv():
         vault.passwd_argv(GOCRYPTFS, "/p", "/m", kdialog, "/c"),
     ) for argument in without_extpass(argv[1:]) if argument.startswith("-")}
     assert flags == {"-init", "-passwd", "-q", "-nosyslog"}
-    assert set().union(*vault.PHASE_FLAGS.values()) == {"-init", "-passwd", "-q", "-nosyslog", "-extpass"}
+    assert set().union(*vault.PHASE_FLAGS.values()) == {
+        "-init", "-passwd", "-q", "-nosyslog", "-extpass", "-config"}
+    assert "-config" not in vault.PHASE_FLAGS["init"]
+    # The wallet shapes pass only with their own slot path.
+    slot = "/data/hearthside/vault-keys/wallet.conf"
+    mount = vault.wallet_mount_argv(GOCRYPTFS, "/usr/bin/kwallet-query", "kdewallet", slot,
+                                    "/data/hearthside/vault", "/run/hearthside/vault")
+    passwd = vault.wallet_passwd_argv(GOCRYPTFS, kdialog, slot + ".new", "/data/hearthside/vault")
+    vault._check_argv(mount, config=slot)
+    vault._check_argv(passwd, config=slot + ".new")
+    for argv, config in ((mount, None), (mount, slot + ".new"), (passwd, slot), (passwd, None)):
+        with pytest.raises(webdata.HelperError):
+            vault._check_argv(argv, config=config)
 
 
 def test_argv_guard_allows_paths_and_prompts():
@@ -1132,13 +1335,13 @@ def test_output_never_contains_a_path(stubs, capsys, tmp_path, monkeypatch):
     stubs.env(STUB_RUN_EXTPASS=1)
     for operation in ("status", "create", "status", "unlock", "lock", "unlock", "status", "lock",
                       "change-passphrase", "destroy", "status"):
-        assert cli.main(["--vault", operation]) == 0
+        assert cli.main(vault_argv(operation)) == 0
         captured = capsys.readouterr()
         outputs.append(captured.out + captured.err)
     _stale(monkeypatch)
     stubs.env(STUB_FUSERMOUNT_EXIT=1)
     for operation in vault.OPERATIONS:
-        assert cli.main(["--vault", operation]) == 0
+        assert cli.main(vault_argv(operation)) == 0
         captured = capsys.readouterr()
         outputs.append(captured.out + captured.err)
     text = "".join(outputs)
