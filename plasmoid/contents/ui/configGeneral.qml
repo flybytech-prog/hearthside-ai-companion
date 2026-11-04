@@ -7,6 +7,8 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatStorage.js" as ChatStorage
 import "SettingsLogic.js" as SettingsLogic
+import "ProviderCatalog.js" as Catalog
+import "TooltipLogic.js" as TooltipLogic
 
 KCM.SimpleKCM {
     id: page
@@ -60,6 +62,10 @@ KCM.SimpleKCM {
     property string cfg_popupSizeDefault: "normal"
     property bool cfg_tooltipShowsUsage: true
     property bool cfg_tooltipShowsUsageDefault: true
+    property string cfg_tooltipMetrics: ""
+    property string cfg_tooltipMetricsDefault: ""
+    property bool cfg_tooltipShowsReset: true
+    property bool cfg_tooltipShowsResetDefault: true
     property string cfg_shortcutOpens: "popup"
     property string cfg_shortcutOpensDefault: "popup"
     // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so
@@ -142,6 +148,35 @@ KCM.SimpleKCM {
                 best = candidate
         }
         return best
+    }
+
+    // Hover popup readings: null while "Same as the Usage tab" is on.
+    readonly property var tooltipChoice: TooltipLogic.parseTooltipMetrics(page.cfg_tooltipMetrics, Catalog.providers)
+    readonly property bool tooltipReadingsEnabled: page.cfg_showUsageTab && page.cfg_tooltipShowsUsage
+    // Tracked providers in catalog order (all of them if the list is odd).
+    readonly property var tooltipProviders: {
+        var tracked = null
+        try {
+            tracked = JSON.parse(page.cfg_trackedProviders || "")
+        } catch (error) {
+        }
+        if (!Array.isArray(tracked))
+            return Catalog.providers
+        return Catalog.providers.filter(function (provider) {
+            return tracked.indexOf(provider.provider_id) >= 0
+        })
+    }
+
+    function setTooltipSame(same) {
+        page.cfg_tooltipMetrics = same ? "" : JSON.stringify(
+            TooltipLogic.seedTooltipMetrics(page.cfg_providerMetrics, Catalog.providers))
+    }
+
+    function setTooltipMetric(providerId, metricId, enabled) {
+        var choice = page.tooltipChoice
+            || TooltipLogic.seedTooltipMetrics(page.cfg_providerMetrics, Catalog.providers)
+        page.cfg_tooltipMetrics = JSON.stringify(
+            TooltipLogic.setTooltipMetric(choice, Catalog.providers, providerId, metricId, enabled))
     }
 
     function choiceIndex(choices, value, fallback) {
@@ -448,12 +483,72 @@ KCM.SimpleKCM {
             }
         }
 
+        RowLayout {
+            Kirigami.FormData.label: i18n("Hover popup:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "tooltipUsageChoice"
+                enabled: page.cfg_showUsageTab
+                text: i18n("Show usage when hovering over the panel icon")
+                checked: page.cfg_tooltipShowsUsage
+                onToggled: page.cfg_tooltipShowsUsage = checked
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Percentages follow Display: Left shows \"62% left\", Used shows \"38% used\".")
+            }
+        }
+
         QQC2.CheckBox {
-            objectName: "tooltipUsageChoice"
-            enabled: page.cfg_showUsageTab
-            text: i18n("Show usage when hovering over the panel icon")
-            checked: page.cfg_tooltipShowsUsage
-            onToggled: page.cfg_tooltipShowsUsage = checked
+            objectName: "tooltipResetChoice"
+            enabled: page.tooltipReadingsEnabled
+            text: i18n("Show time until reset")
+            checked: page.cfg_tooltipShowsReset
+            onToggled: page.cfg_tooltipShowsReset = checked
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Readings:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "tooltipSameChoice"
+                enabled: page.tooltipReadingsEnabled
+                text: i18n("Same as the Usage tab")
+                checked: page.tooltipChoice === null
+                onToggled: page.setTooltipSame(checked)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Same as the Usage tab shows the metrics checked in AI Provider Settings, or each provider's default metric. Turn it off to choose the hover popup's readings for each tracked provider here. Claude Code has no daily limit: its Session is the 5-hour window, Weekly the 7-day one.")
+            }
+        }
+
+        Repeater {
+            model: page.tooltipChoice === null ? [] : page.tooltipProviders
+
+            delegate: RowLayout {
+                id: tooltipProviderRow
+                required property var modelData
+                Kirigami.FormData.label: i18nc("@label provider name", "%1:", tooltipProviderRow.modelData.display_name)
+                spacing: Kirigami.Units.smallSpacing
+
+                Repeater {
+                    model: tooltipProviderRow.modelData.metrics || []
+
+                    delegate: QQC2.CheckBox {
+                        id: tooltipMetricCheck
+                        required property var modelData
+                        objectName: "tooltipMetric_" + tooltipProviderRow.modelData.provider_id
+                            + "_" + tooltipMetricCheck.modelData.id
+                        enabled: page.tooltipReadingsEnabled
+                        text: tooltipMetricCheck.modelData.title
+                        checked: TooltipLogic.isChosen(page.tooltipChoice,
+                            tooltipProviderRow.modelData.provider_id, tooltipMetricCheck.modelData.id)
+                        onToggled: page.setTooltipMetric(tooltipProviderRow.modelData.provider_id,
+                            tooltipMetricCheck.modelData.id, checked)
+                    }
+                }
+            }
         }
 
         RowLayout {

@@ -65,6 +65,12 @@
         <entry name="tooltipShowsUsage" type="Bool">
             <default>true</default>
         </entry>
+        <entry name="tooltipMetrics" type="String">
+            <default></default>
+        </entry>
+        <entry name="tooltipShowsReset" type="Bool">
+            <default>true</default>
+        </entry>
         <entry name="shortcutOpens" type="String">
             <default>popup</default>
         </entry>

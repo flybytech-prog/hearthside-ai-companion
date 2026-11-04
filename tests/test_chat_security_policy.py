@@ -91,6 +91,9 @@ GENERAL_CONFIG_KEYS = {
     "showChatTab": ("Bool", "true"),
     "popupSize": ("String", "normal"),
     "tooltipShowsUsage": ("Bool", "true"),
+    # The hover tooltip's reset times and its own readings ("" = same as Usage).
+    "tooltipShowsReset": ("Bool", "true"),
+    "tooltipMetrics": ("String", ""),
     # Plan R1: what the global shortcut opens, and the usage alerts.
     "shortcutOpens": ("String", "popup"),
     "alertLowEnabled": ("Bool", "false"),
@@ -1205,7 +1208,9 @@ def test_general_keys_have_their_exact_type_and_default():
     entries = _main_xml_entries()
     for key, (kind, default) in sorted(GENERAL_CONFIG_KEYS.items()):
         assert key in entries, f"{_rel(MAIN_XML)} is missing {key}"
-        assert entries[key] == {"group": "General", "type": kind, "default": default}, (
+        # An empty <default></default> parses as None: it is the "" default.
+        entry = dict(entries[key], default=entries[key]["default"] or "")
+        assert entry == {"group": "General", "type": kind, "default": default}, (
             f"{_rel(MAIN_XML)}: {key} must be {kind} {default!r} in group General, got {entries[key]}"
         )
 
@@ -1373,7 +1378,8 @@ def test_hidden_tabs_start_nothing():
 
 @pytest.mark.parametrize(("target", "old", "new"), [
     (MAIN_QML, "        if (!root.usageShown)\n            return\n        var providerIds", "        var providerIds"),
-    (MAIN_QML, "        running: root.usageShown", "        running: true"),
+    # The newline keeps the tooltip clock's `running: root.usageShown && ...` out of it.
+    (MAIN_QML, "        running: root.usageShown\n", "        running: true\n"),
     (MAIN_QML, "    readonly property bool chatShown: root.popupTabs.chat", "    readonly property bool chatShown: true"),
     (FULL_REPRESENTATION, "readonly property bool chatAvailable: root.chatShown",
      "readonly property bool chatAvailable: root.chatSiteIds.length > 0"),
@@ -4863,3 +4869,163 @@ def test_proof_split_view_rule_catches(path, old, new):
     web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
     view = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
     assert _split_view_problems(web, view)
+
+
+# Hover tooltip settings: only configGeneral.qml writes them, through its
+# reset checkbox and the two readings helpers; main.qml only reads them.
+TOOLTIP_LOGIC_JS = UI / "TooltipLogic.js"
+CONFIG_GENERAL = CONFIG_PAGES[0]
+TOOLTIP_KEYS = ("tooltipShowsReset", "tooltipMetrics")
+TOOLTIP_WRITE = (r"\b(?:cfg_)?(tooltipShowsReset|tooltipMetrics)\s*"
+                 r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)")
+TOOLTIP_RESET_WRITE = r"(?m)^\s*onToggled\s*:\s*page\s*\.\s*cfg_tooltipShowsReset\s*=\s*checked\s*$"
+
+
+def _tooltip_writer_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        hits = [(match.start(), match.group(1)) for match in re.finditer(TOOLTIP_WRITE, code)]
+        hits += [(match.start(), match.group(1)) for match in re.finditer(
+            r"\b[Pp]lasmoid\s*\.\s*configuration\s*\.\s*(tooltipShowsReset|tooltipMetrics)\s*"
+            r"(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))", code)]
+        if _base(name) != CONFIG_GENERAL.name:
+            problems += [f"{name}:{_line_of(code, at)}: only configGeneral.qml writes {key}" for at, key in hits]
+            continue
+        boxes = [(start, start + len(body)) for start, body in _blocks(code, r"\bQQC2\s*\.\s*CheckBox\s*\{")
+                 if re.search(r'(?m)^\s*objectName\s*:\s*"tooltipResetChoice"\s*$', body)]
+        helpers = [span for helper in ("setTooltipSame", "setTooltipMetric")
+                   for span in _block_spans(code, rf"\bfunction\s+{helper}\s*\([^)]*\)\s*\{{")]
+        resets = [at for at, key in hits if key == "tooltipShowsReset"]
+        good_reset = _hits(TOOLTIP_RESET_WRITE, code)
+        if len(boxes) != 1 or len(resets) != 1 or len(good_reset) != 1 \
+                or not boxes[0][0] <= resets[0] < boxes[0][1] or _line_of(code, resets[0]) != good_reset[0]:
+            problems.append(f"{name}: cfg_tooltipShowsReset only as `onToggled: page.cfg_tooltipShowsReset = "
+                            "checked` in the tooltipResetChoice CheckBox")
+        metrics = [at for at, key in hits if key == "tooltipMetrics"]
+        if len(helpers) != 2 or not metrics:
+            problems.append(f"{name}: setTooltipSame( and setTooltipMetric( must each be defined once")
+        for at in metrics:
+            if not any(start <= at < end for start, end in helpers):
+                problems.append(f"{name}:{_line_of(code, at)}: cfg_tooltipMetrics is written only in "
+                                "setTooltipSame and setTooltipMetric")
+        for start, end in helpers:
+            if not any(start <= at < end for at in metrics):
+                problems.append(f"{name}:{_line_of(code, start)}: each tooltip helper writes cfg_tooltipMetrics")
+    return problems
+
+
+def test_tooltip_settings_are_written_only_by_the_general_page():
+    problems = _tooltip_writer_problems(_all_code())
+    assert not problems, problems
+
+
+TOOLTIP_WRITER_MUTATIONS = [
+    (CONFIG_GENERAL, "onToggled: page.cfg_tooltipShowsReset = checked", "onToggled: page.cfg_tooltipShowsReset = true"),
+    (CONFIG_GENERAL, "            onToggled: page.cfg_tooltipShowsReset = checked\n",
+     "            onToggled: page.cfg_tooltipShowsUsage = checked\n"),
+    (CONFIG_GENERAL, "                onToggled: page.setTooltipSame(checked)",
+     "                onToggled: page.cfg_tooltipMetrics = \"\""),
+    (CONFIG_GENERAL, "    function setTooltipSame(same) {\n",
+     "    function clear() { page.cfg_tooltipShowsReset = false }\n    function setTooltipSame(same) {\n"),
+    (CONFIG_USAGE, "    property string cfg_tooltipMetricsDefault: \"\"\n",
+     "    property string cfg_tooltipMetricsDefault: \"\"\n    function f() { page.cfg_tooltipMetrics = \"{}\" }\n"),
+    (UI / "configChat.qml", "    property bool cfg_tooltipShowsResetDefault: true\n",
+     "    property bool cfg_tooltipShowsResetDefault: true\n    function f() { page.cfg_tooltipShowsReset = false }\n"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.tooltipMetrics = \"\" }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.tooltipShowsReset = false }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {", "    function x() { root.tooltipMetrics = \"\" }\n    function chatNext() {"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), TOOLTIP_WRITER_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(TOOLTIP_WRITER_MUTATIONS)])
+def test_proof_tooltip_writer_rule_catches(path, old, new):
+    assert _tooltip_writer_problems(_sources_with(path, old, new))
+
+
+def test_tooltip_logic_js_is_a_pure_library():
+    problems = _alert_logic_problems(_read_code(TOOLTIP_LOGIC_JS))
+    assert not problems, f"{_rel(TOOLTIP_LOGIC_JS)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '.import "SnapshotLogic.js" as SnapshotLogic',
+    "function f() { return Qt.formatDateTime(new Date()) }",
+    "function f() { console.log(1) }",
+    "function f() { return new XMLHttpRequest() }",
+    "function f() { return Plasmoid.configuration.tooltipMetrics }",
+])
+def test_proof_tooltip_logic_rule_catches(snippet):
+    assert _alert_logic_problems(_read_code(TOOLTIP_LOGIC_JS) + "\n" + snippet + "\n")
+
+
+def test_proof_tooltip_logic_needs_pragma():
+    code = re.sub(r"^\s*\.pragma\s+library\b", "", _read_code(TOOLTIP_LOGIC_JS), count=1)
+    assert _alert_logic_problems(code)
+
+
+# The tooltip clock: one 60 s Timer, running only while the tooltip shows
+# reset times, that writes root.tooltipNowMs and nothing else; nothing else
+# writes tooltipNowMs.
+TOOLTIP_CLOCK_RUNNING = (r"(?m)^\s*running\s*:\s*root\s*\.\s*usageShown\s*&&\s*root\s*\.\s*tooltipShowsUsage\s*&&\s*"
+                         r"root\s*\.\s*tooltipShowsReset\s*$")
+# One member per line, and only these: no extra handler can hide in the clock.
+TOOLTIP_CLOCK_MEMBERS = r"(?:interval|repeat|triggeredOnStart|running|onTriggered)\s*:[^;{}]*$"
+TOOLTIP_CLOCK_TRIGGERED = r"(?m)^\s*onTriggered\s*:\s*root\s*\.\s*tooltipNowMs\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*$"
+
+
+def _tooltip_clock_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        writes = _hits(r"\btooltipNowMs\s*(?:[-+*/%&|^]|\?\?)?=(?!=)|\btooltipNowMs\s*(?:\+\+|--)", code)
+        if _base(name) != MAIN_QML.name:
+            problems += [f"{name}:{line}: only main.qml's tooltip clock writes tooltipNowMs" for line in writes]
+            continue
+        clocks = [(start, end) for start, end in _block_spans(code, r"\bTimer\s*\{")
+                  if re.search(r"\btooltipNowMs\b", code[start:end])]
+        if len(clocks) != 1:
+            problems.append(f"{name}: one Timer writes tooltipNowMs, found {len(clocks)}")
+            continue
+        start, end = clocks[0]
+        clock = code[start:end]
+        if not re.search(r"(?m)^\s*interval\s*:\s*60000\s*$", clock) or len(_hits(TOOLTIP_CLOCK_RUNNING, clock)) != 1:
+            problems.append(f"{name}: the tooltip clock is `interval: 60000` and runs only while "
+                            "usageShown && tooltipShowsUsage && tooltipShowsReset")
+        members = [line.strip() for line in clock[1:-1].splitlines() if line.strip()]
+        if any(not re.match(TOOLTIP_CLOCK_MEMBERS, member) for member in members) \
+                or len(_hits(TOOLTIP_CLOCK_TRIGGERED, clock)) != 1 or len(_hits(r"\bonTriggered\b", clock)) != 1 \
+                or len(_hits(r"(?<![=!<>])=(?!=)", clock)) != 1:
+            problems.append(f"{name}: the tooltip clock does only `onTriggered: root.tooltipNowMs = Date.now()`")
+        inside = [line for line in writes if _line_of(code, start) <= line <= _line_of(code, end)]
+        if len(writes) != 1 or len(inside) != 1:
+            problems.append(f"{name}: tooltipNowMs is written only by the tooltip clock, lines {writes}")
+    return problems
+
+
+def test_tooltip_clock_only_ticks_the_tooltip():
+    problems = _tooltip_clock_problems(_all_code())
+    assert not problems, problems
+
+
+TOOLTIP_CLOCK_MUTATIONS = [
+    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
+     "        onTriggered: { root.tooltipNowMs = Date.now(); root.refresh() }\n"),
+    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
+     "        onTriggered: root.tooltipNowMs = Date.now()\n        onRunningChanged: root.refresh()\n"),
+    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
+     "        onTriggered: root.tooltipNowMs = Date.now()\n        onTriggeredChanged: Plasmoid.configuration.usageMode = \"used\"\n"),
+    (MAIN_QML, "        running: root.usageShown && root.tooltipShowsUsage && root.tooltipShowsReset\n",
+     "        running: true\n"),
+    (MAIN_QML, "        interval: 60000\n        repeat: true\n", "        interval: 1000\n        repeat: true\n"),
+    (MAIN_QML, "    function chatNext() {", "    function x() { root.tooltipNowMs = 0 }\n    function chatNext() {"),
+    (UI / "UsageView.qml", None, "\n    function f() { root.tooltipNowMs = 0 }\n"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), TOOLTIP_CLOCK_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(TOOLTIP_CLOCK_MUTATIONS)])
+def test_proof_tooltip_clock_rule_catches(path, old, new):
+    sources = _sources_with(path, snippet=new) if old is None else _sources_with(path, old, new)
+    assert _tooltip_clock_problems(sources)

@@ -106,7 +106,8 @@ plasmashell's memory.
 
 - Shows each available quota, plan, reset time, extra usage or credits, with
   **Left** and **Used** display modes; hover over the panel icon for a short
-  summary.
+  summary with the time until each reset, such as
+  `Claude Code — Session: 62% left, resets in 2 h 10 min`.
 - Detects installed tools through the Plasma login environment, CLI names, and
   Linux/XDG data locations, and contacts only providers that are both
   installed and tracked.
@@ -204,8 +205,12 @@ starts with Plasma while it remains on a panel.
   chooses what it opens: the popup as when clicking the icon, Chat, the
   Ollama message box (ready to type; the normal popup while Ollama is off) or
   Usage. Pressing the shortcut again closes the popup.
-- **Usage**: **Display** Left or Used, **Refresh every**, **Show usage
-  when hovering over the panel icon**, and **Notifications**: **Notify when
+- **Usage**: **Display** Left or Used, **Refresh every**, **Hover popup**
+  (**Show usage when hovering over the panel icon**, **Show time until
+  reset**, and **Readings**: **Same as the Usage tab**, or untick it to choose
+  each tracked provider's readings, for example Claude Code's Session, its
+  5-hour window, next to Weekly; percentages say "left" or "used" as Display
+  shows), and **Notifications**: **Notify when
   a plan drops below** a percentage **left** (20% by default, whatever
   Display shows) and **Notify when a plan resets** (only for a plan that had
   dropped that low). Plans are checked at each usage refresh while the Usage
@@ -224,7 +229,8 @@ notifications.
 
 Under **Settings → AI Provider Settings**, track only the tools you use, and choose which
 metrics of each provider the panel icon's tooltip shows (its default metric,
-such as Weekly, when none is checked).
+such as Weekly, when none is checked), unless **Settings → General → Usage →
+Readings** chooses the tooltip's own.
 
 ## Install
 

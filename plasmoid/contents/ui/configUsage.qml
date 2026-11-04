@@ -58,6 +58,10 @@ KCM.ScrollViewKCM {
     property string cfg_popupSizeDefault: "normal"
     property bool cfg_tooltipShowsUsage: true
     property bool cfg_tooltipShowsUsageDefault: true
+    property string cfg_tooltipMetrics: ""
+    property string cfg_tooltipMetricsDefault: ""
+    property bool cfg_tooltipShowsReset: true
+    property bool cfg_tooltipShowsResetDefault: true
     property string cfg_shortcutOpens: "popup"
     property string cfg_shortcutOpensDefault: "popup"
     // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so
@@ -249,7 +253,7 @@ KCM.ScrollViewKCM {
                     text: i18n("Providers")
                 }
                 Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Tracked providers appear in the Usage tab. The checked metrics are shown when you hover over the panel icon. Credentials stay on this computer; the helper only contacts the usage APIs of providers you track.")
+                    toolTipText: i18n("Tracked providers appear in the Usage tab. The checked metrics are shown when you hover over the panel icon, unless General → Hover popup chooses its own readings. Credentials stay on this computer; the helper only contacts the usage APIs of providers you track.")
                 }
                 Item {
                     Layout.fillWidth: true

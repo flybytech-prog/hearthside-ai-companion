@@ -15,6 +15,7 @@ import "OllamaChat.js" as OllamaChat
 import "PromptLibrary.js" as PromptLibrary
 import "SettingsLogic.js" as SettingsLogic
 import "AlertLogic.js" as AlertLogic
+import "TooltipLogic.js" as TooltipLogic
 
 PlasmoidItem {
     id: root
@@ -54,6 +55,12 @@ PlasmoidItem {
     readonly property string shownTab: SettingsLogic.shownTab(root.popupTab, root.popupTabs)
     readonly property real popupScale: SettingsLogic.popupScale(Plasmoid.configuration.popupSize)
     readonly property bool tooltipShowsUsage: Plasmoid.configuration.tooltipShowsUsage !== false
+    // Settings → General → Usage → Hover popup.
+    readonly property bool tooltipShowsReset: Plasmoid.configuration.tooltipShowsReset !== false
+    readonly property var tooltipChoice: TooltipLogic.parseTooltipMetrics(
+        Plasmoid.configuration.tooltipMetrics, Catalog.providers)
+    // Wall clock for the tooltip's reset times; ticks only while they show.
+    property double tooltipNowMs: Date.now()
     // Web sites, then the built-in Ollama chat when it is on.
     readonly property var chatSites: OllamaChat.menuEntries(
         ChatSites.enabledSites(Plasmoid.configuration.chatSites),
@@ -219,7 +226,8 @@ PlasmoidItem {
         Plasmoid.configuration.providerMetrics,
         {"claude": ["weekly"], "codex": ["weekly"]}
     )
-    readonly property var tooltipGroups: tooltipProviderGroups()
+    readonly property var tooltipGroups: TooltipLogic.applyChoice(
+        root.tooltipProviderGroups(), root.tooltipChoice)
     readonly property color normalUsageColor: {
         var background = Kirigami.Theme.backgroundColor
         var luminance = background.r * 0.2126
@@ -290,6 +298,37 @@ PlasmoidItem {
         if (reading.type === "credits")
             return String(Math.round(reading.value))
         return "—"
+    }
+
+    // Percentages say whether they are left or used; amounts and credits
+    // read as in the Usage tab.
+    function tooltipValue(reading) {
+        if (!reading || reading.type !== "percentage")
+            return root.formatReading(reading)
+        var percent = Math.round(reading.value)
+        return root.usageMode === "used"
+            ? i18n("%1% used", percent) : i18n("%1% left", percent)
+    }
+
+    function tooltipReset(providerData, metricId) {
+        var window = SnapshotLogic.windowFor(providerData, metricId)
+        var resetsAt = window && typeof window.resets_at === "string"
+            ? new Date(window.resets_at).getTime() : NaN
+        var parts = TooltipLogic.resetPhrase(isFinite(resetsAt) ? resetsAt : null, root.tooltipNowMs)
+        if (!parts)
+            return ""
+        if (parts.kind === "now")
+            return i18n("resetting now")
+        if (parts.kind === "minutes")
+            return i18np("resets in %1 min", "resets in %1 min", parts.minutes)
+        if (parts.kind === "hours")
+            return parts.minutes === 0
+                ? i18n("resets in %1 h", parts.hours)
+                : i18n("resets in %1 h %2 min", parts.hours, parts.minutes)
+        var locale = Qt.locale()
+        var when = new Date(resetsAt).toLocaleString(locale,
+            "ddd " + locale.timeFormat(Locale.ShortFormat))
+        return i18np("resets in %1 day (%2)", "resets in %1 days (%2)", parts.days, when)
     }
 
     function barColor(rawUsed) {
@@ -1254,19 +1293,37 @@ PlasmoidItem {
             return i18n("Loading…")
         if (root.tooltipGroups.length === 0)
             return i18n("No usage to show.")
-        var lines = []
+        var showsReset = root.tooltipShowsReset
+        // Read here so the reset times follow the clock.
+        var nowMs = root.tooltipNowMs
+        var groups = []
         for (var groupIndex = 0; groupIndex < root.tooltipGroups.length; groupIndex++) {
             var group = root.tooltipGroups[groupIndex]
-            var values = []
+            var items = []
             for (var metricIndex = 0; metricIndex < group.metrics.length; metricIndex++) {
                 var metricId = group.metrics[metricIndex]
                 var metric = Catalog.metric(group.provider_id, metricId)
-                values.push(metric.title + " "
-                    + root.formatReading(root.metricReading(group.provider, metricId)))
+                if (!metric)
+                    continue
+                items.push({
+                    title: metric.title,
+                    value: root.tooltipValue(root.metricReading(group.provider, metricId)),
+                    reset: showsReset && nowMs > 0 ? root.tooltipReset(group.provider, metricId) : ""
+                })
             }
-            lines.push(group.descriptor.display_name + ": " + values.join(" · "))
+            groups.push({name: group.descriptor.display_name, items: items})
         }
-        return lines.join("\n")
+        var lines = TooltipLogic.tooltipLines(groups, {showsReset: showsReset})
+        return lines.length > 0 ? lines.join("\n") : i18n("No usage to show.")
+    }
+
+    // Keeps the tooltip's "resets in" current; runs only while it shows them.
+    Timer {
+        interval: 60000
+        repeat: true
+        triggeredOnStart: true
+        running: root.usageShown && root.tooltipShowsUsage && root.tooltipShowsReset
+        onTriggered: root.tooltipNowMs = Date.now()
     }
 
     compactRepresentation: CompactRepresentation {}
