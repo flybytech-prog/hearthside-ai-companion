@@ -36,6 +36,9 @@ CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configUsage.qml", UI / "configCh
 SETTINGS_LOGIC_JS = UI / "SettingsLogic.js"
 OLLAMA_CHAT_JS = UI / "OllamaChat.js"
 OLLAMA_CHAT_VIEW = UI / "OllamaChatView.qml"
+COMPACT_REPRESENTATION = UI / "CompactRepresentation.qml"
+PROMPT_LIBRARY_JS = UI / "PromptLibrary.js"
+PROMPT_LIBRARY_PANEL = UI / "PromptLibraryPanel.qml"
 SRC = PLASMOID.parent / "src" / "hearthside"
 PORT_OWNER_PY = SRC / "core" / "portowner.py"
 CLI_PY = SRC / "cli.py"
@@ -47,6 +50,8 @@ PHASED_FILES = {"OllamaChat.js": "T1", "OllamaChatView.qml": "T4"}
 CHAT_CONFIG_READ_ONLY_FILES = (
     "ChatSites.js", "ChatStorage.js", "ChatView.qml", "ChatWebView.qml", "FullRepresentation.qml",
     "OllamaChat.js", "OllamaChatView.qml",
+    # Plan R2 (drops on the panel icon) and R4 (prompt library).
+    "CompactRepresentation.qml", "PromptLibrary.js", "PromptLibraryPanel.qml",
 )
 KCFG_NS = "{http://www.kde.org/standards/kcfg/1.0}"
 
@@ -67,6 +72,8 @@ CHAT_CONFIG_KEYS = {
     "chatKeepOpen": ("Bool", "false"),
     # Per-site zoom, JSON {siteId: factor}; written only by main.qml (plan R1).
     "chatSiteZoom": ("String", "{}"),
+    # Unlock with: passphrase | wallet (plan R3); written only by configGeneral.qml.
+    "chatVaultUnlock": ("String", "passphrase"),
 }
 # The Ollama address (plan T4). Expected once main.xml has it or the Ollama
 # view exists, so it can neither be half-added nor forgotten.
@@ -646,7 +653,8 @@ def _chat_storage_problems(raw):
     if re.findall(r"--store\s+(\w+)", code) != ["encrypted"]:
         problems.append("--store must be the literal `--store encrypted`, once")
     ops = re.search(r"VAULT_OPERATIONS\s*=\s*\[([^\]]*)\]", code)
-    allowed = '"status", "create", "unlock", "lock", "change-passphrase", "destroy"'
+    allowed = ('"status", "create", "unlock", "lock", "change-passphrase", "destroy", '
+               '"add-key", "remove-key", "auto-unlock"')
     if not ops or re.sub(r"\s+", " ", ops.group(1)).strip() != allowed:
         problems.append(f"VAULT_OPERATIONS must be exactly [{allowed}]")
     # Every argv value is validated: no raw concatenation of op or numbers
@@ -852,7 +860,8 @@ def test_proof_helper_flag_outside_chat_storage_is_caught():
     (".pragma library", ""),
     ("var MODES", "import QtQuick as Q\nvar MODES"),
     ("store !== \"encrypted\"", "store !== \"encrypted\" && store !== \"folder\""),
-    ('"change-passphrase", "destroy"]', '"change-passphrase", "destroy", "purge"]'),
+    ('"remove-key", "auto-unlock"]', '"remove-key", "auto-unlock", "purge"]'),
+    ('"remove-key", "auto-unlock"]', '"remove-key"]'),
 ])
 def test_proof_chat_storage_rule_catches(old, new):
     raw = CHAT_STORAGE_JS.read_text(encoding="utf-8")
@@ -1174,7 +1183,7 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
                 f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
             )
     literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0", "chatAutoLockMinutes": "0",
-                "chatKeepOpen": "false", "chatSiteZoom": '"{}"'}
+                "chatKeepOpen": "false", "chatSiteZoom": '"{}"', "chatVaultUnlock": '"passphrase"'}
     if "chatOllamaUrl" in expected:
         literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
     for key, literal in literals.items():
@@ -1942,17 +1951,17 @@ def test_model_picker_shows_model_names_as_plain_text():
 
 
 @pytest.mark.parametrize(("old", "new"), [
-    ("textFormat: Text.PlainText\n                                text: modelDelegate.modelData.name",
+    ("textFormat: Text.PlainText\n                    text: modelDelegate.modelData.name",
      "text: modelDelegate.modelData.name"),
-    ("textFormat: Text.PlainText\n                                visible: text !== \"\"",
-     "textFormat: Text.StyledText\n                                visible: text !== \"\""),
-    ("                    delegate: PlasmaComponents.ItemDelegate {\n                        id: modelDelegate",
-     "                    property Component unused: PlasmaComponents.ItemDelegate {\n"
-     "                        id: modelDelegate"),
-    ("                    model: ollamaView.modelList\n",
-     "                    model: ollamaView.modelList\n                    contentItem: Text { text: \"x\"; "
+    ("textFormat: Text.PlainText\n                    visible: text !== \"\"",
+     "textFormat: Text.StyledText\n                    visible: text !== \"\""),
+    ("        delegate: PlasmaComponents.ItemDelegate {\n            id: modelDelegate",
+     "        property Component unused: PlasmaComponents.ItemDelegate {\n"
+     "            id: modelDelegate"),
+    ("        model: ollamaView.modelList\n",
+     "        model: ollamaView.modelList\n        contentItem: Text { text: \"x\"; "
      "textFormat: Text.PlainText }\n"),
-    ("                    model: ollamaView.modelList\n", "                    model: ollamaView.models\n"),
+    ("        model: ollamaView.modelList\n", "        model: ollamaView.models\n"),
 ])
 def test_proof_model_picker_rule_catches(old, new):
     assert _model_picker_problems(_mutated(FULL_REPRESENTATION, old, new))
@@ -2797,12 +2806,37 @@ def test_proof_off_site_source_rule_catches():
 # download names are shown as visible markers (OllamaChat.revealHidden), and
 # Copy copies the marked text that is shown, never the hidden characters.
 
-def _hidden_chars_problems(ollama_view, chat_view):
+CODE_BLOCK_PUSH = (r'result\s*\.\s*push\s*\(\s*\{\s*kind\s*:\s*"code"\s*,\s*'
+                   r'text\s*:\s*revealHidden\s*\(\s*parts\s*\[\s*index\s*\]\s*\.\s*text\s*\)\s*,')
+TEXT_BLOCK_SPANS = r'\bspans\s*\(\s*revealHidden\s*\(\s*block\s*\.\s*lines\s*\.\s*join\s*\(\s*"\\n"\s*\)\s*\)\s*\)'
+
+
+def _hidden_chars_problems(ollama_view, chat_view, ollama_js):
     problems = []
-    blocks = _function_body(ollama_view, "blocks") or ""
-    if len(re.findall(r"\bOllamaChat\s*\.\s*revealHidden\s*\(", blocks)) != 2 \
-            or re.search(r"result\s*\.\s*push\s*\(\s*parts\s*\[", blocks):
-        problems.append("OllamaChatView.blocks must pass every code block and paragraph through revealHidden")
+    # OllamaChat.blocks: code blocks through revealHidden, all other text
+    # through textBlocks, whose every block is built by textBlock, whose
+    # spans come from revealHidden.
+    blocks = _function_body(ollama_js, "blocks") or ""
+    if len(re.findall(r"\brevealHidden\s*\(", blocks)) != 1 or len(re.findall(CODE_BLOCK_PUSH, blocks)) != 1:
+        problems.append("OllamaChat.blocks must pass every code block through revealHidden")
+    if len(re.findall(r"\.\s*push\s*\(", blocks)) != 1 or \
+            len(re.findall(r"=\s*result\s*\.\s*concat\s*\(\s*textBlocks\s*\(\s*parts\s*\[\s*index\s*\]\s*\.\s*text\s*\)\s*\)",
+                           blocks)) != 1:
+        problems.append("OllamaChat.blocks may only add code blocks and textBlocks(parts[index].text)")
+    text_blocks = _function_body(ollama_js, "textBlocks") or ""
+    pushes = re.findall(r"(\w+)\s*\.\s*push\s*\(([^)\n]*)\)?", text_blocks)
+    if not text_blocks or any(target == "result" and not argument.startswith("textBlock(current")
+                              for target, argument in pushes) \
+            or len(re.findall(r"\bresult\s*\.\s*push\s*\(\s*textBlock\s*\(\s*current\s*\)\s*\)", text_blocks)) != 1 \
+            or re.search(r"\bresult\s*(?:\[|=(?!=)|\.\s*(?:concat|unshift|splice)\b)", text_blocks.split("\n", 2)[-1]):
+        problems.append("OllamaChat.textBlocks may only add textBlock(current)")
+    text_block = _function_body(ollama_js, "textBlock") or ""
+    if len(re.findall(TEXT_BLOCK_SPANS, text_block)) != 1 or len(re.findall(r"\bspans\s*:", text_block)) != 1:
+        problems.append("OllamaChat.textBlock must build spans from revealHidden(block.lines.join(\"\\n\"))")
+    # The view shows only OllamaChat.blocks(message.body).
+    if len(re.findall(r"\bOllamaChat\s*\.\s*blocks\s*\(\s*message\s*\.\s*body\s*\)", ollama_view)) != 1 \
+            or len(re.findall(r"\bblocks\s*\(", ollama_view)) != 1:
+        problems.append("OllamaChatView.qml must show replies through OllamaChat.blocks(message.body) once")
     for match in re.finditer(r"\bcopyText\s*\(([^\n]*)\)\s*$", ollama_view, re.M):
         args = match.group(1).strip()
         if args in ("segment.content", "OllamaChat.revealHidden(message.body)") or args == "text":
@@ -2818,22 +2852,29 @@ def _hidden_chars_problems(ollama_view, chat_view):
 
 
 def test_hidden_characters_are_shown_and_copied_marked():
-    problems = _hidden_chars_problems(_read_code(OLLAMA_CHAT_VIEW), _read_code(CHAT_VIEW))
+    problems = _hidden_chars_problems(_read_code(OLLAMA_CHAT_VIEW), _read_code(CHAT_VIEW), _read_code(OLLAMA_CHAT_JS))
     assert not problems, problems
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
     (OLLAMA_CHAT_VIEW, "onClicked: ollamaView.copyText(OllamaChat.revealHidden(message.body))",
      "onClicked: ollamaView.copyText(message.body)"),
-    (OLLAMA_CHAT_VIEW, "text: OllamaChat.revealHidden(parts[index].text),", "text: parts[index].text,"),
-    (OLLAMA_CHAT_VIEW, 'text: OllamaChat.revealHidden(paragraph), lang: ""', 'text: paragraph, lang: ""'),
+    (OLLAMA_CHAT_JS, "text: revealHidden(parts[index].text),", "text: parts[index].text,"),
+    (OLLAMA_CHAT_JS, 'spans: spans(revealHidden(block.lines.join("\\n")))', 'spans: spans(block.lines.join("\\n"))'),
+    (OLLAMA_CHAT_JS, "result = result.concat(textBlocks(parts[index].text))",
+     'result.push({ kind: "paragraph", spans: spans(parts[index].text) })'),
+    (OLLAMA_CHAT_JS, "            result.push(textBlock(current))",
+     "            result.push(current.kind === \"x\" ? current : textBlock(current))"),
+    (OLLAMA_CHAT_JS, "    flush()\n    return result\n}",
+     "    flush()\n    result.push({ kind: \"paragraph\", spans: spans(text) })\n    return result\n}"),
+    (OLLAMA_CHAT_VIEW, "OllamaChat.blocks(message.body)", "OllamaChat.segments(message.body)"),
     (OLLAMA_CHAT_VIEW, 'objectName: "hiddenCharsNote"', 'objectName: "note"'),
     (CHAT_VIEW, "var text = OllamaChat.revealHidden(String(name || \"\"))", "var text = String(name || \"\")"),
 ])
 def test_proof_hidden_chars_rule_catches(path, old, new):
-    ollama = _mutated(path, old, new) if path == OLLAMA_CHAT_VIEW else _read_code(OLLAMA_CHAT_VIEW)
-    chat = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
-    assert _hidden_chars_problems(ollama, chat)
+    sources = [_mutated(item, old, new) if item == path else _read_code(item)
+               for item in (OLLAMA_CHAT_VIEW, CHAT_VIEW, OLLAMA_CHAT_JS)]
+    assert _hidden_chars_problems(*sources)
 
 
 # N1 A page never opens the system browser by itself. Qt.openUrlExternally
@@ -3789,3 +3830,873 @@ def test_proof_second_alert_create_is_caught():
     code = _mutated(MAIN_QML, "    function setUsageMode(mode) {",
                     "    function x() { alertNotification.createObject(root, {}) }\n    function setUsageMode(mode) {")
     assert _alert_argument_problems(code)
+
+
+# --- R2: personas, formatting, compare, text drops (plan T2.3) ---------------------------
+
+# Rule checkers take {relative path: comment-stripped code}; the proofs feed
+# them the real sources with one file mutated (_sources_with).
+
+
+def _base(name):
+    return name.rsplit("/", 1)[-1]
+
+
+def _sources_with(path, old=None, new=None, snippet=None):
+    """All plasmoid code, with ``path`` mutated (``old`` -> ``new``) or ``snippet`` appended."""
+    sources = _all_code()
+    if snippet is not None:
+        sources[_rel(path)] = _appended(path, snippet)
+    elif old is not None:
+        sources[_rel(path)] = _mutated(path, old, new)
+    return sources
+
+
+def _mutated_in_function(path, function, old, new):
+    """``path`` with ``old`` replaced by ``new`` inside ``function <name>(`` only."""
+    raw = path.read_text(encoding="utf-8")
+    bodies = list(_blocks(raw, rf"\bfunction\s+{function}\s*\([^)]*\)\s*\{{"))
+    assert len(bodies) == 1, f"proof fixture out of date: function {function} in {_rel(path)}"
+    start, _ = bodies[0]
+    brace = raw.index("{", start)
+    end = _brace_end(_strip_comments(raw, blank_strings=True), brace)
+    body = raw[brace:end]
+    assert old in body, f"proof fixture out of date: {old!r} not in {function}()"
+    return _strip_comments(raw[:brace] + body.replace(old, new, 1) + raw[end:])
+
+
+def _top_level_raw(body):
+    """Like _top_level, but the top-level text keeps its string literals."""
+    blanked = _strip_comments(body, blank_strings=True)
+    out = []
+    depth = 0
+    for raw, char in zip(body, blanked):
+        if char == "{":
+            depth += 1
+            out.append(" ")
+        elif char == "}":
+            depth -= 1
+            out.append(" ")
+        else:
+            out.append(raw if depth == 1 or char == "\n" else " ")
+    return "".join(out)
+
+
+def _mutated_in_block(path, opener, anchor, old, new):
+    """``path`` with ``old`` replaced inside the one ``opener`` block that holds ``anchor``."""
+    raw = path.read_text(encoding="utf-8")
+    blanked = _strip_comments(raw, blank_strings=True)
+    found = []
+    for match in re.finditer(opener, blanked):
+        brace = blanked.find("{", match.end() - 1)
+        end = _brace_end(blanked, brace)
+        top = _top_level_raw(_strip_comments(raw[brace:end]))
+        if re.search(rf"(?:^|[\n;])\s*{re.escape(anchor)}\s*(?=;|\n|$)", top):
+            found.append((brace, end))
+    assert len(found) == 1, f"proof fixture out of date: {anchor!r} in {_rel(path)} ({len(found)} blocks)"
+    brace, end = found[0]
+    body = raw[brace:end]
+    assert old in body, f"proof fixture out of date: {old!r} not in the {anchor!r} block"
+    return _strip_comments(raw[:brace] + body.replace(old, new, 1) + raw[end:])
+
+
+# R2-1 The system role is sent once, by chatRequestBody, for the personality;
+# ROLES (what a transcript row may be) stays user/assistant. The port owner
+# word "system" (OWNERS, trusted) is the only other "system" literal.
+
+SYSTEM_LITERAL = r"""["'`]system["'`]"""
+SYSTEM_ALLOWED = {
+    "chatRequestBody": r'^\s*clean\.push\(\{ role: "system", content: system \}\)\s*$',
+    "OWNERS": r'^var OWNERS = \["none", "self", "system", "other"\]\s*$',
+    "trusted": r'^\s*return owner === "self" \|\| owner === "system"\s*$',
+}
+
+
+def _system_role_problems(sources):
+    problems = []
+    seen = {key: 0 for key in SYSTEM_ALLOWED}
+    for name, code in sources.items():
+        js = _base(name) == "OllamaChat.js"
+        bodies = {key: _function_body(code, key) or "" for key in ("chatRequestBody", "trusted")} if js else {}
+        for match in re.finditer(SYSTEM_LITERAL, code):
+            line_start = code.rfind("\n", 0, match.start()) + 1
+            line = code[line_start:code.find("\n", match.start())]
+            kind = next((key for key, pattern in SYSTEM_ALLOWED.items() if re.match(pattern, line)), None)
+            inside = kind == "OWNERS" or (kind in bodies and line in bodies[kind])
+            if not js or kind is None or not inside:
+                problems.append(f"{name}:{_line_of(code, match.start())}: \"system\" only as the port owner "
+                                "word or chatRequestBody's personality")
+            else:
+                seen[kind] += 1
+        if js:
+            roles = re.findall(r"(?m)^var ROLES = (\[[^\]\n]*\])\s*$", code)
+            if roles != ['["user", "assistant"]']:
+                problems.append(f"{name}: ROLES must stay [\"user\", \"assistant\"], got {roles}")
+            body = bodies["chatRequestBody"]
+            dynamic = re.findall(r"\brole\s*:\s*([^,}\n]+)", body)
+            if sorted(item.strip() for item in dynamic) != ['"system"', "message.role"] or \
+                    not re.search(r"ROLES\s*\.\s*indexOf\s*\(\s*message\s*\.\s*role\s*\)\s*<\s*0", body):
+                problems.append(f"{name}: chatRequestBody sends message.role only after the ROLES check")
+            if len(re.findall(r"\brole\s*:", code)) != 2:
+                problems.append(f"{name}: role: only in chatRequestBody")
+    if seen != {key: 1 for key in SYSTEM_ALLOWED}:
+        problems.append(f"\"system\" literals expected once each in {sorted(SYSTEM_ALLOWED)}, got {seen}")
+    return problems
+
+
+def test_system_role_only_for_the_personality():
+    problems = _system_role_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (OLLAMA_CHAT_VIEW, '        history.push({ role: "user", content: prompt })',
+     '        history.push({ role: "system", content: "x" })\n        history.push({ role: "user", content: prompt })'),
+    (OLLAMA_CHAT_JS, 'var ROLES = ["user", "assistant"]', 'var ROLES = ["user", "assistant", "system"]'),
+    (OLLAMA_CHAT_JS, "        clean.push({ role: message.role, content: message.content })",
+     "        clean.push({ role: message.role, content: message.content })\n"
+     '        clean.push({ role: "system", content: system })'),
+    (OLLAMA_CHAT_JS, "function unloadRequestBody(model) {",
+     'function sneak(s) { return { role: "system", content: s } }\nfunction unloadRequestBody(model) {'),
+    (OLLAMA_CHAT_JS, "ROLES.indexOf(message.role) < 0", "typeof message.role !== \"string\""),
+    (OLLAMA_CHAT_JS, "        clean.push({ role: message.role, content: message.content })",
+     "        clean.push({ role: message.author, content: message.content })"),
+])
+def test_proof_system_role_rule_catches(path, old, new):
+    assert _system_role_problems(_sources_with(path, old, new))
+
+
+# R2-2 Reply blocks (OllamaChat.blocks) are shown only by OllamaChatView.qml,
+# which has no image, link or external-open sink at all (P4 bans them there);
+# OllamaChat.js cannot open anything (P1: no Qt.).
+
+BLOCK_SINKS = {
+    "Image": r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:Image|AnimatedImage|BorderImage)\s*\{",
+    "openUrlExternally": r"\bopenUrlExternally\b",
+    "onLinkActivated": r"\b(?:on)?[Ll]inkActivated\b",
+    "hoveredLink": r"\bhoveredLink\b|\blinkAt\b",
+}
+
+
+def _blocks_sink_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        calls = _hits(r"(?<![\w$])blocks\s*\(", code)
+        if _base(name) == "OllamaChat.js":
+            continue
+        if _base(name) != "OllamaChatView.qml":
+            problems += [f"{name}:{line}: OllamaChat.blocks may only be used by OllamaChatView.qml" for line in calls]
+            continue
+        if len(calls) != 1 or len(re.findall(r"\bOllamaChat\.blocks\(message\.body\)", code)) != 1:
+            problems.append(f"{name}: OllamaChat.blocks(message.body) once")
+        for sink, pattern in BLOCK_SINKS.items():
+            problems += [f"{name}:{line}: {sink} where reply blocks are shown" for line in _hits(pattern, code)]
+    return problems
+
+
+def test_reply_blocks_never_reach_images_links_or_the_browser():
+    problems = _blocks_sink_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "snippet"), [
+    (OLLAMA_CHAT_VIEW, "\n    Image { source: OllamaChat.blocks(\"x\")[0].text }\n"),
+    (OLLAMA_CHAT_VIEW, "\n    function open(b) { Qt.openUrlExternally(b.text) }\n"),
+    (OLLAMA_CHAT_VIEW, "\n    Text { textFormat: Text.PlainText; onLinkActivated: (l) => console.log(l) }\n"),
+    (FULL_REPRESENTATION, "\n    readonly property var shown: OllamaChat.blocks(\"x\")\n"),
+])
+def test_proof_blocks_sink_rule_catches(path, snippet):
+    assert _blocks_sink_problems(_sources_with(path, snippet=snippet))
+
+
+# R2-3 / R4 P4 covers every text element of the Ollama view and of the prompt
+# library panel; the new reply delegates are pinned so they cannot move out
+# of the checked files.
+
+P4_FILES = (OLLAMA_CHAT_VIEW, PROMPT_LIBRARY_PANEL)
+# (file, an anchor at the top level of the text element): the reply's plain
+# TextEdit and word Text (ReplyParagraph), heading, list marker, code, the
+# hidden-characters note, and the library's item text and notes.
+P4_PINNED = (
+    (OLLAMA_CHAT_VIEW, "id: plainText"),
+    (OLLAMA_CHAT_VIEW, "id: wordText"),
+    (OLLAMA_CHAT_VIEW, "font: ollamaView.headingFont(segment.block.level)"),
+    (OLLAMA_CHAT_VIEW, "horizontalAlignment: Text.AlignRight"),
+    (OLLAMA_CHAT_VIEW, "id: codeText"),
+    (OLLAMA_CHAT_VIEW, 'objectName: "hiddenCharsNote"'),
+    (OLLAMA_CHAT_VIEW, "visible: ollamaView.personaTooLong"),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "libraryItemText"'),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "libraryNote"'),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "copiedNote"'),
+    (PROMPT_LIBRARY_PANEL, "id: copyHelper"),
+)
+
+
+def _pinned_plain_text_problems(code, anchors):
+    problems = []
+    tops = [(start, _top_level(body), _top_level_raw(body)) for start, body in _blocks(code, TEXT_ELEMENT)]
+    for anchor in anchors:
+        holders = [(start, top) for start, top, raw in tops
+                   if re.search(rf"(?:^|[\n;])\s*{re.escape(anchor)}\s*(?=;|\n|$)", raw)]
+        if len(holders) != 1:
+            problems.append(f"{anchor!r} must be in exactly one text element, found {len(holders)}")
+        elif len(re.findall(PLAIN_TEXT_FORMAT, holders[0][1])) != 1:
+            problems.append(f"line {_line_of(code, holders[0][0])}: {anchor!r} needs textFormat PlainText")
+    return problems
+
+
+@pytest.mark.parametrize("path", P4_FILES, ids=lambda path: path.name)
+def test_p4_files_show_everything_as_plain_text(path):
+    code = _read_code(path)
+    problems = _plain_text_problems(code) + _pinned_plain_text_problems(
+        code, [anchor for owner, anchor in P4_PINNED if owner == path])
+    assert not problems, f"{_rel(path)}: {problems}"
+
+
+@pytest.mark.parametrize(("path", "anchor", "old", "new"), [
+    (OLLAMA_CHAT_VIEW, "id: plainText", "textFormat: TextEdit.PlainText\n", ""),
+    (OLLAMA_CHAT_VIEW, "id: wordText", "textFormat: Text.PlainText", "textFormat: Text.StyledText"),
+    (OLLAMA_CHAT_VIEW, "font: ollamaView.headingFont(segment.block.level)", "textFormat: Text.PlainText\n", ""),
+    (OLLAMA_CHAT_VIEW, "horizontalAlignment: Text.AlignRight", "textFormat: Text.PlainText\n", ""),
+    (OLLAMA_CHAT_VIEW, "id: codeText", "textFormat: TextEdit.PlainText", "textFormat: TextEdit.MarkdownText"),
+    (OLLAMA_CHAT_VIEW, 'objectName: "hiddenCharsNote"', 'objectName: "hiddenCharsNote"', 'objectName: "x"'),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "libraryItemText"', "textFormat: Text.PlainText\n", ""),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "copiedNote"', "textFormat: Text.PlainText", "textFormat: Text.AutoText"),
+])
+def test_proof_p4_pinned_rule_catches(path, anchor, old, new):
+    code = _mutated_in_block(path, TEXT_ELEMENT, anchor, old, new)
+    assert _plain_text_problems(code) + _pinned_plain_text_problems(
+        code, [item for owner, item in P4_PINNED if owner == path])
+
+
+def test_proof_p4_panel_rule_catches_rich_text():
+    code = _appended(PROMPT_LIBRARY_PANEL, "\n    QQC2.Label { text: panel.items[0].text }\n")
+    assert _plain_text_problems(code)
+
+
+# R2-4 / R4 P5 covers every editable input, pinned: the Ollama message box and
+# personality box, and the library's session box.
+
+P5_FILES = {
+    OLLAMA_CHAT_VIEW: ("id: input", "id: personaInput"),
+    PROMPT_LIBRARY_PANEL: ('objectName: "sessionLibraryInput"',),
+}
+
+
+def _pinned_input_problems(code, anchors):
+    problems = _input_privacy_problems(code)
+    tops = [_top_level_raw(body) for _, body in _blocks(code, EDITABLE_ELEMENT)]
+    for anchor in anchors:
+        if len([top for top in tops if re.search(rf"(?:^|[\n;])\s*{re.escape(anchor)}\s*(?=;|\n|$)", top)]) != 1:
+            problems.append(f"{anchor!r} must be one editable input checked by P5")
+    return problems
+
+
+@pytest.mark.parametrize("path", P5_FILES, ids=lambda path: path.name)
+def test_p5_inputs_never_feed_spell_check_or_ime_learning(path):
+    problems = _pinned_input_problems(_read_code(path), P5_FILES[path])
+    assert not problems, f"{_rel(path)}: {problems}"
+
+
+@pytest.mark.parametrize(("path", "anchor", "old", "new"), [
+    (OLLAMA_CHAT_VIEW, "id: personaInput", "Kirigami.SpellCheck.enabled: false\n", ""),
+    (OLLAMA_CHAT_VIEW, "id: personaInput", "Qt.ImhNoPredictiveText | Qt.ImhSensitiveData", "Qt.ImhNone"),
+    (OLLAMA_CHAT_VIEW, "id: personaInput", "id: personaInput", "id: otherInput"),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "sessionLibraryInput"', "Kirigami.SpellCheck.enabled: false",
+     "Kirigami.SpellCheck.enabled: true"),
+    (PROMPT_LIBRARY_PANEL, 'objectName: "sessionLibraryInput"', "inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhSensitiveData\n", ""),
+])
+def test_proof_p5_pinned_rule_catches(path, anchor, old, new):
+    assert _pinned_input_problems(_mutated_in_block(path, EDITABLE_ELEMENT, anchor, old, new), P5_FILES[path])
+
+
+# R2-5 Drops: DropArea only on the panel icon (CompactRepresentation.qml) and
+# as the view's one `component TextDropArea: DropArea {`. No drop path ever
+# sends: the drop handlers and the functions they reach never call a send.
+
+DROP_FUNCTIONS = {
+    "OllamaChatView.qml": ("textDropped", "takeDrop", "dropFailed"),
+    "main.qml": ("dropToOllama", "dropFileToOllama", "readDroppedFile", "droppedDone"),
+    "FullRepresentation.qml": ("takePendingDrop", "takePendingDropError"),
+}
+SEND_CALL = r"(?<![\w$])(?:send|startChat|checkOwner|regenerate|sendChat|afterOwnerCheck|libraryRequest)\s*\("
+DROPPED_HANDLER = r"\bonDropped\s*:\s*(?:\([^)]*\)\s*=>\s*|function\s*\([^)]*\)\s*)?\{"
+
+
+def _drop_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        hits = _hits(r"\bDropArea\b", code)
+        if base == "CompactRepresentation.qml":
+            if hits != _hits(r"(?m)^[ \t]*DropArea\s*\{", code) or len(hits) != 1:
+                problems.append(f"{name}: one plain `DropArea {{` on the icon")
+        elif base == "OllamaChatView.qml":
+            if hits != _hits(r"(?m)^[ \t]*component TextDropArea: DropArea \{", code) or len(hits) != 1:
+                problems.append(f"{name}: DropArea only as `component TextDropArea: DropArea {{`")
+        else:
+            problems += [f"{name}:{line}: DropArea only on the icon and in the Ollama view" for line in hits]
+        bodies = [(f"onDropped (line {_line_of(code, start)})", body) for start, body in _blocks(code, DROPPED_HANDLER)]
+        for function in DROP_FUNCTIONS.get(base, ()):
+            body = _function_body(code, function)
+            if body is None:
+                problems.append(f"{name}: function {function}( must exist once")
+            bodies.append((function, body or ""))
+        for label, body in bodies:
+            for line in _hits(SEND_CALL, _strip_comments(body, blank_strings=True)):
+                problems.append(f"{name}: {label} calls a send (body line {line}); drops never send")
+    handlers = sum(len(list(_blocks(code, DROPPED_HANDLER))) for code in sources.values())
+    if handlers != 2:
+        problems.append(f"exactly two onDropped handlers (icon and TextDropArea), found {handlers}")
+    return problems
+
+
+def test_drops_live_in_two_places_and_never_send():
+    problems = _drop_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new", "snippet"), [
+    (FULL_REPRESENTATION, None, None, "\n    DropArea { anchors.fill: parent }\n"),
+    (OLLAMA_CHAT_VIEW, None, None, "\n    DropArea { onDropped: (drop) => ollamaView.takeDrop(drop.text) }\n"),
+    (OLLAMA_CHAT_VIEW, "        ollamaView.takeDrop(text)\n        return true",
+     "        ollamaView.takeDrop(text)\n        ollamaView.send()\n        return true", None),
+    (OLLAMA_CHAT_VIEW, "        ollamaView.focusLater()\n    }\n\n    // From the drop areas",
+     "        ollamaView.startChat()\n    }\n\n    // From the drop areas", None),
+    (MAIN_QML, "            root.pendingDrop = reply.text\n",
+     "            root.pendingDrop = reply.text\n            root.libraryRequest(\"list\")\n", None),
+    (COMPACT_REPRESENTATION, "                root.dropToOllama(drop.text)\n",
+     "                root.dropToOllama(drop.text)\n                ollamaView.send()\n", None),
+    (FULL_REPRESENTATION, "        ollamaView.takeDrop(text)\n",
+     "        ollamaView.takeDrop(text)\n        ollamaView.checkOwner(\"send\")\n", None),
+])
+def test_proof_drop_rule_catches(path, old, new, snippet):
+    assert _drop_problems(_sources_with(path, old, new, snippet))
+
+
+# R2-6 P12: Send, Regenerate and Compare's second request all go through the
+# owner check (the gate rule above, with these insertions proved too).
+
+@pytest.mark.parametrize(("function", "old", "new"), [
+    ("finishChat", 'ollamaView.checkOwner("send")', "ollamaView.startChat()"),
+    ("regenerate", 'ollamaView.checkOwner("send")', "ollamaView.startChat()"),
+    ("send", 'ollamaView.checkOwner("send")', "ollamaView.startChat()"),
+])
+def test_proof_owner_gate_rule_catches_every_send_path(function, old, new):
+    assert _owner_gate_problems(_mutated_in_function(OLLAMA_CHAT_VIEW, function, old, new))
+
+
+# --- R3: KDE Wallet unlock (plan T3.2) ----------------------------------------------------
+
+WALLET_LITERAL = r"kwallet-query|qdbus6|openssl"
+FIDO_LITERAL = r"(?i)fido2-"
+
+
+def _js_literal_span(code, opener):
+    """(start, end) of the bracketed literal that ``opener`` (ending at [ or {) starts."""
+    match = re.search(opener, code)
+    if not match:
+        return None
+    blanked = _strip_comments(code, blank_strings=True)
+    start = match.end() - 1
+    pairs = {"[": "]", "{": "}"}
+    depth = 0
+    for index in range(start, len(blanked)):
+        if blanked[index] == blanked[start]:
+            depth += 1
+        elif blanked[index] == pairs[blanked[start]]:
+            depth -= 1
+            if depth == 0:
+                return start, index + 1
+    return None
+
+
+def _wallet_literal_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        problems += [f"{name}:{line}: fido2- is not used" for line in _hits(FIDO_LITERAL, code)]
+        hits = [match.start() for match in re.finditer(WALLET_LITERAL, code)]
+        if _base(name) != "ChatStorage.js":
+            problems += [f"{name}:{_line_of(code, hit)}: wallet tool names only in ChatStorage.js" for hit in hits]
+            continue
+        spans = [_js_literal_span(code, r"(?m)^var WALLET_TOOLS = \["), _js_literal_span(code, r"(?m)^var TOOL_PACKAGES = \{")]
+        if None in spans:
+            problems.append(f"{name}: WALLET_TOOLS and TOOL_PACKAGES must be literals")
+            continue
+        for hit in hits:
+            if not any(start <= hit < end for start, end in spans):
+                problems.append(f"{name}:{_line_of(code, hit)}: wallet tool names only in WALLET_TOOLS and TOOL_PACKAGES")
+        tools = code[spans[0][0]:spans[0][1]]
+        if re.sub(r"\s+", " ", tools) != '["kwallet-query", "qdbus6", "openssl"]':
+            problems.append(f"{name}: WALLET_TOOLS must be exactly [\"kwallet-query\", \"qdbus6\", \"openssl\"]")
+    return problems
+
+
+def test_wallet_tool_names_only_in_chat_storage_lists():
+    problems = _wallet_literal_problems({**_all_code(), **{name: text for name, text in _all_text().items()
+                                                            if not name.endswith((".qml", ".js"))}})
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new", "snippet"), [
+    (MAIN_QML, None, None, '\n    readonly property string tool: "kwallet-query"\n'),
+    (UI / "configGeneral.qml", None, None, '\n    readonly property string hint: i18n("Run qdbus6 to check")\n'),
+    (CHAT_STORAGE_JS, None, None, '\nvar READ = "kwallet-query --folder Hearthside --read-password x"\n'),
+    (CHAT_STORAGE_JS, '"qdbus6", "openssl"]', '"qdbus6", "openssl", "secret-tool"]', None),
+    (OLLAMA_CHAT_JS, None, None, '\nvar KEY = "fido2-assert"\n'),
+])
+def test_proof_wallet_literal_rule_catches(path, old, new, snippet):
+    sources = _sources_with(path, old, new, snippet) if path.suffix == ".qml" or old is not None else _all_code()
+    if path.suffix == ".js" and snippet is not None:
+        sources[_rel(path)] = _strip_comments(path.read_text(encoding="utf-8") + snippet)
+    assert _wallet_literal_problems(sources)
+
+
+def _method_flag_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        hits = _hits(r"(?<![\w-])--method(?![\w-])", code)
+        if _base(name) != "ChatStorage.js":
+            problems += [f"{name}:{line}: --method only in ChatStorage.vaultCommand" for line in hits]
+            continue
+        body = _function_body(code, "vaultCommand") or ""
+        inside = len(re.findall(r"(?<![\w-])--method(?![\w-])", body))
+        if inside != len(hits) or inside == 0:
+            problems.append(f"{name}: --method only inside vaultCommand")
+        if re.findall(r'"\s*--method\s+(\w+)"', body) != ["wallet", "wallet"]:
+            problems.append(f"{name}: vaultCommand appends only the literal \" --method wallet\"")
+    return problems
+
+
+def test_method_flag_is_built_only_by_vault_command():
+    problems = _method_flag_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "    function chatNext() {",
+     '    function x() { return "--vault unlock --method wallet" }\n    function chatNext() {'),
+    (CHAT_STORAGE_JS, "function stepMethod(step) {", 'function stepMethod(step) {\n    var f = " --method "'),
+    (CHAT_STORAGE_JS, 'return method === "wallet" ? command + " --method wallet" : command',
+     'return command + " --method " + method'),
+])
+def test_proof_method_flag_rule_catches(path, old, new):
+    assert _method_flag_problems(_sources_with(path, old, new))
+
+
+AUTO_UNLOCK_ENQUEUE = (r'if\s*\(\s*root\.chatStorageMode\s*===\s*"encrypted"\s*&&\s*root\.chatUnlockSetting\s*===\s*'
+                       r'"wallet"\s*\)\s*root\.chatEnqueue\s*\(\s*\[\s*"status"\s*,\s*"auto-unlock"\s*\]\s*\)')
+COMPLETED_HANDLER = r"\bComponent\.onCompleted\s*:\s*\{"
+
+
+def _auto_unlock_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        hits = [match.start() for match in re.finditer(r"""["']auto-unlock["']""", code)]
+        if base == "ChatStorage.js":
+            continue
+        if base not in ("main.qml", "ChatView.qml"):
+            problems += [f"{name}:{_line_of(code, hit)}: auto-unlock only from main.qml at start" for hit in hits]
+            continue
+        allowed = [match.start(1) for match in re.finditer(r"""\bcase\s+("auto-unlock")\s*:""", code)]
+        allowed += [match.start(1) for match in re.finditer(r"""\broot\.chatOp\s*===\s*("auto-unlock")""", code)]
+        if base == "main.qml":
+            enqueues = list(re.finditer(AUTO_UNLOCK_ENQUEUE, code))
+            completed = [(start, start + len(body)) for start, body in _blocks(code, COMPLETED_HANDLER)
+                         if re.match(r"\s*Component", code[code.rfind("\n", 0, start) + 1:])
+                         and code[code.rfind("\n", 0, start) + 1:start].strip() == ""
+                         and len(code[code.rfind("\n", 0, start) + 1:start]) == 4]
+            if len(enqueues) != 1 or len(completed) != 1 or not (
+                    completed[0][0] <= enqueues[0].start() < completed[0][1]):
+                problems.append(f"{name}: auto-unlock is enqueued once, in the root Component.onCompleted, "
+                                "behind the encrypted + wallet gate")
+            allowed += [match.start() + match.group(0).rindex('"auto-unlock"') for match in enqueues]
+        for hit in hits:
+            if hit not in allowed:
+                problems.append(f"{name}:{_line_of(code, hit)}: auto-unlock only enqueued at start")
+        if re.search(r"""\bvaultCommand\s*\(\s*["']auto-unlock""", code):
+            problems.append(f"{name}: auto-unlock never runs outside the step queue")
+    return problems
+
+
+def test_auto_unlock_is_queued_only_at_plasma_start():
+    problems = _auto_unlock_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, 'if (root.chatStorageMode === "encrypted" && root.chatUnlockSetting === "wallet")\n'
+               '            root.chatEnqueue(["status", "auto-unlock"])',
+     'root.chatEnqueue(["status", "auto-unlock"])'),
+    (MAIN_QML, '            root.chatEnqueue(["status", "unlock-wallet"])', '            root.chatEnqueue(["status", "auto-unlock"])'),
+    (MAIN_QML, '            root.chatEnqueue([action])\n', '            root.chatEnqueue(["auto-unlock"])\n'),
+    (UI / "configGeneral.qml", 'page.runVault("add-key", "wallet")', 'page.runVault("auto-unlock")'),
+    (CHAT_VIEW, 'case "auto-unlock":', 'case "auto-unlock": root.chatEnqueue(["auto-unlock"])'),
+])
+def test_proof_auto_unlock_rule_catches(path, old, new):
+    assert _auto_unlock_problems(_sources_with(path, old, new))
+
+
+def test_proof_auto_unlock_outside_on_completed_is_caught():
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    "    function later() {\n"
+                    '        if (root.chatStorageMode === "encrypted" && root.chatUnlockSetting === "wallet")\n'
+                    '            root.chatEnqueue(["status", "auto-unlock"])\n    }\n    function chatNext() {')
+    assert _auto_unlock_problems({**_all_code(), _rel(MAIN_QML): code})
+
+
+UNLOCK_WRITE = r"\bcfg_chatVaultUnlock\s*=(?!=)"
+UNLOCK_WALLET_WRITE = r'if\s*\(\s*reply\.ok\s*&&\s*op\s*===\s*"add-key"\s*\)\s*page\.cfg_chatVaultUnlock\s*=\s*"wallet"'
+
+
+def _vault_unlock_key_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        writes = list(re.finditer(rf"\b(\w+)\s*\.\s*cfg_chatVaultUnlock\s*=(?!=)\s*([^\n;]*)", code))
+        bare = _hits(UNLOCK_WRITE, code)
+        if len(bare) != len(writes):
+            problems.append(f"{name}: cfg_chatVaultUnlock is written only as page.cfg_chatVaultUnlock")
+        if base != "configGeneral.qml":
+            problems += [f"{name}:{_line_of(code, match.start())}: only configGeneral.qml sets chatVaultUnlock"
+                         for match in writes]
+        else:
+            values = [(match.group(1), match.group(2).strip()) for match in writes]
+            if not values or any(value not in (("page", '"passphrase"'), ("page", '"wallet"')) for value in values):
+                problems.append(f"{name}: page.cfg_chatVaultUnlock = \"passphrase\" or \"wallet\" only, got {values}")
+            wallet = [value for value in values if value[1] == '"wallet"']
+            if len(wallet) != 1 or len(re.findall(UNLOCK_WALLET_WRITE, code)) != 1:
+                problems.append(f"{name}: \"wallet\" is chosen only inside if (reply.ok && op === \"add-key\")")
+        reads = list(re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*chatVaultUnlock\b", code))
+        if base == "main.qml":
+            good = re.findall(r"\bChatStorage\s*\.\s*normalizeUnlockMethod\s*\(\s*Plasmoid\s*\.\s*configuration"
+                              r"\s*\.\s*chatVaultUnlock\s*\)", code)
+            if len(reads) != 1 or len(good) != 1:
+                problems.append(f"{name}: reads chatVaultUnlock only through ChatStorage.normalizeUnlockMethod(")
+        elif reads:
+            problems.append(f"{name}: only main.qml reads Plasmoid.configuration.chatVaultUnlock")
+    return problems
+
+
+def test_vault_unlock_setting_is_written_only_by_the_general_page():
+    problems = _vault_unlock_key_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (UI / "configGeneral.qml", '        if (reply.ok && op === "add-key")\n            page.cfg_chatVaultUnlock = "wallet"',
+     '        if (op === "add-key")\n            page.cfg_chatVaultUnlock = "wallet"'),
+    (UI / "configGeneral.qml", '            page.cfg_chatVaultUnlock = "passphrase"\n        }',
+     '            page.cfg_chatVaultUnlock = "wallet"\n        }'),
+    (UI / "configGeneral.qml", '            page.cfg_chatVaultUnlock = "passphrase"\n        }',
+     '            page.cfg_chatVaultUnlock = method\n        }'),
+    (UI / "configChat.qml", '    property string cfg_chatVaultUnlockDefault: "passphrase"\n',
+     '    property string cfg_chatVaultUnlockDefault: "passphrase"\n'
+     '    Component.onCompleted: page.cfg_chatVaultUnlock = "wallet"\n'),
+    (MAIN_QML, "ChatStorage.normalizeUnlockMethod(Plasmoid.configuration.chatVaultUnlock)",
+     "Plasmoid.configuration.chatVaultUnlock"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.chatVaultUnlock = \"wallet\" }\n    function chatNext() {"),
+    (FULL_REPRESENTATION, "    property bool showPrompts: false\n",
+     "    property bool showPrompts: false\n    readonly property string m: Plasmoid.configuration.chatVaultUnlock\n"),
+])
+def test_proof_vault_unlock_key_rule_catches(path, old, new):
+    sources = _sources_with(path, old, new)
+    problems = _vault_unlock_key_problems(sources)
+    if path == MAIN_QML and "= \"wallet\"" in new:
+        problems += _main_config_write_offenders(sources[_rel(MAIN_QML)])
+    assert problems
+
+
+def test_proof_vault_unlock_key_in_the_key_set():
+    assert "chatVaultUnlock" in _chat_config_keys()
+    code = _mutated(UI / "configUsage.qml", '    property string cfg_chatVaultUnlockDefault: "passphrase"\n', "")
+    assert not re.findall(r"(?m)^\s*property\s+string\s+cfg_chatVaultUnlockDefault\s*:", code)
+
+
+# --- R4: prompt library and dropped files (plan T4.2) ------------------------------------
+
+PROMPT_FLAGS = ("--prompts", "--read-dropped", "--kind", "--id", "--model", "--none")
+
+
+def _prompt_flag_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        if _base(name) == "PromptLibrary.js":
+            continue
+        for flag in PROMPT_FLAGS:
+            problems += [f"{name}:{line}: {flag} only in PromptLibrary.js"
+                         for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)]
+    return problems
+
+
+def _prompt_library_js_problems(raw):
+    problems = _ollama_js_problems(raw)
+    code = _strip_comments(raw)
+    for pattern, rule in ((r"\bPlasmoid\b", "Plasmoid"), (r"\bconfiguration\b", "configuration"),
+                          (r"\bopenUrlExternally\b", "openUrlExternally")):
+        lines = _hits(pattern, code)
+        if lines:
+            problems.append(f"must not use {rule} (lines {lines})")
+    return problems
+
+
+def test_prompt_flags_only_in_prompt_library_js():
+    problems = _prompt_flag_problems(_all_code())
+    assert not problems, problems
+
+
+def test_prompt_library_js_is_a_pure_library():
+    problems = _prompt_library_js_problems(PROMPT_LIBRARY_JS.read_text(encoding="utf-8"))
+    assert not problems, f"{_rel(PROMPT_LIBRARY_JS)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '    readonly property string c: "python3 -P -m hearthside --prompts list"\n',
+    '    readonly property string c: "--read-dropped 2f"\n',
+    '    readonly property string c: " --model " + "x"\n',
+])
+def test_proof_prompt_flag_rule_catches(snippet):
+    assert _prompt_flag_problems(_sources_with(MAIN_QML, snippet=snippet))
+
+
+@pytest.mark.parametrize("snippet", [
+    "import QtQuick 2.15", ".import \"ChatStorage.js\" as ChatStorage", "function f() { return Qt.platform }",
+    "function f(t) { console.log(t) }", "function f() { return new XMLHttpRequest() }",
+    "function f() { return Plasmoid.configuration.chatSites }",
+])
+def test_proof_prompt_library_js_rule_catches(snippet):
+    raw = PROMPT_LIBRARY_JS.read_text(encoding="utf-8")
+    assert _prompt_library_js_problems(raw.replace(".pragma library\n", ".pragma library\n" + snippet + "\n", 1))
+    assert _prompt_library_js_problems(raw.replace(".pragma library", "", 1))
+
+
+# Dropped data: only drop.hasText/hasUrls/text, drop.urls.length and the one
+# PromptLibrary.hexPath(drop.urls[0]) in each of the two onDropped handlers.
+DROP_DATA_BANS = {
+    "drop.html": r"\b(?:drop|drag)\s*\.\s*html\b",
+    "getDataAsString": r"\bgetDataAsString\b",
+    "getDataAsArrayBuffer": r"\bgetDataAsArrayBuffer\b",
+    "formats": r"\b(?:drop|drag)\s*\.\s*formats\b",
+    "source": r"\b(?:drop|drag)\s*\.\s*source\b",
+    "drag.urls": r"\bdrag\s*\.\s*urls\b",
+}
+HEX_PATH_CALL = r"\bPromptLibrary\.hexPath\(drop\.urls\[0\]\)"
+
+
+def _drop_data_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        for rule, pattern in DROP_DATA_BANS.items():
+            problems += [f"{name}:{line}: {rule} is not read" for line in _hits(pattern, code)]
+        indexed = [match.start() + match.group(0).index("urls")
+                   for match in re.finditer(r"\b(?:drop|drag)\s*\.\s*urls\b(?!\s*\.\s*length\b)", code)]
+        allowed = []
+        for start, body in _blocks(code, DROPPED_HANDLER):
+            brace = code.index("{", start)
+            calls = [brace + match.start() + len("PromptLibrary.hexPath(drop.")
+                     for match in re.finditer(HEX_PATH_CALL, body)]
+            assert all(code[call:call + 4] == "urls" for call in calls)
+            if len(calls) != 1 and _base(name) in ("CompactRepresentation.qml", "OllamaChatView.qml"):
+                problems.append(f"{name}:{_line_of(code, start)}: onDropped reads a file only as "
+                                "PromptLibrary.hexPath(drop.urls[0])")
+            allowed += calls
+        for hit in indexed:
+            if hit not in allowed:
+                problems.append(f"{name}:{_line_of(code, hit)}: drop.urls only as .length and "
+                                "PromptLibrary.hexPath(drop.urls[0])")
+        if _base(name) not in ("CompactRepresentation.qml", "OllamaChatView.qml") and _hits(r"\bhexPath\s*\(", code) \
+                and _base(name) != "PromptLibrary.js":
+            problems.append(f"{name}: hexPath only in the two drop handlers")
+    return problems
+
+
+def test_dropped_data_is_read_only_as_text_or_one_hex_path():
+    problems = _drop_data_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (COMPACT_REPRESENTATION, "PromptLibrary.hexPath(drop.urls[0])", "String(drop.urls[0])"),
+    (COMPACT_REPRESENTATION, "PromptLibrary.hexPath(drop.urls[0])", "PromptLibrary.hexPath(drop.urls[1])"),
+    (OLLAMA_CHAT_VIEW, "drop.hasText ? drop.text : \"\"", "drop.hasHtml ? drop.html : \"\""),
+    (OLLAMA_CHAT_VIEW, "drop.hasText ? drop.text : \"\"", "drop.getDataAsString(\"text/html\")"),
+    (OLLAMA_CHAT_VIEW, "drop.hasText ? drop.text : \"\"", "drop.getDataAsArrayBuffer(\"image/png\")"),
+    (OLLAMA_CHAT_VIEW, "            if (drag.hasText || drag.hasUrls)",
+     "            if (drag.urls[0] || drag.hasText || drag.hasUrls)"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function f(d) { return PromptLibrary.hexPath(d.urls[0]) }\n    function chatNext() {"),
+])
+def test_proof_drop_data_rule_catches(path, old, new):
+    assert _drop_data_problems(_sources_with(path, old, new))
+
+
+# The two helper DataSources of R4: connected once each, from main.qml, and
+# reading only stdout and the exit code.
+LIBRARY_SOURCES = ("librarySource", "droppedSource")
+
+
+def _library_source_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        for source in LIBRARY_SOURCES:
+            calls = _hits(rf"\b{source}\s*\.\s*connectSource\s*\(", code)
+            if _base(name) != "main.qml":
+                problems += [f"{name}:{line}: {source} is used only in main.qml" for line in _hits(rf"\b{source}\b", code)]
+                continue
+            if len(calls) != 1:
+                problems.append(f"{name}: {source}.connectSource( exactly once, found {len(calls)}")
+            blanked = _strip_comments(code, blank_strings=True)
+            spans = _handler_spans(blanked, r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?DataSource\s*\{", source, "onNewData")
+            if len(spans) != 1:
+                problems.append(f"{name}: {source} needs exactly one onNewData")
+                continue
+            body = code[spans[0][0]:spans[0][1]]
+            keys = re.findall(r"\bdata\s*\[\s*\"([^\"]*)\"\s*\]", body)
+            if sorted(set(keys)) != ["exit code", "stdout"] or re.search(r"\bdata\s*(?:\.|\[\s*[^\"\s])", body) \
+                    or re.search(r"stderr", body):
+                problems.append(f"{name}: {source}.onNewData reads only data[\"exit code\"] and data[\"stdout\"]")
+    return problems
+
+
+def test_library_sources_read_only_stdout_and_exit_code():
+    problems = _library_source_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, 'root.libraryFinish(root.libraryOp, data["exit code"], data["stdout"])',
+     'root.libraryFinish(root.libraryOp, data["exit code"], data["stderr"])'),
+    (MAIN_QML, 'root.droppedDone(PromptLibrary.parseDropped(data["exit code"], data["stdout"]))',
+     'root.droppedDone(PromptLibrary.parseDropped(0, data.stdout))'),
+    (MAIN_QML, "        librarySource.connectSource(command)\n",
+     "        librarySource.connectSource(command)\n        librarySource.connectSource(command)\n"),
+    (FULL_REPRESENTATION, "    property bool showPrompts: false\n",
+     "    property bool showPrompts: false\n    function x(c) { droppedSource.connectSource(c) }\n"),
+])
+def test_proof_library_source_rule_catches(path, old, new):
+    assert _library_source_problems(_sources_with(path, old, new))
+
+
+# Clipboard: `.copy()` only inside a `function copyText(`, which is called
+# only from an onClicked handler (a user click).
+CLICK_HANDLER = r"\bonClicked\s*:\s*(?:\([^)]*\)\s*=>\s*|function\s*\([^)]*\)\s*)?"
+
+
+def _click_spans(code):
+    blanked = _strip_comments(code, blank_strings=True)
+    spans = []
+    for match in re.finditer(CLICK_HANDLER, blanked):
+        if blanked[match.end():match.end() + 1] == "{":
+            spans.append((match.end(), _brace_end(blanked, match.end())))
+        else:
+            end = blanked.find("\n", match.end())
+            spans.append((match.end(), len(blanked) if end == -1 else end))
+    return spans
+
+
+def _clipboard_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        blanked = _strip_comments(code, blank_strings=True)
+        functions = [(start, start + len(body)) for start, body in _blocks(code, r"\bfunction\s+copyText\s*\([^)]*\)\s*\{")]
+        for match in re.finditer(r"\.\s*copy\s*\(\s*\)", blanked):
+            if not any(start <= match.start() < end for start, end in functions):
+                problems.append(f"{name}:{_line_of(code, match.start())}: .copy() only inside function copyText")
+        for pattern in (r"\bQt\s*\.\s*application\s*\.\s*clipboard\b", r"\bClipboard\s*\.", r"\bsetClipboard\w*\s*\("):
+            problems += [f"{name}:{line}: no other clipboard API" for line in _hits(pattern, blanked)]
+        clicks = _click_spans(code)
+        for match in re.finditer(r"(?<![\w$])copyText(?![\w$])", blanked):
+            if re.search(r"\bfunction\s+$", blanked[max(0, match.start() - 12):match.start()]):
+                continue
+            if not re.match(r"\s*\(", blanked[match.end():]):
+                problems.append(f"{name}:{_line_of(code, match.start())}: copyText may only be called directly")
+            elif not any(start <= match.start() < end for start, end in clicks):
+                problems.append(f"{name}:{_line_of(code, match.start())}: copyText only from onClicked")
+    return problems
+
+
+def test_clipboard_copies_only_on_a_click():
+    problems = _clipboard_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (PROMPT_LIBRARY_PANEL, "    function remove(entry) {\n",
+     "    function remove(entry) {\n        panel.copyText(entry.text)\n"),
+    (PROMPT_LIBRARY_PANEL, "        panel.copied = true\n", "        panel.copied = true\n        copyHelper.copy()\n"
+                                                           "    }\n    function again() {\n        copyHelper.copy()\n"),
+    (OLLAMA_CHAT_VIEW, "        ollamaView.focusLater()\n    }\n\n    // From the drop areas",
+     "        ollamaView.copyText(text)\n    }\n\n    // From the drop areas"),
+    (OLLAMA_CHAT_VIEW, "onClicked: ollamaView.copyText(segment.content)",
+     "onPressed: ollamaView.copyText(segment.content)"),
+    (FULL_REPRESENTATION, "    property bool showPrompts: false\n",
+     "    property bool showPrompts: false\n    Component.onCompleted: Qt.callLater(ollamaView.copyText, \"x\")\n"),
+])
+def test_proof_clipboard_rule_catches(path, old, new):
+    assert _clipboard_problems(_sources_with(path, old, new))
+
+
+# Library text never meets the configuration: PromptLibrary.js and
+# PromptLibraryPanel.qml do not touch Plasmoid at all (they are also in
+# CHAT_CONFIG_READ_ONLY_FILES and, for the panel, the P4/P5 lists above).
+
+def _library_config_problems(sources):
+    return [
+        f"{name}:{line}: the prompt library never touches Plasmoid"
+        for name, code in sources.items() if _base(name) in ("PromptLibrary.js", "PromptLibraryPanel.qml")
+        for line in _hits(r"\bPlasmoid\b|\bplasmoid\b", code)
+    ]
+
+
+def test_prompt_library_never_touches_the_configuration():
+    assert {"PromptLibrary.js", "PromptLibraryPanel.qml"} <= set(CHAT_CONFIG_READ_ONLY_FILES)
+    assert PROMPT_LIBRARY_PANEL in P4_FILES and PROMPT_LIBRARY_PANEL in P5_FILES
+    problems = _library_config_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("path", [PROMPT_LIBRARY_PANEL, PROMPT_LIBRARY_JS])
+def test_proof_library_config_rule_catches(path):
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix == ".js":
+        code = _strip_comments(raw + "\nfunction f() { return Plasmoid.configuration.chatSites }\n")
+    else:
+        code = _appended(path, "\n    readonly property string s: Plasmoid.configuration.chatSites\n")
+    assert _library_config_problems({_rel(path): code})
+
+
+# set-persona is requested only by FullRepresentation's onPersonaDefaultChosen.
+SET_PERSONA_HANDLER = (r'\bonPersonaDefaultChosen\s*:\s*\(\s*model\s*,\s*id\s*\)\s*=>\s*root\.libraryRequest\s*\(\s*'
+                       r'"set-persona"\s*,')
+
+
+def _set_persona_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        hits = _hits(r"""["']set-persona["']""", code)
+        if _base(name) == "PromptLibrary.js":
+            continue
+        if _base(name) != "FullRepresentation.qml":
+            problems += [f"{name}:{line}: set-persona only from onPersonaDefaultChosen" for line in hits]
+        elif len(hits) != 1 or _hits(SET_PERSONA_HANDLER, code) != hits:
+            problems.append(f"{name}: set-persona once, as onPersonaDefaultChosen: (model, id) => "
+                            "root.libraryRequest(\"set-persona\", ...)")
+    return problems
+
+
+def test_set_persona_only_from_the_persona_default_handler():
+    problems = _set_persona_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "    function chatNext() {",
+     '    function x() { root.libraryRequest("set-persona", { model: "m", id: 1 }) }\n    function chatNext() {'),
+    (FULL_REPRESENTATION, "onPersonaDefaultChosen: (model, id) =>", "onModelNameChanged: (model, id) =>"),
+    (OLLAMA_CHAT_VIEW, "    signal personaDefaultChosen(string model, int id)\n",
+     "    signal personaDefaultChosen(string model, int id)\n    readonly property string op: \"set-persona\"\n"),
+])
+def test_proof_set_persona_rule_catches(path, old, new):
+    assert _set_persona_problems(_sources_with(path, old, new))
