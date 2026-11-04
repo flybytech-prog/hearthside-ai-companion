@@ -312,6 +312,13 @@ TestCase {
         compare(OllamaChat.chatRequestBody("m", [{ role: "system", content: "x" }], "p"), "")
         compare(OllamaChat.chatRequestBody("m", [], "p"), "")
         compare(OllamaChat.MAX_SYSTEM_CHARS, 8000)
+        // With a personality the newest user message starts with the reminder.
+        parsed = JSON.parse(OllamaChat.chatRequestBody("m", history, "Answer in German."))
+        compare(parsed.messages.map(function (m) { return m.content }),
+                ["Answer in German.", "hi", "hello", OllamaChat.PERSONA_REMINDER + "again"])
+        // Without one, nothing is added.
+        parsed = JSON.parse(OllamaChat.chatRequestBody("m", history, "  "))
+        compare(parsed.messages[2].content, "again")
         compare(OllamaChat.ROLES, ["user", "assistant"])
     }
 
@@ -1076,5 +1083,27 @@ TestCase {
         // Typed text plus the drop and the blank line between them count.
         compare(OllamaChat.dropText("x".repeat(max - 4), "ab").ok, true)
         compare(OllamaChat.dropText("x".repeat(max - 3), "ab"), { ok: false, error: "too-long" })
+    }
+
+    function test_withPersonaReminder() {
+        var reminder = OllamaChat.PERSONA_REMINDER
+        compare(reminder, "(Stay in character as described in your instructions.)\n\n")
+        var messages = [{ role: "user", content: "a" }, { role: "assistant", content: "b" },
+                        { role: "user", content: "c" }]
+        var copy = OllamaChat.withPersonaReminder(messages)
+        compare(copy, [{ role: "user", content: "a" }, { role: "assistant", content: "b" },
+                       { role: "user", content: reminder + "c" }])
+        // The input is never changed.
+        compare(messages[2].content, "c")
+        // The last user message, even when a reply follows it.
+        compare(OllamaChat.withPersonaReminder([{ role: "user", content: "q" }, { role: "assistant", content: "r" }])[0].content,
+                reminder + "q")
+        compare(OllamaChat.withPersonaReminder([]), [])
+        compare(OllamaChat.withPersonaReminder(null), [])
+        compare(OllamaChat.withPersonaReminder([{ role: "assistant", content: "x" }]), [{ role: "assistant", content: "x" }])
+        // A prompt at the limit is still sent with the reminder.
+        var full = "x".repeat(OllamaChat.MAX_PROMPT_CHARS)
+        var body = OllamaChat.chatRequestBody("m", [{ role: "user", content: full }], "p")
+        compare(JSON.parse(body).messages[1].content, reminder + full)
     }
 }

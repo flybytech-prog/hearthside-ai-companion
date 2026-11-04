@@ -162,6 +162,24 @@ function endpoint(address, name) {
 
 // --- Requests ---------------------------------------------------------------
 
+// Small models (llama3 8B) drift from a personality after a turn or two; a
+// fixed reminder in front of the newest message keeps them on it. Only the
+// request carries it: the conversation shown and kept has the user's text.
+var PERSONA_REMINDER = "(Stay in character as described in your instructions.)\n\n"
+
+// A copy of messages with PERSONA_REMINDER in front of the last user message.
+function withPersonaReminder(messages) {
+    var list = Array.isArray(messages) ? messages.slice() : []
+    for (var index = list.length - 1; index >= 0; index--) {
+        var message = list[index]
+        if (message && message.role === "user" && typeof message.content === "string") {
+            list[index] = Object.assign({}, message, { content: PERSONA_REMINDER + message.content })
+            break
+        }
+    }
+    return list
+}
+
 function isModelName(name) {
     return typeof name === "string" && /^[A-Za-z0-9._:\/+-]{1,200}$/.test(name)
 }
@@ -169,16 +187,19 @@ function isModelName(name) {
 // The POST /api/chat body, or "" when anything is off. Only role and content
 // are sent; user turns are capped at MAX_PROMPT_CHARS, replies at
 // MAX_REPLY_CHARS. A personality (system, at most MAX_SYSTEM_CHARS) goes
-// first; "", null or undefined means none, anything else odd sends nothing.
+// first, and the newest user message then starts with PERSONA_REMINDER;
+// "", null or undefined means none, anything else odd sends nothing.
 // Nothing else ever carries the system role.
 function chatRequestBody(model, messages, system) {
     if (!isModelName(model) || !Array.isArray(messages) || messages.length === 0)
         return ""
     var clean = []
+    var persona = false
     if (system !== undefined && system !== null && system !== "") {
         if (typeof system !== "string" || system.length > MAX_SYSTEM_CHARS)
             return ""
-        if (system.trim() !== "")
+        persona = system.trim() !== ""
+        if (persona)
             clean.push({ role: "system", content: system })
     }
     for (var index = 0; index < messages.length; index++) {
@@ -191,7 +212,7 @@ function chatRequestBody(model, messages, system) {
             return ""
         clean.push({ role: message.role, content: message.content })
     }
-    return JSON.stringify({ model: model, messages: clean, stream: true })
+    return JSON.stringify({ model: model, messages: persona ? withPersonaReminder(clean) : clean, stream: true })
 }
 
 // Asks Ollama to unload the model (and drop its cache). Carries no prompt.

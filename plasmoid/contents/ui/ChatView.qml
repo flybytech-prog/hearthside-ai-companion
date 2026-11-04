@@ -53,6 +53,9 @@ ColumnLayout {
     property url webSource: Qt.resolvedUrl("ChatWebView.qml")
     // Per-site zoom {siteId: factor}, owned by main.qml.
     property var zoomMap: ({})
+    // Split view (runtime only): a second pane shows siteIdB.
+    property bool splitActive: false
+    property string siteIdB: ""
 
     // create, unlock, private, lock, auto-lock, retry, held-open, clear-saved,
     // open, recheck, dismiss-notice, saved-session
@@ -85,7 +88,15 @@ ColumnLayout {
     readonly property bool dialogOpen: !!chatView.web && chatView.web.dialogOpen
     readonly property bool canGoBack: !!chatView.web && chatView.web.canGoBack
     readonly property bool canOpenExternally: !!chatView.web && chatView.web.canOpenExternally
+    // The site of the pane the user works in (the zoom keys act on it).
+    readonly property string zoomSiteId: chatView.web && typeof chatView.web.activeSiteId === "string"
+        ? chatView.web.activeSiteId : chatView.siteId
+    // Local web UI is shown in either pane: its owner problems and load
+    // failures are said whichever pane has the focus.
     readonly property bool localSite: chatView.siteId === "local"
+        || (!!chatView.web && chatView.web.splitShown === true && chatView.siteIdB === "local")
+    // Split is on but the popup is too narrow for two pages side by side.
+    readonly property bool splitHint: chatView.splitActive && !!chatView.web && chatView.web.splitShown === false
     // Idle = the saved web chat is open but not shown (popup closed, Usage or
     // Ollama shown). idleSince is the wall-clock time it was last shown, so
     // time asleep counts too; 0 while not idle.
@@ -469,6 +480,14 @@ ColumnLayout {
     }
 
     Kirigami.InlineMessage {
+        objectName: "splitHint"
+        Layout.fillWidth: true
+        visible: chatView.splitHint && chatView.card.view === "web"
+        type: Kirigami.MessageType.Information
+        text: i18n("Use the Large popup size for split view")
+    }
+
+    Kirigami.InlineMessage {
         id: localOwnerMessage
         objectName: "localOwnerMessage"
         Layout.fillWidth: true
@@ -602,8 +621,16 @@ ColumnLayout {
         visible: !!chatView.web && chatView.web.pendingDownloadName !== ""
         type: Kirigami.MessageType.Information
         // Wrapped in <p> so the escaped name is always read as rich text.
-        text: "<p>" + i18n("Save \"%1\" to Downloads?",
-            chatView.plainName(chatView.web ? chatView.web.pendingDownloadName : "")) + "</p>"
+        // The site (a fixed catalog name, escaped too) says which pane's
+        // page asked.
+        readonly property string source: chatView.web && chatView.web.pendingDownloadSite
+            ? String(chatView.web.pendingDownloadSite).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            : ""
+        text: "<p>" + (source !== ""
+            ? i18n("Save \"%1\" from %2 to Downloads?",
+                chatView.plainName(chatView.web ? chatView.web.pendingDownloadName : ""), source)
+            : i18n("Save \"%1\" to Downloads?",
+                chatView.plainName(chatView.web ? chatView.web.pendingDownloadName : ""))) + "</p>"
         actions: [
             Kirigami.Action {
                 text: i18n("Save")
@@ -680,6 +707,8 @@ ColumnLayout {
                 webLoader.item.zoomMap = Qt.binding(function () { return chatView.zoomMap })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })
+                webLoader.item.siteIdB = Qt.binding(function () { return chatView.siteIdB })
+                webLoader.item.splitActive = Qt.binding(function () { return chatView.splitActive })
                 chatView.focusLater()
             }
         }

@@ -51,6 +51,12 @@ plasmashell's memory.
   Copilot, Microsoft Copilot or Local web UI (Open WebUI) from a dropdown and
   use the site right there. Choose which sites appear under **Settings →
   Chat**.
+- **Split view**: the Chat toolbar's **Split** button shows a second site
+  next to the first (the same site twice works too), each with its own site
+  picker and zoom; you type in each page yourself. It needs room: with the
+  **Large** popup size (Settings → General → Size) both fit side by side.
+  Two sites use about twice the memory of one; turning Split off closes the
+  second page.
 - **Private by default**: pages run in an in-memory browser profile. You sign
   in on each site normally; nothing is saved to disk, and you are signed out
   when Plasma restarts or you choose **Clear chat data**. Every site

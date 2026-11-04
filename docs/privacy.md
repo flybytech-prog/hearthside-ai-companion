@@ -91,6 +91,18 @@ this check at any time, and sign-in with Google could stop working.
 - **Encrypted**: sign-ins and site data are kept in a passphrase-protected
   folder made with gocryptfs, so you stay signed in across Plasma restarts.
 
+**Split view** (the Chat toolbar's Split button, not saved in the settings)
+shows a second site in a second page of the same profile: same sign-ins,
+same rules (Off or Encrypted, permissions, external-link prompts, sign-in
+windows over the pane that opened them, plain-text notices), and Hearthside
+never scripts either page. The notices and toolbar act on the pane you last
+clicked into. Two sites use about twice the memory of one (each page has
+its own web engine process); turning Split off closes the second page. When
+the popup is too narrow for two pages, only the first is shown: the second
+page (and a sign-in window it opened) stays open but hidden, like a site you
+switched away from, until the popup is wide enough again or Split is turned
+off. A download prompt names the site whose page asked.
+
 There is no plain "save to disk" choice. Qt WebEngine never encrypts cookies
 or site storage itself (it does not use KDE Wallet for them), so a saved
 sign-in would sit on disk as readable text. Hearthside therefore saves
@@ -400,7 +412,10 @@ none of the web profile rules above apply to it; these do:
   way as the conversation. In this version it lives in Plasma's memory only:
   **Clear conversation** keeps it, turning Ollama off in settings or a Plasma
   restart drops it. It is never saved to a file or a setting. Only the first
-  line is shown above the conversation ("Personality: …").
+  line is shown above the conversation ("Personality: …"). While one is
+  active, the newest message in each request also starts with a short fixed
+  reminder, "(Stay in character as described in your instructions.)", which
+  helps small models keep to it; the conversation shown keeps your own text.
 - **Compare.** With **Compare two models** on, each message goes to model A
   and then, once A is done, to model B: two requests, each with its own port
   owner check and its own conversation and personality. Both models then

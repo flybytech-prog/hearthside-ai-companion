@@ -2563,7 +2563,7 @@ def test_tooltip_is_plain_text():
      "                    Kirigami.InlineMessage { text: usage.failureText(providerSection.modelData, 0) }\n"),
     (CONFIG_USAGE, "textFormat: Text.PlainText\n                            text: page.providerStatus(",
      "text: page.providerStatus("),
-    (FULL_REPRESENTATION, "textFormat: Text.PlainText\n                                text: siteDelegate.modelData.name",
+    (FULL_REPRESENTATION, "textFormat: Text.PlainText\n                    text: siteDelegate.modelData.name",
      "text: siteDelegate.modelData.name"),
 ])
 def test_proof_helper_text_rule_catches(path, old, new):
@@ -4728,3 +4728,138 @@ def test_set_persona_only_from_the_persona_default_handler():
 ])
 def test_proof_set_persona_rule_catches(path, old, new):
     assert _set_persona_problems(_sources_with(path, old, new))
+
+
+# Split view: pane b is more Repeater entries in the one shared profile. Every
+# view is created through the two owner-gated appends with its pane, a Local
+# view per pane only after that pane's owner check, pane b views go when split
+# is off, a sign-in window covers its opener's pane, and the one WebEngineView
+# stays inside pageComponent.
+SPLIT_SYNC_APPEND = (r"ChatSites\s*\.\s*localOwnerPort\s*\(\s*\{\s*siteId\s*:\s*wanted\s*,\s*customUrls\s*:\s*"
+                     r"chatWeb\s*\.\s*customUrls\s*,\s*url\s*:\s*home\s*\}\s*\)\s*===\s*0\s*\)\s*"
+                     r"visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*wanted\s*,\s*pane\s*:\s*pane\s*\}\s*\)")
+SPLIT_FINISHED_APPEND = (r'visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*"local"\s*,\s*'
+                         r"pane\s*:\s*pending\s*\.\s*pane\s*\}\s*\)")
+SPLIT_CREATE_GATE = (r"\belse\s+if\s*\(\s*!\s*chatWeb\s*\.\s*ownerPending\s*\)\s*"
+                     r"chatWeb\s*\.\s*checkLocalOwner\s*\(\s*null\s*,\s*home\s*,\s*false\s*,\s*true\s*,\s*pane\s*\)")
+SPLIT_REMOVE = (r"\bif\s*\(\s*chatWeb\s*\.\s*siteIds\s*\.\s*indexOf\s*\(\s*entry\s*\.\s*site\s*\)\s*<\s*0\s*\|\|\s*"
+                r'\(\s*entry\s*\.\s*pane\s*===\s*"b"\s*&&\s*!\s*chatWeb\s*\.\s*splitActive\s*\)\s*\)\s*\{')
+SPLIT_OVERLAY_OPEN = (r"\bchatWeb\s*\.\s*overlayPane\s*=\s*page\s*\.\s*pane\s*;?\s*"
+                      r"chatWeb\s*\.\s*openOverlay\s*\(\s*request\s*,\s*page\s*\.\s*site\s*,\s*"
+                      r"page\s*\.\s*url\s*\.\s*toString\s*\(\s*\)\s*\)")
+SPLIT_CREATE_OBJECT = r"\bvar\s+view\s*=\s*pageComponent\s*\.\s*createObject\s*\(\s*overlayContent\s*,\s*\{([^}]*)\}"
+SPLIT_NAV_CHECK = (r"\bchatWeb\s*\.\s*checkLocalOwner\s*\(\s*page\s*,\s*url\s*,\s*request\s*\.\s*navigationType\s*"
+                   r"===\s*WebEngineNavigationRequest\s*\.\s*FormSubmittedNavigation\s*,\s*false\s*,\s*"
+                   r"page\s*\.\s*pane\s*\)")
+SPLIT_ACTIVE_VIEW = (r"(?m)^\s*readonly\s+property\s+var\s+activeView\s*:\s*chatWeb\s*\.\s*overlayActive\s*\?\s*"
+                     r"chatWeb\s*\.\s*overlayView\s*:\s*chatWeb\s*\.\s*paneView\s*$")
+SPLIT_OVERLAY_ACTIVE = (r"(?m)^\s*readonly\s+property\s+bool\s+overlayActive\s*:\s*chatWeb\s*\.\s*overlayView\s*"
+                        r"!==\s*null\s*&&\s*chatWeb\s*\.\s*overlayPane\s*===\s*chatWeb\s*\.\s*activePane\s*$")
+SPLIT_LOCAL_SITE = (r'(?m)^\s*readonly\s+property\s+bool\s+localSite\s*:\s*chatView\s*\.\s*siteId\s*===\s*"local"\s*'
+                    r"\|\|\s*\(\s*!!\s*chatView\s*\.\s*web\s*&&\s*chatView\s*\.\s*web\s*\.\s*splitShown\s*===\s*true"
+                    r'\s*&&\s*chatView\s*\.\s*siteIdB\s*===\s*"local"\s*\)\s*$')
+SPLIT_OWNER_MESSAGE_VISIBLE = r'(?m)^\s*visible\s*:\s*chatView\s*\.\s*localSite\s*&&\s*code\s*!==\s*""\s*$'
+
+
+def _split_view_problems(web, view):
+    problems = []
+    sync = _function_body(web, "syncViews") or ""
+    finished = _function_body(web, "localOwnerFinished") or ""
+    # 1. Exactly two appends, each with its pane, in their owner-gated places.
+    appends = list(re.finditer(r"visitedSites\s*\.\s*append\s*\(", web))
+    if len(appends) != 2 or len(re.findall(SPLIT_SYNC_APPEND, sync)) != 1 \
+            or len(re.findall(SPLIT_FINISHED_APPEND, finished)) != 1:
+        problems.append("visitedSites.append exactly twice: `{ site: wanted, pane: pane }` in syncViews behind "
+                        "`localOwnerPort({ siteId: wanted, ... url: home }) === 0` and "
+                        "`{ site: \"local\", pane: pending.pane }` in localOwnerFinished")
+    for match in appends:
+        literal = re.match(r"visitedSites\s*\.\s*append\s*\(\s*\{([^}]*)\}", web[match.start():])
+        if not literal or not re.search(r"\bpane\s*:", literal.group(1)):
+            problems.append(f"line {_line_of(web, match.start())}: every visitedSites.append carries `pane:`")
+    # 2. A Local view is created only after its own check, one check at a time.
+    if len(re.findall(r"\bcheckLocalOwner\s*\(", sync)) != 1 or len(re.findall(SPLIT_CREATE_GATE, sync)) != 1:
+        problems.append("syncViews runs checkLocalOwner(null, home, false, true, pane) only behind "
+                        "`else if (!chatWeb.ownerPending)`")
+    # 3. Pane b views go once split is off.
+    if len(re.findall(SPLIT_REMOVE, sync)) != 1:
+        problems.append("syncViews must drop entries of disabled sites and every pane b entry when split is off")
+    # 4. A sign-in window covers its opener's pane; one createObject, one WebEngineView.
+    assignments = _hits(r"\boverlayPane\s*=(?!=)", web)
+    if len(assignments) != 1 or len(re.findall(SPLIT_OVERLAY_OPEN, web)) != 1 \
+            or len(re.findall(r"\bopenOverlay\s*\(", web)) != 2:
+        problems.append("overlayPane is set only as `chatWeb.overlayPane = page.pane` right before the one "
+                        "chatWeb.openOverlay(request, page.site, page.url.toString())")
+    created = re.search(SPLIT_CREATE_OBJECT, web)
+    if len(re.findall(r"\bcreateObject\s*\(", web)) != 1 or not created \
+            or not re.search(r"\bpane\s*:\s*chatWeb\s*\.\s*overlayPane\s*,", created.group(1)) \
+            or not re.search(r"\bisOverlay\s*:\s*true\s*,", created.group(1)):
+        problems.append("pageComponent.createObject only once, in openOverlay, with "
+                        "`pane: chatWeb.overlayPane` and `isOverlay: true`")
+    components = [body for _, body in _blocks(web, r"\bComponent\s*\{")
+                  if re.search(r"(?m)^\s*id\s*:\s*pageComponent\s*$", body)]
+    if len(_hits(r"\bWebEngineView\s*\{", web)) != 1 or len(components) != 1 \
+            or len(_hits(r"\bWebEngineView\s*\{", components[0])) != 1:
+        problems.append("exactly one `WebEngineView {`, inside the pageComponent Component")
+    # 5. The navigation gate checks for the page's own pane.
+    nav = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(nav) != 1 or len(re.findall(SPLIT_NAV_CHECK, nav[0])) != 1 \
+            or len(re.findall(r"\bcheckLocalOwner\s*\(", web)) != 3:
+        problems.append("onNavigationRequested passes page.pane: checkLocalOwner(page, url, ..., false, page.pane)")
+    # 7. The toolbar acts on a sign-in window only when it covers the active pane.
+    if len(_hits(SPLIT_ACTIVE_VIEW, web)) != 1 or len(_hits(r"\bproperty\s+var\s+activeView\b", web)) != 1:
+        problems.append("activeView: chatWeb.overlayActive ? chatWeb.overlayView : chatWeb.paneView")
+    if len(_hits(SPLIT_OVERLAY_ACTIVE, web)) != 1 or len(_hits(r"\bproperty\s+bool\s+overlayActive\b", web)) != 1:
+        problems.append("overlayActive: chatWeb.overlayView !== null && chatWeb.overlayPane === chatWeb.activePane")
+    # 6. ChatView.qml: the owner message shows for a Local site in either pane.
+    if len(_hits(SPLIT_LOCAL_SITE, view)) != 1 or len(_hits(r"\bproperty\s+bool\s+localSite\b", view)) != 1:
+        problems.append("ChatView.qml: localSite must cover pane a and a shown pane b")
+    messages = [body for _, body in _blocks(view, r"\bKirigami\s*\.\s*InlineMessage\s*\{")
+                if re.search(r"(?m)^\s*id\s*:\s*localOwnerMessage\s*$", body)]
+    first_visible = re.search(r"(?m)^\s*visible\s*:", messages[0]) if len(messages) == 1 else None
+    if not first_visible or not re.match(SPLIT_OWNER_MESSAGE_VISIBLE, messages[0][first_visible.start():]):
+        problems.append("ChatView.qml: localOwnerMessage keeps `visible: chatView.localSite && code !== \"\"`")
+    return problems
+
+
+def test_split_view_panes_share_the_gated_views():
+    problems = _split_view_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_VIEW))
+    assert not problems, problems
+
+
+SPLIT_MUTATIONS = [
+    (CHAT_WEB_VIEW, "visitedSites.append({ site: wanted, pane: pane })", "visitedSites.append({ site: wanted })"),
+    (CHAT_WEB_VIEW, 'visitedSites.append({ site: "local", pane: pending.pane })',
+     'visitedSites.append({ site: "local" })'),
+    (CHAT_WEB_VIEW, "visitedSites.append({ site: wanted, pane: pane })",
+     'visitedSites.append({ site: wanted, pane: "b" })'),
+    (CHAT_WEB_VIEW, 'visitedSites.append({ site: "local", pane: pending.pane })',
+     'visitedSites.append({ site: "local", pane: "b" })'),
+    (CHAT_WEB_VIEW, "    function retryLocalOwner() {\n",
+     "    function retryLocalOwner() {\n        visitedSites.append({ site: chatWeb.siteIdB, pane: \"b\" })\n"),
+    (CHAT_WEB_VIEW, "            else if (!chatWeb.ownerPending)\n", "            else\n"),
+    (CHAT_WEB_VIEW, '(chatWeb.siteIds.indexOf(entry.site) < 0 || (entry.pane === "b" && !chatWeb.splitActive)) {',
+     "(chatWeb.siteIds.indexOf(entry.site) < 0) {"),
+    (CHAT_WEB_VIEW, "chatWeb.overlayPane = page.pane", 'chatWeb.overlayPane = "a"'),
+    (CHAT_WEB_VIEW, "    function retryLocalOwner() {\n",
+     "    function retryLocalOwner() {\n        pageComponent.createObject(paneAreaB, { site: \"local\", pane: \"b\" })\n"),
+    (CHAT_WEB_VIEW, "    ListModel {\n        id: visitedSites\n",
+     "    WebEngineView { profile: chatProfile }\n    ListModel {\n        id: visitedSites\n"),
+    (CHAT_WEB_VIEW, "=== WebEngineNavigationRequest.FormSubmittedNavigation, false, page.pane)",
+     "=== WebEngineNavigationRequest.FormSubmittedNavigation, false)"),
+    (CHAT_WEB_VIEW, "activeView: chatWeb.overlayActive ? chatWeb.overlayView : chatWeb.paneView",
+     "activeView: chatWeb.overlayView || chatWeb.paneView"),
+    (CHAT_WEB_VIEW, "chatWeb.overlayView !== null && chatWeb.overlayPane === chatWeb.activePane",
+     "chatWeb.overlayView !== null"),
+    (CHAT_VIEW, 'chatView.siteId === "local"\n'
+     '        || (!!chatView.web && chatView.web.splitShown === true && chatView.siteIdB === "local")',
+     'chatView.zoomSiteId === "local"'),
+    (CHAT_VIEW, 'visible: chatView.localSite && code !== ""', 'visible: code !== ""'),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), SPLIT_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(SPLIT_MUTATIONS)])
+def test_proof_split_view_rule_catches(path, old, new):
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    view = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    assert _split_view_problems(web, view)

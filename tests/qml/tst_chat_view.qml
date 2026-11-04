@@ -620,4 +620,66 @@ TestCase {
         view.card = {view: "create", message: ""}
         verify(!note.visible)
     }
+
+    // --- split view ---------------------------------------------------------------
+
+    function test_splitIsPassedOnAndHintedWhenNarrow() {
+        var view = make({ current: true, siteIds: ["claude", "chatgpt"], siteId: "claude" })
+        tryVerify(function () { return view.web !== null })
+        view.siteIdB = "chatgpt"
+        view.splitActive = true
+        compare(view.web.siteIdB, "chatgpt")
+        compare(view.web.splitActive, true)
+        // The stub is "too narrow" below 600 px.
+        var hint = findChild(view, "splitHint")
+        verify(view.web.width < 600)
+        verify(hint.visible)
+        compare(hint.text, "Use the Large popup size for split view")
+        view.splitActive = false
+        verify(!hint.visible)
+        compare(view.web.splitActive, false)
+    }
+
+    function test_zoomKeysAskForThePaneInUse() {
+        var view = make({ current: true, siteIds: ["claude", "chatgpt"], siteId: "claude" })
+        tryVerify(function () { return view.web !== null })
+        compare(view.zoomSiteId, "claude")
+        view.web.activeSiteId = "chatgpt"
+        compare(view.zoomSiteId, "chatgpt")
+    }
+
+    // M2: an owner problem of the pane without focus still shows.
+    function test_splitLocalProblemInTheOtherPaneShows() {
+        var view = make({ current: true, siteIds: ["claude", "local"], siteId: "claude" })
+        tryVerify(function () { return view.web !== null })
+        view.siteIdB = "local"
+        view.splitActive = true
+        view.web.splitShown = true
+        compare(view.zoomSiteId, "claude")
+        view.web.localOwnerProblem = "other"
+        verify(findChild(view, "localOwnerMessage").visible)
+        // Only pane a shown (too narrow): pane b's Local isn't on screen.
+        view.web.splitShown = false
+        verify(!findChild(view, "localOwnerMessage").visible)
+    }
+
+    // S2: the download prompt names the site that asked.
+    function test_downloadPromptNamesTheSite() {
+        var view = make({ current: true, siteIds: ["claude"], siteId: "claude" })
+        tryVerify(function () { return view.web !== null })
+        view.web.pendingDownloadName = "notes.txt"
+        view.web.pendingDownloadSite = "Claude"
+        var items = []
+        var found = ""
+        var stack = [view]
+        while (stack.length > 0) {
+            var item = stack.pop()
+            if (typeof item.text === "string" && item.text.indexOf("notes.txt") >= 0 && item.visible)
+                found = item.text
+            var kids = item.children || []
+            for (var index = 0; index < kids.length; index++)
+                stack.push(kids[index])
+        }
+        verify(found.indexOf("from Claude to Downloads?") >= 0, found)
+    }
 }

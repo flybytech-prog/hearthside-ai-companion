@@ -2,6 +2,7 @@ import QtQuick
 import QtTest
 import org.kde.kirigami as Kirigami
 import "../../plasmoid/contents/ui"
+import "../../plasmoid/contents/ui/OllamaChat.js" as OllamaChat
 
 // OllamaChatView with a fake XMLHttpRequest (createRequest) and a fake port
 // owner helper (runOwnerCheck). Nothing here opens a socket.
@@ -1425,7 +1426,8 @@ TestCase {
         var sent = messagesOf(first)
         compare(sent[0], { role: "system", content: "Answer in German.\nBriefly." })
         compare(sent.filter(function (m) { return m.role === "system" }).length, 1)
-        compare(sent[1], { role: "user", content: "Hi" })
+        // With a personality the newest message carries the fixed reminder.
+        compare(sent[1], { role: "user", content: OllamaChat.PERSONA_REMINDER + "Hi" })
         reply(first, "Hallo")
         // The note above the transcript shows the first line, as plain text.
         var note = findChild(view, "personaLine")
@@ -1487,7 +1489,7 @@ TestCase {
         compare(messagesOf(again), [
             { role: "system", content: "Short answers" },
             { role: "user", content: "First" }, { role: "assistant", content: "One" },
-            { role: "user", content: "Second" }
+            { role: "user", content: OllamaChat.PERSONA_REMINDER + "Second" }
         ])
         compare(view.messages.count, 4)
         compare(view.messages.get(3).body, "")
@@ -1577,7 +1579,7 @@ TestCase {
         var b = testCase.requests[3]
         compare(JSON.parse(b.body).model, "qwen3:8b")
         compare(messagesOf(b), [{ role: "system", content: "Persona B" },
-                                { role: "user", content: "Same question" }])
+                                { role: "user", content: OllamaChat.PERSONA_REMINDER + "Same question" }])
         verify(view.generating)
         reply(b, "Answer B")
         verify(!view.generating)
@@ -1591,7 +1593,7 @@ TestCase {
         reply(a2, "A2")
         var b2 = testCase.requests[testCase.requests.length - 1]
         compare(messagesOf(b2).map(function (m) { return m.content }),
-                ["Persona B", "Same question", "Answer B", "Next"])
+                ["Persona B", "Same question", "Answer B", OllamaChat.PERSONA_REMINDER + "Next"])
         // Model B's pane shows its model name, as plain text.
         var label = null
         var items = []
@@ -2017,5 +2019,56 @@ TestCase {
         view.editLast()
         compare(view.messages.count, 2)
         compare(view.messagesB.count, 2)
+    }
+
+    // --- Task 1: the user's flow, typed with the keyboard -----------------------------
+
+    // Open Personality, type, close, send: the body starts with that
+    // personality as the system message (and the conversation shows the
+    // plain message).
+    function typedPersonaIsSent(lockFirst) {
+        var wrapper = ready()
+        var view = wrapper.view
+        if (lockFirst) {
+            // Stay signed in → Encrypted: the folder was unlocked, then locked.
+            view.libraryOpen = true
+            view.libraryItems = [{ id: 4, kind: "persona", text: "Saved" }]
+            view.libraryOpen = false
+            view.libraryItems = []
+        }
+        view.editingPersona = true
+        var field = findChild(view, "personaInput")
+        tryVerify(function () { return field.activeFocus })
+        keyClick("B"); keyClick("e"); keyClick(Qt.Key_Space); keyClick("b"); keyClick("r"); keyClick("i")
+        keyClick("e"); keyClick("f"); keyClick(Qt.Key_Period)
+        compare(field.text, "Be brief.")
+        view.editingPersona = false
+        var box = input(view)
+        tryVerify(function () { return box.activeFocus })
+        keyClick("H"); keyClick("i")
+        var before = testCase.requests.length
+        keyClick(Qt.Key_Return)
+        compare(testCase.requests.length, before + 1)
+        var sent = messagesOf(testCase.requests[before])
+        compare(sent[0], { role: "system", content: "Be brief." })
+        compare(sent.map(function (m) { return m.role }), ["system", "user"])
+        compare(sent[1].content, OllamaChat.PERSONA_REMINDER + "Hi")
+        compare(view.messages.get(0).body, "Hi")
+        reply(testCase.requests[before], "Ok.")
+        // The next turn keeps it; only the newest message has the reminder.
+        keyClick("Y"); keyClick(Qt.Key_Return)
+        var next = messagesOf(testCase.requests[testCase.requests.length - 1])
+        compare(next.map(function (m) { return m.role }), ["system", "user", "assistant", "user"])
+        compare(next[0].content, "Be brief.")
+        compare(next[1].content, "Hi")
+        compare(next[3].content, OllamaChat.PERSONA_REMINDER + "Y")
+    }
+
+    function test_typedPersonaIsSentWithTheFolderOff() {
+        typedPersonaIsSent(false)
+    }
+
+    function test_typedPersonaIsSentWithTheFolderLocked() {
+        typedPersonaIsSent(true)
     }
 }

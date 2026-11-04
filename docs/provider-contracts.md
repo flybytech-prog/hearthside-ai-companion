@@ -326,7 +326,11 @@ blank, null or undefined) sends no system message; a longer one, or a
 non-string, sends nothing at all (Send is disabled). The history never
 carries the system role (`ROLES` is user and assistant; a history message
 with any other role makes the body empty). llama3 obeys it (spike O1, Ollama
-0.40.13).
+0.40.13), but drifts away from it in longer conversations, so with a
+personality the newest user message is sent as
+`OllamaChat.PERSONA_REMINDER` ("(Stay in character as described in your
+instructions.)" and a blank line) followed by the text
+(`withPersonaReminder`); earlier turns are sent as typed.
 
 Compare runs the two models one after the other, never at once: model A's
 request, then model B's with B's own history and personality. Stop aborts

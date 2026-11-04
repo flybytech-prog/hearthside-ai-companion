@@ -26,6 +26,39 @@ PlasmaExtras.Representation {
         root.popupScale
     )
 
+    // The chat site picker (fixed catalog names and icons).
+    component SitePicker: PlasmaComponents.ComboBox {
+        id: sitePicker
+        Layout.fillWidth: true
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 5
+        textRole: "name"
+        valueRole: "id"
+
+        delegate: PlasmaComponents.ItemDelegate {
+            id: siteDelegate
+            required property var modelData
+            required property int index
+            width: ListView.view ? ListView.view.width : implicitWidth
+            highlighted: sitePicker.highlightedIndex === siteDelegate.index
+            contentItem: RowLayout {
+                spacing: Kirigami.Units.smallSpacing
+                Kirigami.Icon {
+                    source: Qt.resolvedUrl("../images/" + siteDelegate.modelData.icon)
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    isMask: true
+                    color: Kirigami.Theme.textColor
+                }
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    text: siteDelegate.modelData.name
+                    elide: Text.ElideRight
+                }
+            }
+        }
+    }
+
     // Ollama's model picker; model names come from the server, so its
     // delegate shows them as plain text only.
     component ModelPicker: PlasmaComponents.ComboBox {
@@ -206,39 +239,21 @@ PlasmaExtras.Representation {
                 visible: full.onChat
                 spacing: Kirigami.Units.smallSpacing
 
-                PlasmaComponents.ComboBox {
+                SitePicker {
                     id: siteCombo
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: Kirigami.Units.gridUnit * 5
                     model: root.chatSites
-                    textRole: "name"
-                    valueRole: "id"
                     currentIndex: root.chatSiteIds.indexOf(root.chatSiteId)
                     onActivated: root.chatSiteId = currentValue
-
-                    delegate: PlasmaComponents.ItemDelegate {
-                        id: siteDelegate
-                        required property var modelData
-                        required property int index
-                        width: ListView.view ? ListView.view.width : implicitWidth
-                        highlighted: siteCombo.highlightedIndex === siteDelegate.index
-                        contentItem: RowLayout {
-                            spacing: Kirigami.Units.smallSpacing
-                            Kirigami.Icon {
-                                source: Qt.resolvedUrl("../images/" + siteDelegate.modelData.icon)
-                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
-                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                                isMask: true
-                                color: Kirigami.Theme.textColor
-                            }
-                            PlasmaComponents.Label {
-                                Layout.fillWidth: true
-                                textFormat: Text.PlainText
-                                text: siteDelegate.modelData.name
-                                elide: Text.ElideRight
-                            }
-                        }
-                    }
+                }
+                // Split view: the site of the second pane.
+                SitePicker {
+                    id: siteComboB
+                    objectName: "siteComboB"
+                    visible: !full.onOllama && root.chatSplit
+                    model: root.chatSplitSites
+                    currentIndex: root.chatSplitSites.map(function (site) { return site.id }).indexOf(root.chatSiteIdB)
+                    onActivated: root.chatSiteIdB = currentValue
+                    Accessible.name: i18n("Second site")
                 }
                 ModelPicker {
                     id: modelCombo
@@ -296,6 +311,21 @@ PlasmaExtras.Representation {
                     text: i18n("Compare two models")
                     onClicked: ollamaView.setComparing(!ollamaView.comparing)
                     QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered
+                }
+                // Split view: a second site next to the first (runtime only).
+                PlasmaComponents.ToolButton {
+                    objectName: "splitButton"
+                    icon.name: "view-split-left-right"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama
+                    // Needs at least two enabled web sites.
+                    enabled: root.chatSplit || root.chatSplitSites.length >= 2
+                    checked: root.chatSplit
+                    text: i18n("Split")
+                    onClicked: root.setChatSplit(!root.chatSplit)
+                    QQC2.ToolTip.text: enabled ? i18n("Show two sites side by side")
+                        : i18n("Enable a second chat site in Settings → Chat to use split view")
                     QQC2.ToolTip.visible: hovered
                 }
                 PlasmaComponents.ToolButton {
@@ -433,7 +463,10 @@ PlasmaExtras.Representation {
                     storageBusy: root.chatStorageBusy || root.chatDialogOpen
                     zoomMap: root.chatZoom
                     onStorageRequest: (action) => root.chatStorageRequest(action)
-                    onZoomRequested: (direction) => root.stepSiteZoom(chatView.siteId, direction)
+                    splitActive: root.chatSplit
+                    siteIdB: root.chatSiteIdB
+                    // The pane in use (split view: the one last focused).
+                    onZoomRequested: (direction) => root.stepSiteZoom(chatView.zoomSiteId, direction)
                     onSiteZoomRequested: (siteId, factor) => root.setSiteZoom(siteId, factor)
                 }
 

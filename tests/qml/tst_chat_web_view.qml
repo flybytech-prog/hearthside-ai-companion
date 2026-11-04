@@ -355,4 +355,146 @@ TestCase {
         wait(100)
         compare(asked, 1)
     }
+
+    // --- split view ---------------------------------------------------------------
+
+    // Pane a and pane b both on the Local site (nothing listens on port 9).
+    function splitViews() {
+        var web = localView({})
+        // The test window is narrow; pages side by side from 300 px here.
+        web.splitMinWidth = 300
+        web.siteIdB = "local"
+        web.splitActive = true
+        // Pane b's Local view goes through its own owner check, too.
+        waitForCheck(2)
+        compare(web.currentViewB, null)
+        answer(web, "self")
+        verify(web.currentViewB !== null)
+        return web
+    }
+
+    function test_splitCreatesAndDestroysPaneB() {
+        var web = splitViews()
+        var a = web.currentView
+        var b = web.currentViewB
+        verify(a !== b)
+        compare(a.pane, "a")
+        compare(b.pane, "b")
+        verify(web.splitShown)
+        verify(a.visible && b.visible)
+        // Side by side: b in the right half.
+        verify(b.mapToItem(web, 0, 0).x >= web.width / 2 - 1)
+        verify(a.width < web.width && b.width < web.width)
+        // Both pages share the one profile.
+        verify(a.profile === b.profile)
+        // Split off: pane b's page is destroyed, a keeps its page.
+        web.splitActive = false
+        compare(web.currentViewB, null)
+        compare(web.currentView, a)
+        tryVerify(function () { return web.viewFor("local", "b") === null })
+        compare(a.width, web.width)
+        compare(testCase.commands.length, 2)
+    }
+
+    function test_splitPaneFocusDrivesTheToolbarAndZoom() {
+        var web = splitViews()
+        compare(web.activePane, "a")
+        compare(web.paneView, web.currentView)
+        web.currentViewB.forceActiveFocus()
+        tryCompare(web, "focusedPane", "b")
+        compare(web.activePane, "b")
+        compare(web.paneView, web.currentViewB)
+        compare(web.activeSiteId, "local")
+        web.currentView.forceActiveFocus()
+        tryCompare(web, "focusedPane", "a")
+        // Each pane's page has its own Chromium zoom, reported for its site.
+        var asked = []
+        web.siteZoomRequested.connect(function (siteId, factor) { asked.push([siteId, factor]) })
+        web.currentViewB.zoomFactor = 1.05
+        tryVerify(function () { return asked.length === 1 })
+        compare(asked[0], ["local", 1.1])
+        fuzzyCompare(web.currentView.zoomFactor, 1.0, 0.001)
+    }
+
+    function test_splitTooNarrowShowsPaneAOnly() {
+        var web = splitViews()
+        web.currentViewB.forceActiveFocus()
+        tryCompare(web, "focusedPane", "b")
+        web.splitMinWidth = 100000
+        verify(!web.splitShown)
+        verify(!web.currentViewB.visible)
+        compare(web.currentView.width, web.width)
+        // The toolbar acts on pane a again.
+        compare(web.activePane, "a")
+        compare(web.paneView, web.currentView)
+    }
+
+    // M1: pane a's navigation check replaces pane b's create check; pane b's
+    // view is still created once it is done.
+    function test_splitCreateCheckSurvivesANavigationCheck() {
+        var web = localView({})
+        web.splitMinWidth = 300
+        web.siteIdB = "local"
+        web.splitActive = true
+        waitForCheck(2)
+        // Pane a navigates to this computer before pane b's answer came.
+        web.currentView.url = testCase.home + "chat"
+        waitForCheck(3)
+        answer(web, "self")
+        compare(web.currentViewB, null)
+        // Pane b's create check runs again, then its view comes.
+        waitForCheck(4)
+        answer(web, "self")
+        verify(web.currentViewB !== null)
+        compare(web.currentViewB.pane, "b")
+    }
+
+    // S1 / N1: a sign-in window belongs to its pane.
+    function test_splitSignInWindowStaysWithItsPane() {
+        var web = splitViews()
+        web.currentViewB.forceActiveFocus()
+        tryCompare(web, "focusedPane", "b")
+        web.overlayPane = "b"
+        web.openOverlay({ openIn: function (view) {} }, "local", "about:blank")
+        verify(web.overlayOpen)
+        compare(web.activeView, web.overlayView)
+        // Pane a's toolbar and notices stay with pane a's page.
+        web.currentView.forceActiveFocus()
+        tryCompare(web, "focusedPane", "a")
+        compare(web.activeView, web.currentView)
+        // Home in pane a leaves pane b's window open.
+        web.home()
+        verify(web.overlayOpen)
+        // Too narrow: pane b's window hides with pane b, never over pane a.
+        var overlay = null
+        for (var index = 0; index < web.children.length; index++) {
+            if (web.children[index].objectName === "signInOverlay")
+                overlay = web.children[index]
+        }
+        verify(overlay !== null)
+        verify(overlay.visible)
+        verify(overlay.mapToItem(web, 0, 0).x >= web.width / 2 - 1)
+        web.splitMinWidth = 100000
+        verify(!overlay.visible)
+        verify(web.overlayOpen)
+        web.splitMinWidth = 300
+        verify(overlay.visible)
+        web.closeOverlay()
+    }
+
+    // S3: a new site in pane b drops a waiting prompt.
+    function test_splitSiteChangeClearsPrompts() {
+        var web = splitViews()
+        web.externalPromptGap = 0
+        web.externalQuietUntil = 0
+        web.askExternal("https://example.org/x")
+        compare(web.externalHost, "example.org")
+        web.passkeyNotice = true
+        web.siteIds = ["local", "claude"]
+        web.siteIdB = "claude"
+        compare(web.externalUrl, "")
+        verify(!web.passkeyNotice)
+        // Back to Local before anything loads from the network.
+        web.splitActive = false
+    }
 }

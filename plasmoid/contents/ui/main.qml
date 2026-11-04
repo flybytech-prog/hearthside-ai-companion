@@ -65,6 +65,13 @@ PlasmoidItem {
         return id !== OllamaChat.ENTRY.id
     })
     property string chatWebSiteId: ""
+    // Split view, runtime only: a second web pane with its own site.
+    property bool chatSplit: false
+    property string chatSiteIdB: ""
+    // Its sites: the enabled web sites.
+    readonly property var chatSplitSites: root.chatSites.filter(function (site) {
+        return site.id !== OllamaChat.ENTRY.id
+    })
     // Validated loopback address; anything odd → the default.
     readonly property string chatOllamaAddress:
         OllamaChat.effectiveAddress(Plasmoid.configuration.chatOllamaUrl)
@@ -429,6 +436,21 @@ PlasmoidItem {
             }
         }
         root.snapshot = Object.assign({}, root.snapshot, {providers: visible})
+    }
+
+    // Turns split view on or off; pane b starts on another site than pane a.
+    function setChatSplit(on) {
+        root.chatSplit = on === true
+        if (root.chatSplit)
+            root.syncSplitSite()
+    }
+
+    function syncSplitSite() {
+        var ids = root.chatSplitSites.map(function (site) { return site.id })
+        if (ids.indexOf(root.chatSiteIdB) >= 0)
+            return
+        var other = ids.filter(function (id) { return id !== root.chatWebSiteId })
+        root.chatSiteIdB = other.length > 0 ? other[0] : (ids.length > 0 ? ids[0] : "")
     }
 
     function syncChatSite() {
@@ -1191,7 +1213,11 @@ PlasmoidItem {
                 root.chatEnqueue(["status"])
         }
     }
-    onChatSiteIdsChanged: root.syncChatSite()
+    onChatSiteIdsChanged: {
+        root.syncChatSite()
+        if (root.chatSplit)
+            root.syncSplitSite()
+    }
     // Settings → General → Open on.
     readonly property string configuredDefaultTab:
         SettingsLogic.normalizeDefaultTab(Plasmoid.configuration.popupDefaultTab)

@@ -8,6 +8,10 @@ Item {
     property string profileName: ""
     property var siteIds: []
     property string siteId: ""
+    property string siteIdB: ""
+    property bool splitActive: false
+    property bool splitShown: splitActive && width >= 600
+    property string activeSiteId: siteId
     property var customUrls: ({})
     property var zoomMap: ({})
     property bool dialogOpen: false
@@ -16,6 +20,7 @@ Item {
     property bool loading: false
     property real loadProgress: 0
     property string pendingDownloadName: ""
+    property string pendingDownloadSite: ""
     property bool passkeyNotice: false
     property bool pageCrashed: false
     property bool pageFailed: false

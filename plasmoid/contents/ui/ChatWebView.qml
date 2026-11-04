@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Window
 import QtWebEngine
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
@@ -21,6 +22,11 @@ import "SettingsLogic.js" as SettingsLogic
 // port belongs to this user or the system (LocalOwnerCheck): before the
 // Local view is created and before each of its main-frame navigations to
 // this computer. Anything else loads nothing and shows a message instead.
+//
+// Split view: a second pane (b) shows siteIdB next to the first, with its
+// own pages, in the same profile (one set of sign-ins). Its pages exist
+// only while split is on and are destroyed when it is turned off. Every
+// rule below holds for both panes; the pages are never scripted.
 //
 // A page never opens the system browser by itself: an address it hands over
 // (a clicked link off the site, a clicked window) only asks "Open <host> in
@@ -50,9 +56,28 @@ Item {
     // stores factor, a ZOOM_STEPS value, for siteId. Never written here.
     signal siteZoomRequested(string siteId, real factor)
 
+    // Split view (runtime only): pane b shows siteIdB. Below splitMinWidth
+    // only pane a is shown (its pages stay).
+    property bool splitActive: false
+    property string siteIdB: ""
+    property real splitMinWidth: Kirigami.Units.gridUnit * 40
+    readonly property bool splitShown: chatWeb.splitActive && chatWeb.width >= chatWeb.splitMinWidth
+    // The pane the toolbar, the zoom keys and the notices act on: the one
+    // that last had the keyboard focus.
+    property string focusedPane: "a"
+    readonly property string activePane: chatWeb.splitShown && chatWeb.focusedPane === "b" ? "b" : "a"
+    readonly property string activeSiteId: chatWeb.activePane === "b" ? chatWeb.siteIdB : chatWeb.siteId
+    // The pane whose page opened the sign-in window; it covers that pane.
+    property string overlayPane: "a"
+
     property var currentView: null
+    property var currentViewB: null
+    readonly property var paneView: chatWeb.activePane === "b" ? chatWeb.currentViewB : chatWeb.currentView
     readonly property bool overlayOpen: chatWeb.overlayView !== null
-    readonly property var activeView: chatWeb.overlayView || chatWeb.currentView
+    // The sign-in window counts only for the pane it belongs to; the other
+    // pane's toolbar and notices stay with that pane's page.
+    readonly property bool overlayActive: chatWeb.overlayView !== null && chatWeb.overlayPane === chatWeb.activePane
+    readonly property var activeView: chatWeb.overlayActive ? chatWeb.overlayView : chatWeb.paneView
     readonly property bool canGoBack: !!chatWeb.activeView && chatWeb.activeView.canGoBack
     readonly property bool loading: !!chatWeb.activeView && chatWeb.activeView.loading
     readonly property real loadProgress: chatWeb.activeView
@@ -112,6 +137,10 @@ Item {
     property var overlayView: null
     property var pendingDownload: null
     property string pendingDownloadName: ""
+    // The catalog name of the site whose page started it ("" if unknown).
+    property string pendingDownloadSite: ""
+    // The page a pending upload dialog belongs to.
+    property var uploadView: null
 
     // The profile's own user agent (QtWebEngine token stripped) and client
     // hints, captured once; restored whenever no page is on Google sign-in.
@@ -133,10 +162,11 @@ Item {
     }
 
     function home() {
-        chatWeb.closeOverlay()
-        var url = ChatSites.homeUrl(chatWeb.siteId, chatWeb.customUrls)
-        if (chatWeb.currentView && url !== "")
-            chatWeb.currentView.url = url
+        if (chatWeb.overlayActive)
+            chatWeb.closeOverlay()
+        var url = ChatSites.homeUrl(chatWeb.activeSiteId, chatWeb.customUrls)
+        if (chatWeb.paneView && url !== "")
+            chatWeb.paneView.url = url
     }
 
     // The toolbar's Open in browser: the user's own click, for a page of
@@ -182,11 +212,13 @@ Item {
 
     // A Local main-frame navigation (or creating the Local view, view null)
     // waits for the owner check; the request itself was already rejected.
-    function checkLocalOwner(view, url, form, create) {
+    // pane: where a view created after the check goes ("a" or "b").
+    function checkLocalOwner(view, url, form, create, pane) {
         var port = ChatSites.localOwnerPort({ siteId: "local", customUrls: chatWeb.customUrls, url: url })
         // A late answer of an earlier check must not count for this one.
         localOwner.cancel()
-        chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create }
+        chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create,
+                                 pane: pane === "b" ? "b" : "a" }
         chatWeb.localOwnerPort = port
         // Never from inside the navigation request itself.
         Qt.callLater(function () {
@@ -208,11 +240,17 @@ Item {
             return
         }
         chatWeb.localOwnerProblem = ""
+        // A pane's Local view still to create (its check waited for this one).
+        if (!pending.create && chatWeb.localViewMissing())
+            Qt.callLater(chatWeb.syncViews)
         if (pending.create) {
-            if (chatWeb.siteIds.indexOf("local") < 0 || chatWeb.viewFor("local") !== null)
+            if (chatWeb.siteIds.indexOf("local") < 0 || chatWeb.viewFor("local", pending.pane) !== null
+                    || (pending.pane === "b" && !chatWeb.splitActive))
                 return
             chatWeb.localCreatePass = pending.url
-            visitedSites.append({ site: "local" })
+            visitedSites.append({ site: "local", pane: pending.pane })
+            // The other pane may wait for its own Local check.
+            Qt.callLater(chatWeb.syncViews)
             return
         }
         var view = pending.view
@@ -255,13 +293,28 @@ Item {
         }
     }
 
-    // Retry after a problem: create the Local view again, or go home.
+    // A pane that shows Local has no Local view yet.
+    function localViewMissing() {
+        return chatWeb.siteIds.indexOf("local") >= 0
+            && ((chatWeb.siteId === "local" && chatWeb.viewFor("local", "a") === null)
+                || (chatWeb.splitActive && chatWeb.siteIdB === "local" && chatWeb.viewFor("local", "b") === null))
+    }
+
+    // Retry after a problem: create a missing Local view again, else load
+    // each shown Local view's home again (through the owner check).
     function retryLocalOwner() {
         chatWeb.localOwnerProblem = ""
-        if (chatWeb.viewFor("local") === null)
+        if (chatWeb.localViewMissing()) {
             chatWeb.syncViews()
-        else if (chatWeb.siteId === "local")
-            chatWeb.home()
+            return
+        }
+        var url = ChatSites.homeUrl("local", chatWeb.customUrls)
+        var panes = [["a", chatWeb.siteId], ["b", chatWeb.splitActive ? chatWeb.siteIdB : ""]]
+        for (var index = 0; index < panes.length; index++) {
+            var view = panes[index][1] === "local" ? chatWeb.viewFor("local", panes[index][0]) : null
+            if (view && url !== "")
+                view.url = url
+        }
     }
 
     function closeOverlay() {
@@ -329,10 +382,12 @@ Item {
 
     // openerUrl: the address of the page that asked for the window; its host
     // names a window that is still blank.
+    // overlayPane (set by the opener's page) says which pane it covers.
     function openOverlay(request, siteId, openerUrl) {
         chatWeb.closeOverlay()
         var view = pageComponent.createObject(overlayContent, {
             site: siteId,
+            pane: chatWeb.overlayPane,
             isOverlay: true,
             openerUrl: String(openerUrl || "")
         })
@@ -365,9 +420,10 @@ Item {
         downloadTimeout.stop()
         chatWeb.pendingDownload = null
         chatWeb.pendingDownloadName = ""
+        chatWeb.pendingDownloadSite = ""
     }
 
-    function openUploadDialog(request) {
+    function openUploadDialog(request, view) {
         if (chatWeb.dialogOpen
                 || (request.mode !== FileDialogRequest.FileModeOpen
                     && request.mode !== FileDialogRequest.FileModeOpenMultiple)) {
@@ -378,6 +434,7 @@ Item {
         }
         request.accepted = true
         uploadDialog.request = request
+        chatWeb.uploadView = view || null
         uploadDialog.fileMode = request.mode === FileDialogRequest.FileModeOpenMultiple
             ? FileDialog.OpenFiles : FileDialog.OpenFile
         chatWeb.dialogOpen = true
@@ -387,6 +444,7 @@ Item {
     function finishUpload(accepted) {
         var request = uploadDialog.request
         uploadDialog.request = null
+        chatWeb.uploadView = null
         chatWeb.dialogOpen = false
         if (!request)
             return
@@ -410,40 +468,66 @@ Item {
             request.dialogReject()
     }
 
-    function viewFor(siteId) {
+    // pane: "a" (the default) or "b".
+    function viewFor(siteId, pane) {
+        var wanted = pane === "b" ? "b" : "a"
         for (var index = 0; index < pages.count; index++) {
             var view = pages.itemAt(index)
-            if (view && view.site === siteId)
+            if (view && view.site === siteId && view.pane === wanted)
                 return view
         }
         return null
     }
 
+    function syncCurrentViews() {
+        chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId, "a")
+        chatWeb.currentViewB = chatWeb.splitActive ? chatWeb.viewFor(chatWeb.siteIdB, "b") : null
+    }
+
     function syncViews() {
-        // Destroy views of sites that were disabled in the settings.
+        // Destroy views of sites that were disabled in the settings, and
+        // every pane b view once split is off.
         for (var index = visitedSites.count - 1; index >= 0; index--) {
-            if (chatWeb.siteIds.indexOf(visitedSites.get(index).site) < 0)
+            var entry = visitedSites.get(index)
+            if (chatWeb.siteIds.indexOf(entry.site) < 0 || (entry.pane === "b" && !chatWeb.splitActive)) {
+                // An upload dialog of that page is answered first.
+                if (uploadDialog.request && chatWeb.uploadView
+                        && chatWeb.uploadView === chatWeb.viewFor(entry.site, entry.pane)) {
+                    uploadDialog.close()
+                    chatWeb.finishUpload(false)
+                }
                 visitedSites.remove(index)
+            }
         }
-        if (chatWeb.overlayView && chatWeb.siteIds.indexOf(chatWeb.overlayView.site) < 0)
+        if (chatWeb.overlayView && (chatWeb.siteIds.indexOf(chatWeb.overlayView.site) < 0
+                || (chatWeb.overlayPane === "b" && !chatWeb.splitActive)))
             chatWeb.closeOverlay()
         if (chatWeb.ownerPending && chatWeb.ownerPending.create
-                && chatWeb.siteIds.indexOf("local") < 0) {
+                && (chatWeb.siteIds.indexOf("local") < 0
+                    || (chatWeb.ownerPending.pane === "b" && !chatWeb.splitActive))) {
             localOwner.cancel()
             chatWeb.ownerPending = null
         }
+        if (!chatWeb.splitActive)
+            chatWeb.focusedPane = "a"
         // Append only: existing views keep their page and are never reloaded.
         // A Local view on this computer is created only after the owner check.
-        if (chatWeb.siteIds.indexOf(chatWeb.siteId) >= 0
-                && chatWeb.viewFor(chatWeb.siteId) === null) {
-            var home = ChatSites.homeUrl(chatWeb.siteId, chatWeb.customUrls)
-            if (ChatSites.localOwnerPort({ siteId: chatWeb.siteId, customUrls: chatWeb.customUrls,
+        var panes = chatWeb.splitActive ? ["a", "b"] : ["a"]
+        for (var at = 0; at < panes.length; at++) {
+            var pane = panes[at]
+            var wanted = pane === "b" ? chatWeb.siteIdB : chatWeb.siteId
+            if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null)
+                continue
+            var home = ChatSites.homeUrl(wanted, chatWeb.customUrls)
+            if (ChatSites.localOwnerPort({ siteId: wanted, customUrls: chatWeb.customUrls,
                                            url: home }) === 0)
-                visitedSites.append({ site: chatWeb.siteId })
-            else if (!(chatWeb.ownerPending && chatWeb.ownerPending.create))
-                chatWeb.checkLocalOwner(null, home, false, true)
+                visitedSites.append({ site: wanted, pane: pane })
+            // One check at a time: a check running for the other pane (a
+            // navigation or a create) re-runs this when it ends.
+            else if (!chatWeb.ownerPending)
+                chatWeb.checkLocalOwner(null, home, false, true, pane)
         }
-        chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId)
+        chatWeb.syncCurrentViews()
     }
 
     // A changed address moves only the views whose home actually changed.
@@ -467,10 +551,44 @@ Item {
     onSiteIdsChanged: chatWeb.syncViews()
     onCustomUrlsChanged: chatWeb.applyCustomUrls()
     onSiteIdChanged: {
-        chatWeb.closeOverlay()
+        if (chatWeb.overlayPane === "a")
+            chatWeb.closeOverlay()
         chatWeb.clearExternal()
         chatWeb.passkeyNotice = false
         chatWeb.syncViews()
+    }
+    onSiteIdBChanged: {
+        if (chatWeb.overlayPane === "b")
+            chatWeb.closeOverlay()
+        chatWeb.clearExternal()
+        chatWeb.passkeyNotice = false
+        chatWeb.syncViews()
+    }
+    onSplitActiveChanged: {
+        chatWeb.syncViews()
+        Qt.callLater(chatWeb.syncUserAgent)
+    }
+
+    // The pane of the item that has the keyboard focus (a page or its
+    // inner items), if it is one of ours.
+    function paneOf(item) {
+        for (var at = item; at; at = at.parent) {
+            if ((at.pane === "a" || at.pane === "b") && typeof at.site === "string" && at.isOverlay !== undefined)
+                return at.pane
+            if (at === chatWeb)
+                return ""
+        }
+        return ""
+    }
+
+    Connections {
+        target: chatWeb.Window.window
+        ignoreUnknownSignals: true
+        function onActiveFocusItemChanged() {
+            var pane = chatWeb.paneOf(chatWeb.Window.activeFocusItem)
+            if (pane !== "")
+                chatWeb.focusedPane = pane
+        }
     }
 
     Component.onCompleted: {
@@ -511,6 +629,9 @@ Item {
             // Deferred: the request stays pending until Save, Cancel or timeout.
             chatWeb.pendingDownload = download
             chatWeb.pendingDownloadName = download.downloadFileName
+            var source = download.view && typeof download.view.site === "string"
+                ? ChatSites.byId(download.view.site) : null
+            chatWeb.pendingDownloadSite = source ? source.name : ""
             downloadTimeout.restart()
         }
     }
@@ -551,6 +672,8 @@ Item {
             id: page
 
             required property string site
+            // "a" or "b": the split pane it belongs to (a sign-in window: its opener's).
+            required property string pane
             property bool isOverlay: false
             // The address this view was opened with (custom or built-in).
             property string homeUrl: ""
@@ -573,8 +696,10 @@ Item {
             // bound once.
             zoomFactor: page.wantedZoom
 
-            anchors.fill: parent
-            visible: page.isOverlay || page.site === chatWeb.siteId
+            anchors.fill: page.isOverlay ? parent : page.pane === "b" ? paneAreaB : paneAreaA
+            visible: page.isOverlay || (page.pane === "b"
+                ? chatWeb.splitShown && page.site === chatWeb.siteIdB
+                : page.site === chatWeb.siteId)
             profile: chatProfile
             backgroundColor: Kirigami.Theme.backgroundColor
 
@@ -622,7 +747,7 @@ Item {
                 chatWeb.passkeyNotice = true
             }
             onFileDialogRequested: (request) => {
-                chatWeb.openUploadDialog(request)
+                chatWeb.openUploadDialog(request, page)
             }
 
             onNavigationRequested: (request) => {
@@ -652,7 +777,7 @@ Item {
                     if (gate === "check") {
                         request.reject()
                         chatWeb.checkLocalOwner(page, url, request.navigationType
-                            === WebEngineNavigationRequest.FormSubmittedNavigation, false)
+                            === WebEngineNavigationRequest.FormSubmittedNavigation, false, page.pane)
                         return
                     }
                     page.checkUserAgent(request)
@@ -677,8 +802,10 @@ Item {
                         siteId: page.site, customUrls: chatWeb.customUrls, url: url }) > 0)
                     return
                 // A sign-in window cannot open another overlay on top of itself.
-                if (verdict === "overlay" && !page.isOverlay)
+                if (verdict === "overlay" && !page.isOverlay) {
+                    chatWeb.overlayPane = page.pane
                     chatWeb.openOverlay(request, page.site, page.url.toString())
+                }
                 // Only a click may ask to hand an address to the system
                 // browser (external or nested sign-in); script-opened ones
                 // are dropped.
@@ -770,18 +897,47 @@ Item {
         }
     }
 
+    // Where each pane's pages are: side by side while split is shown, else
+    // pane a takes everything.
+    Item {
+        id: paneAreaA
+        objectName: "paneAreaA"
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: chatWeb.splitShown ? Math.floor((parent.width - paneSeparator.width) / 2) : parent.width
+    }
+    Kirigami.Separator {
+        id: paneSeparator
+        anchors.left: paneAreaA.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        visible: chatWeb.splitShown
+    }
+    Item {
+        id: paneAreaB
+        objectName: "paneAreaB"
+        anchors.left: paneSeparator.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        visible: chatWeb.splitShown
+    }
+
     Repeater {
         id: pages
         model: visitedSites
         delegate: pageComponent
-        onItemAdded: chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId)
-        onItemRemoved: chatWeb.currentView = chatWeb.viewFor(chatWeb.siteId)
+        onItemAdded: chatWeb.syncCurrentViews()
+        onItemRemoved: chatWeb.syncCurrentViews()
     }
 
     Rectangle {
         id: overlay
-        anchors.fill: parent
-        visible: chatWeb.overlayOpen
+        objectName: "signInOverlay"
+        anchors.fill: chatWeb.overlayPane === "b" ? paneAreaB : paneAreaA
+        // Pane b's window hides with pane b (too narrow); it stays open.
+        visible: chatWeb.overlayOpen && (chatWeb.overlayPane === "a" || chatWeb.splitShown)
         color: Kirigami.Theme.backgroundColor
 
         ColumnLayout {
