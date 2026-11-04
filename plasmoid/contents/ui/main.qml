@@ -150,6 +150,9 @@ PlasmoidItem {
     // Settings → General → Unlock with; used only when the slot is set up.
     readonly property string chatUnlockSetting:
         ChatStorage.normalizeUnlockMethod(Plasmoid.configuration.chatVaultUnlock)
+    // A wallet key slot exists but Passphrase is chosen: the card says so.
+    readonly property bool chatWalletNotApplied:
+        ChatStorage.walletChoice(root.chatUnlockSetting, root.chatVaultWallet).notApplied
     readonly property string chatUnlockMethod:
         ChatStorage.effectiveUnlockMethod(root.chatUnlockSetting, root.chatVaultWallet)
     // Generation the helper prepared inside the verified mount; -1 = none.

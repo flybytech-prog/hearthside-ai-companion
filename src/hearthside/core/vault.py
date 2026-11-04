@@ -899,6 +899,7 @@ def _clear_new_slot(keys: int) -> None:
 
 def _remove_slot(keys: int) -> None:
     _clear_new_slot(keys)
+    _unlink(keys, walletkey.SLOT_OLD)
     _unlink(keys, walletkey.SLOT_FILE)
 
 
@@ -953,8 +954,8 @@ def _copy_conf(ctx: Context, keys: int) -> None:
         os.fsync(target)
 
 
-def _install_slot(keys: int) -> None:
-    """Make the re-keyed copy 0400, fsync it and rename it over ``wallet.conf``."""
+def _seal_new_slot(keys: int) -> None:
+    """Make the re-keyed copy 0400 and fsync it (it stays wallet.conf.new)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
         descriptor = os.open(walletkey.SLOT_NEW, flags, dir_fd=keys)
@@ -967,12 +968,63 @@ def _install_slot(keys: int) -> None:
         if stat.S_IMODE(info.st_mode) != walletkey.SLOT_MODE:
             os.fchmod(descriptor, walletkey.SLOT_MODE)
         os.fsync(descriptor)
-        os.rename(walletkey.SLOT_NEW, walletkey.SLOT_FILE, src_dir_fd=keys, dst_dir_fd=keys)
-        os.fsync(keys)
     except OSError:
         raise HelperError("wallet-write-failed") from None
     finally:
         _close(descriptor)
+
+
+def _slot_exists(keys: int) -> bool:
+    try:
+        os.stat(walletkey.SLOT_FILE, dir_fd=keys, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise HelperError("os-error") from None
+    return True
+
+
+def _rename(keys: int, source: str, target: str) -> None:
+    os.rename(source, target, src_dir_fd=keys, dst_dir_fd=keys)
+
+
+def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
+    """Swap the keyed copy and the staged key in; on failure put the old ones back.
+
+    1. wallet.conf (if any) becomes wallet.conf.old, wallet.conf.new becomes
+       wallet.conf.
+    2. The staged key is copied to the real entry (kwallet-query -r into a
+       pipe, then -w from it; never read here).
+    3. Only then wallet.conf.old goes. If step 2 fails, the new slot goes back
+       to wallet.conf.new and wallet.conf.old back to wallet.conf, so the old
+       slot and entry keep working (unless kwallet-query -w changed the real
+       entry before it failed).
+    """
+    _seal_new_slot(keys)
+    had_old = _slot_exists(keys)
+    try:
+        if had_old:
+            _rename(keys, walletkey.SLOT_FILE, walletkey.SLOT_OLD)
+        _rename(keys, walletkey.SLOT_NEW, walletkey.SLOT_FILE)
+        os.fsync(keys)
+    except OSError:
+        raise HelperError("wallet-write-failed") from None
+    try:
+        walletkey.copy_entry(ctx.wallet_tools, wallet, walletkey.ENTRY_NEW, walletkey.ENTRY)
+    except HelperError:
+        try:
+            _rename(keys, walletkey.SLOT_FILE, walletkey.SLOT_NEW)
+            if had_old:
+                _rename(keys, walletkey.SLOT_OLD, walletkey.SLOT_FILE)
+            os.fsync(keys)
+        except OSError:
+            pass
+        raise
+    _unlink(keys, walletkey.SLOT_OLD)
+    try:
+        os.fsync(keys)
+    except OSError:
+        pass
 
 
 def _wallet_tools(ctx: Context, *, keygen: bool) -> None:
@@ -980,29 +1032,29 @@ def _wallet_tools(ctx: Context, *, keygen: bool) -> None:
         raise HelperError("missing-tool")
 
 
-def _forget_slot_and_entry(ctx: Context, keys: int, wallet: str, *, entry: bool) -> None:
-    """After a failed set-up the old slot no longer fits the entry: drop both (best effort)."""
+def _drop_staged_entry(ctx: Context, wallet: str) -> None:
+    """Delete the staging entry when it is there (best effort; never prompts while
+    the wallet is unlocked)."""
     try:
-        _remove_slot(keys)
+        if walletkey.key_missing(ctx.wallet_tools["qdbus6"], wallet, walletkey.ENTRY_NEW) is False:
+            walletkey.remove_entry(ctx.wallet_tools, wallet, entry=walletkey.ENTRY_NEW)
     except HelperError:
         pass
-    if entry:
-        try:
-            walletkey.remove_entry(ctx.wallet_tools, wallet)
-        except HelperError:
-            pass
 
 
 def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     """Set up (or replace) the wallet slot; the folder may be locked or unlocked (D66).
 
+    Everything is staged first, so a failed re-setup (Cancel, wrong passphrase,
+    a wallet error) leaves a working slot and entry as they were:
+
     1. Copy gocryptfs.conf to vault-keys/wallet.conf.new.
-    2. ``openssl rand -hex 32`` -> ``kwallet-query -w`` (a fresh key in the wallet).
-    3. ``kwallet-query -r`` into a pipe; only after it exited 0 does that pipe
-       become the stdin of ``gocryptfs -passwd -config wallet.conf.new``, whose
-       extpass is the current-passphrase dialog.
-    4. Every exit status 0: the copy is renamed to wallet.conf. Otherwise the
-       copy, any old slot and (once a new key went in) the entry are removed.
+    2. ``openssl rand -hex 32`` -> ``kwallet-query -w encrypted-chat-folder.new``.
+    3. ``kwallet-query -r encrypted-chat-folder.new`` into a pipe; only after it
+       exited 0 does that pipe become the stdin of ``gocryptfs -passwd -config
+       wallet.conf.new``, whose extpass is the current-passphrase dialog.
+    4. Every exit status 0: _commit_slot swaps the slot and the entry in.
+    5. The staging entry is overwritten and deleted, on success and failure.
     """
     ctx = context(environ)
     _require_tools(ctx, "gocryptfs", "kdialog")
@@ -1016,20 +1068,18 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
             if keys is None:
                 raise HelperError("os-error")
             _clear_new_slot(keys)
+            if _slot_exists(keys):
+                # Left by an interrupted swap: wallet.conf is the newer one.
+                _unlink(keys, walletkey.SLOT_OLD)
             try:
                 _copy_conf(ctx, keys)
             except (HelperError, OSError):
                 _clear_new_slot(keys)
                 raise
             try:
-                walletkey.write_new_key(ctx.wallet_tools, wallet)
-            except HelperError:
-                # The wallet could not be written (or was not answered): it is not
-                # asked again; whatever slot was there no longer fits.
-                _forget_slot_and_entry(ctx, keys, wallet, entry=False)
-                raise
-            try:
-                reader = walletkey.read_key_into_pipe(ctx.wallet_tools["kwallet-query"], wallet)
+                walletkey.write_new_key(ctx.wallet_tools, wallet, entry=walletkey.ENTRY_NEW)
+                reader = walletkey.read_key_into_pipe(ctx.wallet_tools["kwallet-query"], wallet,
+                                                      entry=walletkey.ENTRY_NEW)
                 try:
                     argv = wallet_passwd_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.new_slot, ctx.cipher)
                     code = _run(argv, stdin=reader, config=ctx.new_slot)
@@ -1037,35 +1087,34 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                     _close(reader)
                 if code != 0:
                     raise HelperError(exit_error("wallet-passwd", code))
-                _install_slot(keys)
+                _commit_slot(ctx, keys, wallet)
             except (HelperError, OSError) as error:
-                _forget_slot_and_entry(
-                    ctx, keys, wallet,
-                    entry=not (isinstance(error, HelperError) and error.code == "wallet-failed"),
-                )
+                _clear_new_slot(keys)
+                # A wallet that did not answer is not asked again; a leftover
+                # staging entry is removed by the next set-up or removal.
+                if not (isinstance(error, HelperError) and error.code == "wallet-failed"):
+                    _drop_staged_entry(ctx, wallet)
                 raise
+            _drop_staged_entry(ctx, wallet)
     return {"ok": True}
 
 
 def remove_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """Delete the wallet slot, then overwrite and delete the wallet entry.
+    """Delete the wallet slot, then overwrite and delete the wallet entry and any
+    staging entry left by an interrupted set-up.
 
-    The slot goes first in every case; an error after that means the entry may
+    The slot goes first in every case; an error after that means an entry may
     still be in the wallet (the reply says which: missing-tool, wallet-disabled,
-    wallet-failed).
+    wallet-failed). openssl is not needed: without it the overwrite is skipped.
     """
     ctx = context(environ)
     with vault_lock(ctx, wait=True):
         with _keys_dir(ctx, create=False) as keys:
             if keys is not None:
                 _remove_slot(keys)
-        _wallet_tools(ctx, keygen=True)
+        _wallet_tools(ctx, keygen=False)
         wallet = walletkey.preflight(ctx.wallet_tools)
-        missing = walletkey.key_missing(ctx.wallet_tools["qdbus6"], wallet)
-        if missing is None:
-            raise HelperError("wallet-failed")
-        if not missing:
-            walletkey.remove_entry(ctx.wallet_tools, wallet)
+        walletkey.remove_entries(ctx.wallet_tools, wallet)
     return {"ok": True}
 
 

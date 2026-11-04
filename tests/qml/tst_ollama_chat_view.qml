@@ -1742,7 +1742,10 @@ TestCase {
         var checks = testCase.ownerCommands.length
         verify(view.textDropped(true, false, "Dropped\u0007 text"))
         compare(field.text, "Typed\n\nDropped text")
+        // Also nothing a moment later (no deferred send).
+        wait(50)
         compare(testCase.requests.length, before)
+        verify(!testCase.requests.some(function (r) { return r.url.indexOf("/api/chat") >= 0 }))
         compare(testCase.ownerCommands.length, checks)
         verify(!view.generating)
         // Files are refused, with a fixed text.
@@ -1796,10 +1799,13 @@ TestCase {
         verify(!view.textDropped(true, true, "x", ""))
         compare(view.problem, "drop-file")
         compare(files.length, 1)
-        // The text comes back through takeDrop; nothing is sent.
+        // The text comes back through takeDrop; nothing is sent, not even later.
         view.takeDrop("file text")
         compare(input(view).text, "file text")
+        wait(50)
         compare(testCase.requests.length, before)
+        verify(!testCase.requests.some(function (r) { return r.url.indexOf("/api/chat") >= 0 }))
+        verify(!view.generating)
         var codes = [["too-large", "drop-too-large"], ["too-long", "drop-too-long"], ["not-text", "drop-not-text"],
                      ["absent", "drop-unreadable"], ["bad-reply", "drop-unreadable"]]
         for (var index = 0; index < codes.length; index++) {
@@ -1927,5 +1933,89 @@ TestCase {
         // Saved: kdialog through the helper, no typing field.
         panel.saved = true
         verify(named(panel, "sessionLibraryInput") === null)
+    }
+
+    // --- review fixes ----------------------------------------------------------------
+
+    // M2: an emptied personality box beats the saved default.
+    function test_emptiedPersonalityBeatsTheSavedDefault() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.libraryItems = [{ id: 4, kind: "persona", text: "Saved persona" }]
+        view.libraryPersonas = { "m:llama3:latest": 4 }
+        view.libraryReady = true
+        view.libraryOpen = true
+        view.editingPersona = true
+        var field = findChild(view, "personaInput")
+        compare(field.text, "Saved persona")
+        field.text = ""
+        compare(view.personaFor("llama3:latest"), "")
+        var request = sendText(view, "Hi")
+        compare(messagesOf(request).filter(function (m) { return m.role === "system" }).length, 0)
+        reply(request, "ok")
+        // "None" in the picker is empty at once, before the helper answers.
+        field.text = "Mine"
+        view.choosePersona(view.personaChoices[0])
+        compare(view.personaFor("llama3:latest"), "")
+        compare(messagesOf(sendText(view, "Again")).filter(function (m) { return m.role === "system" }).length, 0)
+    }
+
+    // S1: a personality picked from the saved library goes with Lock.
+    function test_savedPersonalityLeavesWithLock() {
+        var wrapper = ready()
+        var view = wrapper.view
+        view.libraryItems = [{ id: 4, kind: "persona", text: "Library text" }]
+        view.libraryReady = true
+        view.libraryOpen = true
+        view.setPersona("qwen3:8b", "Typed for qwen")
+        view.editingPersona = true
+        view.choosePersona(view.personaChoices[1])
+        compare(view.personaFor("llama3:latest"), "Library text")
+        // Locked: main.qml drops the library; the view drops its copy.
+        view.libraryItems = []
+        view.libraryReady = false
+        view.libraryOpen = false
+        compare(view.personaFor("llama3:latest"), "")
+        compare(findChild(view, "personaInput").text, "")
+        var request = sendText(view, "Hi")
+        var sent = messagesOf(request)
+        compare(sent.filter(function (m) { return m.role === "system" }).length, 0)
+        verify(JSON.stringify(sent).indexOf("Library text") < 0)
+        // The user's own text stays.
+        compare(view.personaFor("qwen3:8b"), "Typed for qwen")
+        // Edited after picking: the user's text, kept after Lock.
+        view.libraryOpen = true
+        view.libraryItems = [{ id: 4, kind: "persona", text: "Library text" }]
+        reply(request, "ok")
+        view.choosePersona(view.personaChoices[1])
+        findChild(view, "personaInput").text = "Library text, changed"
+        view.libraryOpen = false
+        compare(view.personaFor("llama3:latest"), "Library text, changed")
+    }
+
+    // S3: Edit takes back pane B's copy of the same turn only.
+    function test_editKeepsAnOlderPaneBTurnWithTheSameText() {
+        var wrapper = compareReady()
+        var view = wrapper.view
+        reply(sendText(view, "continue"), "A1")
+        reply(testCase.requests[testCase.requests.length - 1], "B1")
+        compare(view.messagesB.count, 2)
+        var a2 = sendText(view, "continue")
+        a2.chunk(piece("partial"))
+        view.stop()
+        compare(view.messagesB.count, 2)
+        view.editLast()
+        compare(input(view).text, "continue")
+        compare(view.messages.count, 2)
+        // Pane B keeps turn 1.
+        compare(view.messagesB.count, 2)
+        compare(view.messagesB.get(1).body, "B1")
+        // The same turn in both panes still goes from both.
+        var a3 = sendText(view, "again")
+        reply(a3, "A3")
+        reply(testCase.requests[testCase.requests.length - 1], "B3")
+        view.editLast()
+        compare(view.messages.count, 2)
+        compare(view.messagesB.count, 2)
     }
 }

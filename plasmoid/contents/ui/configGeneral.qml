@@ -117,9 +117,11 @@ KCM.SimpleKCM {
     // The KDE Wallet key slot as status reports it: "", set-up, off, unavailable.
     property string vaultWallet: ""
     property bool confirmingWalletOff: false
-    // Unlock with: shown as KDE Wallet only while it is chosen and set up.
-    readonly property string unlockShown:
-        ChatStorage.effectiveUnlockMethod(page.cfg_chatVaultUnlock, page.vaultWallet)
+    // Unlock with shows the real key slot: KDE Wallet while one is set up,
+    // also before Apply (see walletNotApplied).
+    readonly property var walletChoice: ChatStorage.walletChoice(page.cfg_chatVaultUnlock, page.vaultWallet)
+    readonly property string unlockShown: page.walletChoice.shown
+    readonly property bool walletNotApplied: page.walletChoice.notApplied
     // The choice needs an existing folder (locked or unlocked) under the
     // applied Stay signed in → Encrypted, and a usable KDE Wallet.
     readonly property bool unlockChoiceEnabled: page.signInMode === "encrypted"
@@ -175,7 +177,10 @@ KCM.SimpleKCM {
     function chooseUnlock(method) {
         page.confirmingWalletOff = false
         if (method === "wallet") {
-            if (page.unlockShown !== "wallet")
+            // A key that is already set up is just chosen again.
+            if (page.unlockShown === "wallet")
+                page.useWalletSlot()
+            else
                 page.runVault("add-key", "wallet")
         } else if (page.vaultWallet === "set-up") {
             page.confirmingWalletOff = true
@@ -183,6 +188,12 @@ KCM.SimpleKCM {
             page.cfg_chatVaultUnlock = "passphrase"
         }
         page.syncUnlockChoice()
+    }
+
+    // Only a key slot the helper reports as set up is chosen without add-key.
+    function useWalletSlot() {
+        if (page.vaultWallet === "set-up")
+            page.cfg_chatVaultUnlock = "wallet"
     }
 
     function runVault(op, method) {
@@ -581,6 +592,28 @@ KCM.SimpleKCM {
             Kirigami.ContextualHelpButton {
                 toolTipText: i18n("KDE Wallet: a random key for the encrypted folder is kept in your wallet, so the folder opens without typing the passphrase: at Plasma start when the wallet is already open, else with one click (KDE Wallet may ask for its own password). Anyone who can use your open wallet can open the folder too. The passphrase keeps working and is always offered. Setting it up asks for the passphrase once. Choosing Passphrase again removes the key from the wallet. Needs an encrypted folder and KDE Wallet turned on.")
             }
+        }
+
+        Kirigami.InlineMessage {
+            objectName: "walletNotApplied"
+            Layout.fillWidth: true
+            visible: page.walletNotApplied && !page.confirmingWalletOff
+            type: Kirigami.MessageType.Information
+            text: i18n("A KDE Wallet key is set up but not applied. Apply to use it, or remove the key.")
+            actions: [
+                // Chooses KDE Wallet again; Apply then uses it.
+                Kirigami.Action {
+                    text: i18n("Use KDE Wallet")
+                    icon.name: "dialog-ok-apply"
+                    onTriggered: page.useWalletSlot()
+                },
+                Kirigami.Action {
+                    text: i18n("Remove key")
+                    icon.name: "edit-delete"
+                    enabled: page.vaultOp === ""
+                    onTriggered: page.confirmingWalletOff = true
+                }
+            ]
         }
 
         Kirigami.InlineMessage {

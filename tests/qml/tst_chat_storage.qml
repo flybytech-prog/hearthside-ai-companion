@@ -602,4 +602,15 @@ TestCase {
                 ChatStorage.stepMethod("unlock-wallet")),
                 "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=1 python3 -P -m hearthside --vault unlock --method wallet")
     }
+
+    // M1: Unlock with shows the real slot, and a slot not applied.
+    function test_walletChoice() {
+        compare(ChatStorage.walletChoice("wallet", "set-up"), { shown: "wallet", notApplied: false })
+        compare(ChatStorage.walletChoice("passphrase", "set-up"), { shown: "wallet", notApplied: true })
+        compare(ChatStorage.walletChoice("odd", "set-up"), { shown: "wallet", notApplied: true })
+        compare(ChatStorage.walletChoice("wallet", "off"), { shown: "passphrase", notApplied: false })
+        compare(ChatStorage.walletChoice("passphrase", "off"), { shown: "passphrase", notApplied: false })
+        compare(ChatStorage.walletChoice("wallet", "unavailable"), { shown: "passphrase", notApplied: false })
+        compare(ChatStorage.walletChoice("wallet", ""), { shown: "passphrase", notApplied: false })
+    }
 }

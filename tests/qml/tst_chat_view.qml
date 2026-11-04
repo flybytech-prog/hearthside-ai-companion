@@ -606,4 +606,18 @@ TestCase {
         compare(findChild(view, "storageCard").message,
                 "Unlocking with KDE Wallet… If KDE Wallet asks for its password, answer its window.")
     }
+
+    // M1: a key set up but not applied is said on the card.
+    function test_walletNotAppliedNote() {
+        var view = make({ current: true, storageMode: "encrypted", card: {view: "unlock", message: ""} })
+        var note = findChild(view, "walletNotAppliedNote")
+        verify(!note.visible)
+        view.walletNotApplied = true
+        verify(note.visible)
+        compare(note.textFormat, Text.PlainText)
+        // The card still unlocks with the passphrase.
+        compare(findChild(view, "unlockButton").text, "Unlock…")
+        view.card = {view: "create", message: ""}
+        verify(!note.visible)
+    }
 }

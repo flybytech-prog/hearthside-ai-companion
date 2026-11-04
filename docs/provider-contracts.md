@@ -435,7 +435,9 @@ told apart. The helper ignores both.
   `kdewallet`), folder `Hearthside`, entry `encrypted-chat-folder`. The
   passphrase slot (`gocryptfs.conf`) is never changed by it and stays the
   recovery slot. While being set up the copy is `wallet.conf.new` (gocryptfs
-  itself writes `wallet.conf.new.tmp`); both are cleared before and after.
+  itself writes `wallet.conf.new.tmp`) and its key is staged in the entry
+  `encrypted-chat-folder.new`; while the new slot is swapped in, the previous
+  one is `wallet.conf.old`. Leftovers of all of these are cleared.
 - Lock file: `$XDG_RUNTIME_DIR/hearthside/vault.lock` (`flock`). Jobs that
   may open a window (`create`, `unlock`, `change-passphrase`, `add-key`,
   `remove-key`) wait for it as long as needed; all others (including
@@ -456,8 +458,8 @@ at a time without following symlinks.
 | `--vault unlock [--method passphrase]` | Mounts the folder (kdialog `--password`); already unlocked is success | `{"ok":true}` |
 | `--vault unlock --method wallet` | Mounts the folder with the wallet slot: gocryptfs runs `kwallet-query -r` itself (KWallet's own password prompt if the wallet is locked; capped at 120 s); already unlocked is success | `{"ok":true}` |
 | `--vault auto-unlock` | For Plasma start: like `unlock --method wallet`, but only when the Secret Service says the wallet is unlocked; otherwise `wallet-closed` and nothing else runs, so it never prompts | `{"ok":true}` |
-| `--vault add-key --method wallet` | Sets up (or replaces) the wallet slot, folder locked or unlocked: copies `gocryptfs.conf`, stores a new random key in the wallet, re-keys the copy with `gocryptfs -passwd -config` (kdialog `--password` for the current passphrase) | `{"ok":true}` |
-| `--vault remove-key --method wallet` | Deletes the wallet slot, then overwrites the wallet entry with a fresh random value and deletes it; no slot and no entry is success | `{"ok":true}` |
+| `--vault add-key --method wallet` | Sets up (or replaces) the wallet slot, folder locked or unlocked: copies `gocryptfs.conf`, stages a new random key in the wallet, re-keys the copy with `gocryptfs -passwd -config` (kdialog `--password` for the current passphrase), then swaps slot and key in; a failure leaves an existing slot working | `{"ok":true}` |
+| `--vault remove-key --method wallet` | Deletes the wallet slot, then overwrites the wallet entry (and a leftover staging entry) with a fresh random value and deletes it; no slot and no entry is success; needs no openssl (without it the overwrite is skipped) | `{"ok":true}` |
 | `--vault lock` | `fusermount3 -u`; retried after 0.5 s and 1 s, never forced or lazy; already locked or a dead mount is success | `{"ok":true}` |
 | `--vault change-passphrase` | `gocryptfs -passwd`, only while locked (kdialog `--password`, then `--newpassword`) | `{"ok":true}` |
 | `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when the wallet holds it; nothing there is success | `{"ok":true}` |
@@ -482,9 +484,15 @@ when there is none (or anything else is in its place), and `unavailable` when
 (`isEnabled` = false), or `qdbus6` did not answer within 2 seconds. When a
 tool is missing the reply also has `"missing"` with any of `kwallet-query`,
 `qdbus6` and `openssl`, in that order (packages `kwallet`, `qt6-tools` and
-`openssl`). `openssl` is needed only by `add-key` and `remove-key`, so when
-only it is missing `wallet` still says `set-up` or `off`. `status` never checks the
-wallet entry or opens the wallet; `unlock --method wallet` does.
+`openssl`). `openssl` is needed only by `add-key` (`remove-key`, `destroy`
+and `purge` skip their best-effort overwrite without it), so when only it is
+missing `wallet` still says `set-up` or `off`. `status` never checks the
+wallet entry or opens the wallet; `unlock --method wallet` does. It does run
+one `qdbus6 … org.kde.KWallet.isEnabled` query (when kwallet-query and qdbus6
+are there and the folder is locked or unlocked): that call can D-Bus-activate
+kwalletd6 if it is not running yet, and while a KWallet password prompt is
+pending it waits for its 2 second timeout, so `status` can take up to 2
+seconds longer and then reports `wallet:"unavailable"` for that call.
 
 Wallet unlock, step by step (all queries through `qdbus6` with a 2 second
 timeout, answers are booleans, the wallet's name or a handle):
@@ -507,27 +515,45 @@ timeout, answers are booleans, the wallet's name or a handle):
    encrypted-chat-folder -extpass <wallet> <cipher> <mount>`, then the usual
    mount checks.
 
-Setting up (`add-key`): after the same step 1, `openssl rand -hex 32` writes
-into `kwallet-query --folder Hearthside --write-password
-encrypted-chat-folder <wallet>` through a pipe; then `kwallet-query
---read-password` writes into a second pipe, and only when it exited 0 does
-that pipe become the stdin of `gocryptfs -passwd -q -config
-<slot>.new -extpass kdialog ... <cipher>`. The copy is renamed to
-`wallet.conf` (mode `0400`, fsynced) only when openssl, both kwallet-query
-runs and gocryptfs all exited 0 (kwallet-query prints its errors on stdout, so
-a failed read must never reach gocryptfs). On a failure after the new key
-was stored, the copy, any older slot (it no longer fits) and the wallet entry
-(overwritten with a fresh value first) are removed. Setting up again
-replaces any existing slot, so a failed re-setup leaves the wallet method
-off; set it up again (the passphrase always still opens the folder).
-`remove-key` removes the
-slot first in every case; if it then fails (`missing-tool`,
-`wallet-disabled`, `wallet-failed`), only the wallet entry may remain. The
-entry is deleted through `org.kde.KWallet.open(<wallet>, 0, Hearthside)` →
-handle, `removeEntry(handle, Hearthside, encrypted-chat-folder, Hearthside)`,
-`close(handle, false, Hearthside)`, then checked with `keyDoesNotExist`.
-`destroy` and `purge` delete the files first and the entry last; there
-`wallet-failed` means only the entry may remain (run it again).
+Setting up (`add-key`) is staged, so a failed re-setup (Cancel, a wrong
+passphrase, a wallet error) leaves an existing slot and entry working:
+
+1. After the same step 1, `gocryptfs.conf` is copied to `wallet.conf.new`.
+2. `openssl rand -hex 32` writes into `kwallet-query --folder Hearthside
+   --write-password encrypted-chat-folder.new <wallet>` through a pipe. If
+   openssl fails after kwallet-query stored what it got (an empty value),
+   that staging entry is deleted again (`wallet-write-failed`).
+3. `kwallet-query --read-password encrypted-chat-folder.new` writes into a
+   second pipe, and only when it exited 0 does that pipe become the stdin of
+   `gocryptfs -passwd -q -config <slot>.new -extpass kdialog ... <cipher>`
+   (kwallet-query prints its errors on stdout, so a failed read must never
+   reach gocryptfs).
+4. When gocryptfs exited 0, the copy is made `0400` and fsynced;
+   `wallet.conf` (if any) becomes `wallet.conf.old` and the copy becomes
+   `wallet.conf`. The staged key is then moved to the real entry:
+   `kwallet-query --read-password encrypted-chat-folder.new` into a pipe and,
+   after it exited 0, `kwallet-query --write-password encrypted-chat-folder`
+   from that pipe (the helper never reads it). Only when that write exited 0
+   is `wallet.conf.old` deleted; otherwise the new slot goes back to
+   `wallet.conf.new` and `wallet.conf.old` back to `wallet.conf`, so the old
+   slot keeps opening the folder with the old entry (unless kwallet-query
+   changed the real entry before it failed).
+5. The staging entry is overwritten with a fresh value and deleted, after a
+   success and after a failure. When the wallet itself did not answer
+   (`wallet-failed`) it is not asked again; a staging entry left then is
+   deleted by the next set-up, `remove-key`, `destroy` or `purge`.
+
+On the first set-up a failure leaves no slot. `remove-key` removes the slot
+first in every case; if it then fails (`missing-tool`, `wallet-disabled`,
+`wallet-failed`), only wallet entries may remain. It removes both the entry
+and a leftover staging entry: each is overwritten with a fresh value (only
+when openssl is there), then deleted through
+`org.kde.KWallet.open(<wallet>, 0, Hearthside)` → handle,
+`removeEntry(handle, Hearthside, <entry>, Hearthside)`,
+`close(handle, false, Hearthside)`, and checked with `keyDoesNotExist`.
+`destroy` and `purge` delete the files first and the entries last (openssl
+is not needed); there `wallet-failed` means only an entry may remain (run it
+again), and purge reports `wallet-entry` when it removed either entry.
 
 Calls that may show KWallet's own password prompt (the wallet is locked):
 `kwallet-query` in `unlock --method wallet`, `add-key`, `remove-key`,
@@ -568,11 +594,13 @@ its phase, plus a lone `-version`) and absolute paths; `-config` only with the
 one slot path the helper computed (`wallet.conf` to mount, `wallet.conf.new`
 to re-key); the `-extpass` program is kdialog, the relay, or exactly
 `kwallet-query --folder Hearthside --read-password encrypted-chat-folder
-<wallet>`; `fusermount3` only `-u <mountpoint>`; kdialog only the
-new-passphrase dialog; `openssl` only `rand -hex 32`; `kwallet-query` only
-that read or the matching `--write-password`; `qdbus6` only the kwalletd6
-methods `isEnabled`, `localWallet`, `keyDoesNotExist`, `open`, `removeEntry`,
-`close` with our folder, entry and app id, and the Secret Service properties
+<wallet>` (never the staging entry); `fusermount3` only `-u <mountpoint>`;
+kdialog only the new-passphrase dialog; `openssl` only `rand -hex 32`;
+`kwallet-query` only `--read-password` or `--write-password` of
+`encrypted-chat-folder` or `encrypted-chat-folder.new` in folder
+`Hearthside`; `qdbus6` only the kwalletd6 methods `isEnabled`, `localWallet`,
+`keyDoesNotExist`, `open`, `removeEntry`, `close` with our folder, those two
+entries and app id, and the Secret Service properties
 `Label` and `Locked`. Anything else (for example `-passfile`, `-masterkey`,
 `-ko`, `-o`, another `-config`, `-fsname`, `-zerokey`, `-fusedebug`) and any
 argument containing `allow_` outside an `-extpass` value is refused with

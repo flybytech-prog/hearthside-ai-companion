@@ -427,6 +427,7 @@ PlasmaExtras.Representation {
                     missingTools: root.chatVaultMissing
                     unlockMethod: root.chatUnlockMethod
                     walletChosen: root.chatUnlockSetting === "wallet" && root.chatVaultWallet !== "unavailable"
+                walletNotApplied: root.chatWalletNotApplied
                     storageNotice: root.chatStorageNotice
                     autoLockMinutes: root.chatAutoLockMinutes
                     storageBusy: root.chatStorageBusy || root.chatDialogOpen
@@ -446,6 +447,7 @@ PlasmaExtras.Representation {
                     libraryItems: root.promptItems
                     libraryPersonas: root.libraryPersonas
                     libraryReady: root.libraryState === "ready"
+                libraryOpen: root.libraryAvailable
                     onZoomRequested: (direction) => root.stepSiteZoom("ollama", direction)
                     onFileDropped: (hex) => root.readDroppedFile(hex)
                     onPersonaDefaultChosen: (model, id) => root.libraryRequest("set-persona",
@@ -460,8 +462,10 @@ PlasmaExtras.Representation {
     Binding {
         target: root
         property: "chatDialogOpen"
-        // Also while a helper passphrase window is open, so the popup stays.
+        // Also while a helper passphrase window or the library's text window
+        // (kdialog) is open, so the popup stays.
         value: chatView.dialogOpen || root.chatVaultPrompting
+            || root.libraryOp === "add" || root.libraryOp === "replace"
     }
 
     footer: Item {

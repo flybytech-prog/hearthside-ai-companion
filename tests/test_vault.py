@@ -246,12 +246,16 @@ if tool == "openssl":
         record["sha"] = sha(value.encode())
 elif tool == "kwallet-query":
     name = args[-1]
+    KEY = args[1] + "/" + args[3]
+    record["entry"] = args[3]
     time.sleep(float(env.get("STUB_KWALLET_SLEEP", "0")))
     if "--write-password" in args:
         data = sys.stdin.buffer.read()
         if data.endswith(b"\n"):
             data = data[:-1]
         code = int(env.get("STUB_KWALLET_WRITE_EXIT", "0"))
+        if env.get("STUB_KWALLET_WRITE_FAIL_ENTRY") == args[3]:
+            code = 1
         if code == 0:
             state = wallet()
             state[KEY] = data.decode()
@@ -261,6 +265,8 @@ elif tool == "kwallet-query":
             sys.stdout.write("Failed to write entry\n")
     else:
         code = int(env.get("STUB_KWALLET_READ_EXIT", "0"))
+        if env.get("STUB_KWALLET_READ_FAIL_ENTRY") == args[3]:
+            code = 1
         state = wallet()
         if code == 0 and KEY not in state:
             code = 4
@@ -284,11 +290,11 @@ elif tool == "qdbus6":
         elif method == "localWallet":
             answer = name
         elif method == "keyDoesNotExist":
-            answer = "false" if KEY in state and args[3] == name else "true"
+            answer = "false" if args[4] + "/" + args[5] in state and args[3] == name else "true"
         elif method == "open":
             answer = env.get("STUB_OPEN_HANDLE", "7")
         elif method == "removeEntry":
-            answer = "0" if state.pop(KEY, None) is not None else "-1"
+            answer = "0" if state.pop(args[4] + "/" + args[5], None) is not None else "-1"
             if env.get("STUB_REMOVE_KEEPS"):
                 answer = "-1"
             else:

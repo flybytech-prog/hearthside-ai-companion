@@ -50,6 +50,16 @@ function effectiveUnlockMethod(setting, wallet) {
     return normalizeUnlockMethod(setting) === "wallet" && wallet === "set-up" ? "wallet" : "passphrase"
 }
 
+// What Settings → General → Unlock with shows: the real key slot (KDE
+// Wallet while one is set up), and whether a set-up slot is not applied
+// (the setting still says Passphrase, e.g. the page was closed without
+// Apply).
+function walletChoice(setting, wallet) {
+    var slot = wallet === "set-up"
+    return { shown: slot ? "wallet" : "passphrase",
+             notApplied: slot && normalizeUnlockMethod(setting) !== "wallet" }
+}
+
 // Anything but the exact word "encrypted" (including the old "folder") means
 // the private in-memory profile.
 function normalizeMode(value) {

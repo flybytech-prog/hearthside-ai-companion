@@ -218,7 +218,10 @@ widget's configuration (only the word `wallet` is saved, as
 - The locked card always offers **Use passphrase instead…**: the passphrase
   slot is never changed and stays the way back in. If the wallet's key no
   longer fits (for example after the folder was re-created), the card offers
-  **Set up KDE Wallet again…**.
+  **Set up KDE Wallet again…**. Setting it up again first stages the new key
+  (wallet entry `encrypted-chat-folder.new`) and a new slot, and swaps them in
+  only once gocryptfs accepted your passphrase; if you cancel or it fails, the
+  slot and wallet key you had keep working, and the staged ones are removed.
 - Choosing **Passphrase** again removes the wallet's key slot and its wallet
   entry (after a confirmation). Deleting the folder, turning Stay signed in
   Off, and `scripts/install.sh --uninstall-web-data` remove both too.

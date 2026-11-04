@@ -40,6 +40,9 @@ ColumnLayout {
     // KDE Wallet is chosen in the settings and usable: its key can be set up
     // again from the card.
     property bool walletChosen: false
+    // A KDE Wallet key is set up, but Passphrase is chosen (the settings
+    // were closed without Apply): said on the card, never used.
+    property bool walletNotApplied: false
     // Message code shown in memory mode too (e.g. the old folder is in use).
     property string storageNotice: ""
     // Lock automatically (minutes, 0 = never) and whether main.qml is running
@@ -792,6 +795,16 @@ ColumnLayout {
                     icon.name: "folder-locked"
                     text: i18n("Create encrypted folder…")
                     onClicked: chatView.storageRequest("create")
+                }
+                PlasmaComponents.Label {
+                    objectName: "walletNotAppliedNote"
+                    Layout.fillWidth: true
+                    visible: storageCard.view === "unlock" && chatView.walletNotApplied
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    horizontalAlignment: Text.AlignHCenter
+                    opacity: 0.72
+                    text: i18n("A KDE Wallet key is set up but not applied. Apply KDE Wallet under Settings → General → Privacy to use it, or remove the key there.")
                 }
                 PlasmaComponents.Button {
                     objectName: "unlockButton"

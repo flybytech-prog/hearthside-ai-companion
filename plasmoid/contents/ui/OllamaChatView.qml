@@ -72,6 +72,11 @@ ColumnLayout {
     property bool pendingRegenerate: false
     // Compare: the prompt waiting for model B until A is done.
     property string queuedPrompt: ""
+    // Each send is a numbered turn; both panes tag its rows with it, so
+    // Edit only takes back pane B's copy of the same turn.
+    property int turnCounter: 0
+    property int pendingTurn: 0
+    property int queuedTurn: 0
     // The pane of the reply in flight.
     property string replyPane: "a"
     // Compare: a second pane with its own model and history (D59).
@@ -90,6 +95,11 @@ ColumnLayout {
     property var libraryItems: []
     property var libraryPersonas: ({})
     property bool libraryReady: false
+    // The encrypted folder is unlocked (the saved library may be used).
+    property bool libraryOpen: false
+    // Session personality keys whose text came from a saved item: they
+    // leave memory with the library when the folder is locked.
+    property var savedPersonaKeys: ({})
     // Saved personalities for the picker: "None" first.
     readonly property var personaChoices: [{ id: 0, kind: "persona", text: "" }].concat(
         PromptLibrary.itemsOf(ollamaView.libraryItems, "persona"))
@@ -267,7 +277,9 @@ ColumnLayout {
         var model = ollamaView.personaModel
         if (!OllamaChat.isModelName(model) || !entry)
             return
+        // "None" is "" at once, before the saved default changes.
         ollamaView.setPersona(model, entry.id === 0 ? "" : entry.text)
+        ollamaView.markSavedPersona(model, entry.id > 0)
         if (ollamaView.libraryReady && (entry.id === 0 || entry.id > 0))
             ollamaView.personaDefaultChosen(model, entry.id === 0 ? -1 : entry.id)
         ollamaView.loadPersona()
@@ -296,11 +308,40 @@ ColumnLayout {
             if (Object.prototype.hasOwnProperty.call(ollamaView.sessionPersonas, key))
                 next[key] = ollamaView.sessionPersonas[key]
         }
-        if (text === "")
-            delete next["m:" + name]
-        else
-            next["m:" + name] = text
+        // An empty text is kept too: it means "none", also over a saved default.
+        next["m:" + name] = text
         ollamaView.sessionPersonas = next
+    }
+
+    // Marks (or unmarks) a model's session personality as taken from the
+    // saved library.
+    function markSavedPersona(name, saved) {
+        var next = {}
+        for (var key in ollamaView.savedPersonaKeys) {
+            if (Object.prototype.hasOwnProperty.call(ollamaView.savedPersonaKeys, key) && key !== "m:" + name)
+                next[key] = true
+        }
+        if (saved)
+            next["m:" + name] = true
+        ollamaView.savedPersonaKeys = next
+    }
+
+    // The folder was locked: personalities taken from saved items go too.
+    function dropSavedPersonas() {
+        var next = {}
+        for (var key in ollamaView.sessionPersonas) {
+            if (Object.prototype.hasOwnProperty.call(ollamaView.sessionPersonas, key)
+                    && !Object.prototype.hasOwnProperty.call(ollamaView.savedPersonaKeys, key))
+                next[key] = ollamaView.sessionPersonas[key]
+        }
+        ollamaView.sessionPersonas = next
+        ollamaView.savedPersonaKeys = ({})
+        ollamaView.loadPersona()
+    }
+
+    onLibraryOpenChanged: {
+        if (!ollamaView.libraryOpen)
+            ollamaView.dropSavedPersonas()
     }
 
     // The first line, for the small "Personality: …" note above a pane.
@@ -319,8 +360,11 @@ ColumnLayout {
     }
 
     function personaEdited(text) {
-        if (!ollamaView.personaLoading)
-            ollamaView.setPersona(ollamaView.personaModel, text)
+        if (ollamaView.personaLoading)
+            return
+        ollamaView.setPersona(ollamaView.personaModel, text)
+        // Typed by the user: their own text now, kept after Lock.
+        ollamaView.markSavedPersona(ollamaView.personaModel, false)
     }
 
     onPersonaModelChanged: ollamaView.loadPersona()
@@ -569,6 +613,8 @@ ColumnLayout {
     }
 
     function dropPending() {
+        ollamaView.pendingTurn = 0
+        ollamaView.queuedTurn = 0
         ollamaView.pendingPrompt = ""
         ollamaView.pendingPane = "a"
         ollamaView.pendingRegenerate = false
@@ -595,6 +641,9 @@ ColumnLayout {
         ollamaView.pendingPane = "a"
         ollamaView.pendingRegenerate = false
         ollamaView.queuedPrompt = ollamaView.comparing ? input.text : ""
+        ollamaView.turnCounter = ollamaView.turnCounter >= 2147483647 ? 1 : ollamaView.turnCounter + 1
+        ollamaView.pendingTurn = ollamaView.turnCounter
+        ollamaView.queuedTurn = ollamaView.comparing ? ollamaView.turnCounter : 0
         ollamaView.problem = ""
         ollamaView.problemDetail = ""
         ollamaView.checkOwner("send")
@@ -618,7 +667,7 @@ ColumnLayout {
     }
 
     // The last message back into the message box; it and its reply leave
-    // the conversation (also pane B's, when it got the same message).
+    // the conversation (also pane B's, when it got the same turn).
     // Nothing is sent until Send.
     function editLast() {
         if (ollamaView.busy)
@@ -627,8 +676,12 @@ ColumnLayout {
         if (turn.userIndex < 0)
             return
         var text = transcript.get(turn.userIndex).body
+        var number = transcript.get(turn.userIndex).turn
         var turnB = OllamaChat.lastTurn(ollamaView.authorsOf(transcriptB))
-        if (ollamaView.comparing && turnB.userIndex >= 0 && transcriptB.get(turnB.userIndex).body === text)
+        // Only pane B's copy of this very turn, never an older one with the
+        // same text.
+        if (ollamaView.comparing && turnB.userIndex >= 0 && typeof number === "number" && number > 0
+                && transcriptB.get(turnB.userIndex).turn === number)
             transcriptB.remove(turnB.userIndex, transcriptB.count - turnB.userIndex)
         transcript.remove(turn.userIndex, transcript.count - turn.userIndex)
         input.text = text
@@ -640,6 +693,8 @@ ColumnLayout {
         var prompt = ollamaView.pendingPrompt
         var pane = ollamaView.pendingPane === "b" ? "b" : "a"
         var regenerating = ollamaView.pendingRegenerate
+        var turnNumber = ollamaView.pendingTurn
+        ollamaView.pendingTurn = 0
         ollamaView.pendingPrompt = ""
         ollamaView.pendingPane = "a"
         ollamaView.pendingRegenerate = false
@@ -668,8 +723,9 @@ ColumnLayout {
         view.follow = true
         view.sentWhileHeld = view.held
         if (!regenerating)
-            rows.append({ author: "user", body: prompt, phase: "done" })
-        rows.append({ author: "assistant", body: "", phase: "waiting" })
+            rows.append({ author: "user", body: prompt, phase: "done", turn: turnNumber })
+        rows.append({ author: "assistant", body: "", phase: "waiting",
+                      turn: regenerating ? rows.get(rows.count - 1).turn : turnNumber })
         ollamaView.replyRow = rows.count - 1
         ollamaView.replyPane = pane
         if (ollamaView.usedModels.indexOf(name) < 0)
@@ -792,7 +848,9 @@ ColumnLayout {
         if (problem === "not-running" || problem === "forbidden")
             ollamaView.listState = "failed"
         var queued = ollamaView.queuedPrompt
+        var queuedTurn = ollamaView.queuedTurn
         ollamaView.queuedPrompt = ""
+        ollamaView.queuedTurn = 0
         // Compare runs one model after the other: B gets the prompt once A
         // is done, with an owner check of its own. Not after Stop, or when
         // the server is gone or stopped answering.
@@ -802,6 +860,7 @@ ColumnLayout {
             ollamaView.pendingPrompt = queued
             ollamaView.pendingPane = "b"
             ollamaView.pendingRegenerate = false
+            ollamaView.pendingTurn = queuedTurn
             ollamaView.checkOwner("send")
         }
         ollamaView.focusLater()
@@ -1020,6 +1079,7 @@ ColumnLayout {
         ollamaView.cancelOwnerCheck()
         // Personalities are kept for the session only while Ollama is on.
         ollamaView.sessionPersonas = ({})
+        ollamaView.savedPersonaKeys = ({})
         ollamaView.editingPersona = false
         ollamaView.comparing = false
         ollamaView.personaTarget = "a"

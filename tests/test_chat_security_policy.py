@@ -4119,7 +4119,9 @@ DROP_FUNCTIONS = {
     "main.qml": ("dropToOllama", "dropFileToOllama", "readDroppedFile", "droppedDone"),
     "FullRepresentation.qml": ("takePendingDrop", "takePendingDropError"),
 }
-SEND_CALL = r"(?<![\w$])(?:send|startChat|checkOwner|regenerate|sendChat|afterOwnerCheck|libraryRequest)\s*\("
+# Any reference, not only a call: `Qt.callLater(ollamaView.send)` or a stored
+# function would send later. A `name:` binding (an object key) is not one.
+SEND_CALL = r"(?<![\w$])(?:send|startChat|checkOwner|regenerate|afterOwnerCheck|libraryRequest|sendChat)\b(?!\s*:)"
 DROPPED_HANDLER = r"\bonDropped\s*:\s*(?:\([^)]*\)\s*=>\s*|function\s*\([^)]*\)\s*)?\{"
 
 
@@ -4144,7 +4146,7 @@ def _drop_problems(sources):
             bodies.append((function, body or ""))
         for label, body in bodies:
             for line in _hits(SEND_CALL, _strip_comments(body, blank_strings=True)):
-                problems.append(f"{name}: {label} calls a send (body line {line}); drops never send")
+                problems.append(f"{name}: {label} reaches a send (body line {line}); drops never send")
     handlers = sum(len(list(_blocks(code, DROPPED_HANDLER))) for code in sources.values())
     if handlers != 2:
         problems.append(f"exactly two onDropped handlers (icon and TextDropArea), found {handlers}")
@@ -4169,6 +4171,15 @@ def test_drops_live_in_two_places_and_never_send():
      "                root.dropToOllama(drop.text)\n                ollamaView.send()\n", None),
     (FULL_REPRESENTATION, "        ollamaView.takeDrop(text)\n",
      "        ollamaView.takeDrop(text)\n        ollamaView.checkOwner(\"send\")\n", None),
+    # Deferred sends (review S2).
+    (OLLAMA_CHAT_VIEW, "        ollamaView.focusLater()\n    }\n\n    // From the drop areas",
+     "        Qt.callLater(ollamaView.send)\n    }\n\n    // From the drop areas", None),
+    (OLLAMA_CHAT_VIEW, "        ollamaView.focusLater()\n    }\n\n    // From the drop areas",
+     "        Qt.callLater(function(){ollamaView.send()})\n    }\n\n    // From the drop areas", None),
+    (MAIN_QML, "            root.pendingDrop = reply.text\n",
+     "            root.pendingDrop = reply.text\n            Qt.callLater(root.libraryRequest, \"list\")\n", None),
+    (COMPACT_REPRESENTATION, "                root.dropToOllama(drop.text)\n",
+     "                root.dropToOllama(drop.text)\n                var later = ollamaView.startChat\n", None),
 ])
 def test_proof_drop_rule_catches(path, old, new, snippet):
     assert _drop_problems(_sources_with(path, old, new, snippet))
@@ -4348,6 +4359,9 @@ def test_proof_auto_unlock_outside_on_completed_is_caught():
 
 UNLOCK_WRITE = r"\bcfg_chatVaultUnlock\s*=(?!=)"
 UNLOCK_WALLET_WRITE = r'if\s*\(\s*reply\.ok\s*&&\s*op\s*===\s*"add-key"\s*\)\s*page\.cfg_chatVaultUnlock\s*=\s*"wallet"'
+# Review M1: a slot the helper reports as set up is chosen again without add-key,
+# only in `function useWalletSlot()` behind this guard.
+UNLOCK_SLOT_WRITE = r'if\s*\(\s*page\.vaultWallet\s*===\s*"set-up"\s*\)\s*page\.cfg_chatVaultUnlock\s*=\s*"wallet"'
 
 
 def _vault_unlock_key_problems(sources):
@@ -4366,8 +4380,12 @@ def _vault_unlock_key_problems(sources):
             if not values or any(value not in (("page", '"passphrase"'), ("page", '"wallet"')) for value in values):
                 problems.append(f"{name}: page.cfg_chatVaultUnlock = \"passphrase\" or \"wallet\" only, got {values}")
             wallet = [value for value in values if value[1] == '"wallet"']
-            if len(wallet) != 1 or len(re.findall(UNLOCK_WALLET_WRITE, code)) != 1:
-                problems.append(f"{name}: \"wallet\" is chosen only inside if (reply.ok && op === \"add-key\")")
+            slot_body = _function_body(code, "useWalletSlot") or ""
+            if len(wallet) != 2 or len(re.findall(UNLOCK_WALLET_WRITE, code)) != 1 \
+                    or len(re.findall(UNLOCK_SLOT_WRITE, code)) != 1 or len(re.findall(UNLOCK_SLOT_WRITE, slot_body)) != 1 \
+                    or len(re.findall(r"\bcfg_chatVaultUnlock\s*=(?!=)", slot_body)) != 1:
+                problems.append(f"{name}: \"wallet\" is chosen only inside if (reply.ok && op === \"add-key\") "
+                                "and in useWalletSlot() behind if (page.vaultWallet === \"set-up\")")
         reads = list(re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*chatVaultUnlock\b", code))
         if base == "main.qml":
             good = re.findall(r"\bChatStorage\s*\.\s*normalizeUnlockMethod\s*\(\s*Plasmoid\s*\.\s*configuration"
@@ -4389,6 +4407,16 @@ def test_vault_unlock_setting_is_written_only_by_the_general_page():
      '        if (op === "add-key")\n            page.cfg_chatVaultUnlock = "wallet"'),
     (UI / "configGeneral.qml", '            page.cfg_chatVaultUnlock = "passphrase"\n        }',
      '            page.cfg_chatVaultUnlock = "wallet"\n        }'),
+    # Review M1: the useWalletSlot guard removed or weakened, or a write elsewhere.
+    (UI / "configGeneral.qml", '        if (page.vaultWallet === "set-up")\n            page.cfg_chatVaultUnlock = "wallet"',
+     '        page.cfg_chatVaultUnlock = "wallet"'),
+    (UI / "configGeneral.qml", '        if (page.vaultWallet === "set-up")\n            page.cfg_chatVaultUnlock = "wallet"',
+     '        if (page.vaultWallet !== "")\n            page.cfg_chatVaultUnlock = "wallet"'),
+    (UI / "configGeneral.qml", "    function runVault(op, method) {\n",
+     '    function runVault(op, method) {\n        page.cfg_chatVaultUnlock = "wallet"\n'),
+    (UI / "configGeneral.qml", "    function runVault(op, method) {\n",
+     '    function runVault(op, method) {\n        if (page.vaultWallet === "set-up")\n'
+     '            page.cfg_chatVaultUnlock = "wallet"\n'),
     (UI / "configGeneral.qml", '            page.cfg_chatVaultUnlock = "passphrase"\n        }',
      '            page.cfg_chatVaultUnlock = method\n        }'),
     (UI / "configChat.qml", '    property string cfg_chatVaultUnlockDefault: "passphrase"\n',

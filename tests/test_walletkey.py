@@ -72,26 +72,35 @@ def test_add_key_moves_the_key_fd_to_fd_and_unlock_uses_it(stubs, capsys):
     conf_before = (stubs.cipher / "gocryptfs.conf").read_bytes()
     assert reply("add-key", capsys) == {"ok": True}
     calls = stubs.calls()
-    openssl = [call for call in calls if call["tool"] == "openssl"]
-    writes = [call for call in calls if call["tool"] == "kwallet-query" and "--write-password" in call["argv"]]
-    reads = [call for call in calls if call["tool"] == "kwallet-query" and "--read-password" in call["argv"]]
+    kq = [call for call in calls if call["tool"] in ("openssl", "kwallet-query")]
     (passwd,) = [call for call in calls if call["tool"] == "gocryptfs" and "-passwd" in call["argv"]]
-    assert len(openssl) == len(writes) == len(reads) == 1
+    steps = [(call["tool"], "w" if "--write-password" in call["argv"] else "r" if call["tool"] != "openssl" else "",
+              call.get("entry", "")) for call in kq]
+    new, real = "encrypted-chat-folder.new", "encrypted-chat-folder"
+    # Staged key, re-keyed slot, then the key moved to the real entry, then the
+    # staging entry overwritten (and deleted).
+    assert steps == [("openssl", "", ""), ("kwallet-query", "w", new), ("kwallet-query", "r", new),
+                     ("kwallet-query", "r", new), ("kwallet-query", "w", real),
+                     ("openssl", "", ""), ("kwallet-query", "w", new)]
+    openssl, stage, read, copy_read, copy_write = kq[0], kq[1], kq[2], kq[3], kq[4]
     # Pipes only, never a file or a terminal; stderr always /dev/null.
-    assert openssl[0]["fds"][1].startswith("pipe:") and openssl[0]["fds"][0] == "/dev/null"
-    assert writes[0]["fds"][0].startswith("pipe:") and writes[0]["fds"][1:] == ["/dev/null"] * 2
-    assert reads[0]["fds"][1].startswith("pipe:") and reads[0]["fds"][0] == "/dev/null"
+    assert openssl["fds"][1].startswith("pipe:") and openssl["fds"][0] == "/dev/null"
+    for call in (stage, copy_write):
+        assert call["fds"][0].startswith("pipe:") and call["fds"][1:] == ["/dev/null"] * 2
+    for call in (read, copy_read):
+        assert call["fds"][1].startswith("pipe:") and call["fds"][0] == "/dev/null" and call["fds"][2] == "/dev/null"
     assert passwd["fds"][0].startswith("pipe:") and passwd["fds"][1:] == ["/dev/null"] * 2
-    assert openssl[0]["fds"][2] == reads[0]["fds"][2] == "/dev/null"
-    # The same key went openssl -> wallet -> gocryptfs stdin.
+    # The same key went openssl -> staging entry -> gocryptfs stdin -> real entry.
     stored = wallet_state(stubs)[KEY]
     assert re.fullmatch(r"[0-9a-f]{64}", stored)
+    assert KEY + ".new" not in wallet_state(stubs)
     digest = hashlib.sha256(stored.encode()).hexdigest()
-    assert writes[0]["sha"] == reads[0]["sha"] == passwd["stdin_sha"] == digest
-    assert hashlib.sha256((stored + "\n").encode()).hexdigest() == openssl[0]["sha"]
+    assert stage["sha"] == read["sha"] == passwd["stdin_sha"] == copy_read["sha"] == copy_write["sha"] == digest
+    assert hashlib.sha256((stored + "\n").encode()).hexdigest() == openssl["sha"]
+    assert kq[6]["sha"] != digest
     # argv: long options, our folder, entry and the wallet's name; -config is the copy.
-    assert writes[0]["argv"] == ["--folder", "Hearthside", "--write-password", "encrypted-chat-folder", "kdewallet"]
-    assert reads[0]["argv"] == ["--folder", "Hearthside", "--read-password", "encrypted-chat-folder", "kdewallet"]
+    assert copy_write["argv"] == ["--folder", "Hearthside", "--write-password", real, "kdewallet"]
+    assert read["argv"] == ["--folder", "Hearthside", "--read-password", new, "kdewallet"]
     config = passwd["argv"][passwd["argv"].index("-config") + 1]
     assert config == str(keys_dir(stubs) / "wallet.conf.new")
     assert stat.S_IMODE(os.lstat(slot(stubs)).st_mode) == 0o400
@@ -417,13 +426,15 @@ def test_status_never_needs_openssl(stubs, capsys):
     enrolled(stubs, capsys)
     stubs.remove("openssl")
     assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "set-up", "missing": ["openssl"]}
-    assert reply("remove-key", capsys) == {"ok": False, "error": "missing-tool"}
-    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off", "missing": ["openssl"]}
-    stubs.install("openssl")
-    assert reply("add-key", capsys) == {"ok": True}
-    stubs.remove("openssl")
     assert unlock_wallet(capsys) == {"ok": True}
     assert reply("add-key", capsys) == {"ok": False, "error": "missing-tool"}
+    assert reply("lock", capsys) == {"ok": True}
+    # remove-key needs no openssl: the overwrite is skipped, the entry still goes.
+    stubs.log.write_text("")
+    assert reply("remove-key", capsys) == {"ok": True}
+    assert KEY not in wallet_state(stubs) and not slot(stubs).exists()
+    assert [call for call in stubs.calls("kwallet-query") if "--write-password" in call["argv"]] == []
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off", "missing": ["openssl"]}
 
 
 # --- remove-key, destroy, purge ---------------------------------------------------------------
@@ -439,7 +450,11 @@ def test_remove_key_deletes_slot_then_overwrites_and_deletes_the_entry(stubs, ca
     (write,) = [call for call in calls if call["tool"] == "kwallet-query"]
     assert "--write-password" in write["argv"] and write["sha"] != hashlib.sha256(old.encode()).hexdigest()
     methods = [call["argv"][2].rsplit(".", 1)[-1] for call in calls if call["tool"] == "qdbus6"]
-    assert methods[-4:] == ["open", "removeEntry", "close", "keyDoesNotExist"]
+    at = methods.index("open")
+    assert methods[at:at + 4] == ["open", "removeEntry", "close", "keyDoesNotExist"]
+    # The staging entry is checked too (there is none here).
+    assert [call["argv"][5] for call in calls if call["tool"] == "qdbus6"
+            and call["argv"][2].endswith("keyDoesNotExist")][-1] == "encrypted-chat-folder.new"
     (remove,) = [call["argv"] for call in calls if call["tool"] == "qdbus6" and call["argv"][2].endswith("removeEntry")]
     assert remove[3:] == ["7", "Hearthside", "encrypted-chat-folder", "Hearthside"]
     assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
@@ -602,15 +617,35 @@ def test_python_never_reads_the_key(stubs, capsys, monkeypatch):
         seen.append(data)
         return data
 
+    real_readv, real_preadv = os.readv, os.preadv
+
+    def spy_readv(fd, buffers):
+        count = real_readv(fd, buffers)
+        seen.extend(bytes(buffer) for buffer in buffers)
+        return count
+
+    def spy_preadv(fd, buffers, offset, *flags):
+        count = real_preadv(fd, buffers, offset, *flags)
+        seen.extend(bytes(buffer) for buffer in buffers)
+        return count
+
     monkeypatch.setattr(os, "read", spy_read)
     monkeypatch.setattr(os, "pread", spy_pread)
+    monkeypatch.setattr(os, "readv", spy_readv)
+    monkeypatch.setattr(os, "preadv", spy_preadv)
     stubs.make_locked()
+    keys = []
     assert reply("add-key", capsys) == {"ok": True}
+    keys.append(wallet_state(stubs)[KEY].encode())
     assert reply("auto-unlock", capsys) == {"ok": True}
+    assert reply("add-key", capsys) == {"ok": True}  # Re-setup while unlocked (staged, then swapped).
+    keys.append(wallet_state(stubs)[KEY].encode())
     assert reply("lock", capsys) == {"ok": True}
-    key = wallet_state(stubs)[KEY].encode()
+    assert reply("unlock", capsys, "--method", "wallet") == {"ok": True}
+    assert reply("lock", capsys) == {"ok": True}
     assert reply("remove-key", capsys) == {"ok": True}
-    assert not any(key in data for data in seen)
+    assert keys[0] != keys[1]
+    assert not any(key in data for data in seen for key in keys)
 
 
 # --- argv guard ---------------------------------------------------------------------------------
@@ -694,7 +729,8 @@ def test_walletkey_source_rules():
             assert (node.module or "").split(".")[0] in sys.stdlib_module_names
     for pattern in (r"\bshell\s*=", r"(?<![\w.])print\s*\(", r"\bcapture_output\b", r"\bcheck_output\b",
                     r"\bos\.system\b", r"\bos\.popen\b", r"\bgetoutput\b", r"\.read\(", r"\bos\.read\b",
-                    r"\bcommunicate\b", r"\bsys\.std(out|err)\b"):
+                    r"\bcommunicate\b", r"\bsys\.std(out|err)\b", r"\bos\.p?readv\b",
+                    r"\b(?:stdin|stdout|stderr)\s*=\s*-\s*1\b", r"\bos\.fdopen\b", r"(?<![\w.])open\s*\("):
         assert not re.search(pattern, code), pattern
     # subprocess.PIPE only inside _query (the qdbus6 answers).
     for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
@@ -706,13 +742,20 @@ def test_walletkey_source_rules():
 def test_vault_wallet_paths_never_read_or_capture():
     tree = ast.parse(VAULT_SOURCE.read_text(encoding="utf-8"))
     functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    for name in ("add_key", "remove_key", "auto_unlock", "_unlock_with_wallet", "_mount", "_install_slot"):
+    for name in ("add_key", "remove_key", "auto_unlock", "_unlock_with_wallet", "_mount", "_commit_slot", "_seal_new_slot"):
         assert not _calls_in(functions[name], {"read", "pread", "readline", "communicate", "check_output"}), name
 
 
 @pytest.mark.parametrize("old,new", [
     ("            stdin=stdin,\n            stdout=stdout,\n", "            stdin=stdin,\n            stdout=subprocess.PIPE,\n"),
     ("    if code != 0:\n        _close(reader)", "    print(os.read(reader, 99))\n    if code != 0:\n        _close(reader)"),
+    ("            stdin=stdin,\n            stdout=stdout,\n", "            stdin=stdin,\n            stdout=-1,\n"),
+    ("    if code != 0:\n        _close(reader)",
+     "    os.readv(reader, [bytearray(65)])\n    if code != 0:\n        _close(reader)"),
+    ("    if code != 0:\n        _close(reader)",
+     "    os.preadv(reader, [bytearray(65)], 0)\n    if code != 0:\n        _close(reader)"),
+    ("    if code != 0:\n        _close(reader)",
+     "    os.fdopen(reader).readline()\n    if code != 0:\n        _close(reader)"),
 ])
 def test_proof_walletkey_source_rules_catch(old, new, monkeypatch, tmp_path):
     code = SOURCE.read_text(encoding="utf-8")
@@ -722,3 +765,125 @@ def test_proof_walletkey_source_rules_catch(old, new, monkeypatch, tmp_path):
     monkeypatch.setattr(sys.modules[__name__], "SOURCE", mutated)
     with pytest.raises(AssertionError):
         test_walletkey_source_rules()
+
+
+# --- re-setup is staged (review S4), removal without openssl (N1), N2 ---------------------------
+
+NEW_KEY = KEY + ".new"
+
+
+def _slot_snapshot(stubs):
+    return slot(stubs).read_bytes(), os.lstat(slot(stubs)).st_ino, wallet_state(stubs)[KEY]
+
+
+@pytest.mark.parametrize(
+    ("settings", "error", "staged_left"),
+    [
+        ({"STUB_KDIALOG_EXIT": 1}, "cancelled", False),
+        ({"STUB_PASSWD_EXIT": 12}, "wrong-passphrase", False),
+        ({"STUB_PASSWD_EXIT": 24}, "wallet-write-failed", False),
+        ({"STUB_OPENSSL_EXIT": 1}, "wallet-write-failed", False),
+        ({"STUB_KWALLET_WRITE_FAIL_ENTRY": "encrypted-chat-folder.new"}, "wallet-failed", False),
+        ({"STUB_KWALLET_READ_FAIL_ENTRY": "encrypted-chat-folder.new"}, "wallet-failed", True),
+        # The swap itself fails: the new slot goes back, the old one is restored.
+        ({"STUB_KWALLET_WRITE_FAIL_ENTRY": "encrypted-chat-folder"}, "wallet-failed", True),
+    ],
+)
+def test_a_failed_re_setup_leaves_the_working_slot(stubs, capsys, settings, error, staged_left):
+    enrolled(stubs, capsys)
+    before = _slot_snapshot(stubs)
+    stubs.env(**settings)
+    assert reply("add-key", capsys) == {"ok": False, "error": error}
+    assert _slot_snapshot(stubs) == before
+    assert sorted(os.listdir(keys_dir(stubs))) == ["wallet.conf"]
+    assert (NEW_KEY in wallet_state(stubs)) is staged_left
+    for name in settings:
+        stubs.monkeypatch.delenv(name)
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "set-up"}
+    assert unlock_wallet(capsys) == {"ok": True}
+    if staged_left:
+        # The next removal also clears the staging entry.
+        assert reply("lock", capsys) == {"ok": True}
+        assert reply("remove-key", capsys) == {"ok": True}
+        assert wallet_state(stubs) == {}
+
+
+def test_a_failed_first_set_up_leaves_no_slot(stubs, capsys):
+    stubs.make_locked()
+    stubs.env(STUB_KWALLET_WRITE_FAIL_ENTRY="encrypted-chat-folder")
+    assert reply("add-key", capsys) == {"ok": False, "error": "wallet-failed"}
+    assert os.listdir(keys_dir(stubs)) == []
+    assert KEY not in wallet_state(stubs)
+    assert reply("status", capsys)["wallet"] == "off"
+
+
+def test_a_successful_re_setup_replaces_slot_and_entry(stubs, capsys):
+    enrolled(stubs, capsys)
+    before = _slot_snapshot(stubs)
+    (keys_dir(stubs) / "wallet.conf.old").write_text("left by an interrupted swap")
+    assert reply("add-key", capsys) == {"ok": True}
+    after = _slot_snapshot(stubs)
+    assert after[1] != before[1] and after[2] != before[2]
+    assert sorted(os.listdir(keys_dir(stubs))) == ["wallet.conf"]
+    assert NEW_KEY not in wallet_state(stubs)
+    assert unlock_wallet(capsys) == {"ok": True}
+
+
+def test_openssl_failing_after_kwallet_query_stored_removes_the_empty_entry(stubs, capsys):
+    stubs.make_locked()
+    stubs.env(STUB_OPENSSL_EXIT=1)
+    assert reply("add-key", capsys) == {"ok": False, "error": "wallet-write-failed"}
+    (write,) = [call for call in stubs.calls("kwallet-query") if "--write-password" in call["argv"]]
+    assert write["sha"] == hashlib.sha256(b"").hexdigest()  # kwallet-query stored an empty value (W1)...
+    assert wallet_state(stubs) == {}  # ...which is deleted again.
+    removes = [call["argv"] for call in stubs.calls("qdbus6") if call["argv"][2].endswith("removeEntry")]
+    assert [argv[5] for argv in removes] == ["encrypted-chat-folder.new"]
+
+
+@pytest.mark.parametrize("command", ["remove-key", "destroy", "purge"])
+def test_every_removal_clears_a_leftover_staging_entry(stubs, capsys, monkeypatch, tmp_path, command):
+    enrolled(stubs, capsys)
+    state = wallet_state(stubs)
+    state[NEW_KEY] = "0" * 64
+    stubs.wallet.write_text(json.dumps(state))
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    if command == "purge":
+        assert cli.main(["--web-data", "purge"]) == 0
+        assert capsys.readouterr().out == '{"ok":true,"removed":["vault","vault-keys","wallet-entry"]}\n'
+    else:
+        assert reply(command, capsys) == {"ok": True}
+    assert wallet_state(stubs) == {}
+
+
+def test_purge_reports_a_lone_staging_entry(stubs, capsys, monkeypatch, tmp_path):
+    stubs.wallet.write_text(json.dumps({NEW_KEY: "0" * 64}))
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    assert cli.main(["--web-data", "purge"]) == 0
+    assert capsys.readouterr().out == '{"ok":true,"removed":["wallet-entry"]}\n'
+    assert wallet_state(stubs) == {}
+
+
+@pytest.mark.parametrize("command", ["destroy", "purge"])
+def test_destroy_and_purge_need_no_openssl(stubs, capsys, monkeypatch, tmp_path, command):
+    enrolled(stubs, capsys)
+    stubs.remove("openssl")
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    if command == "purge":
+        assert cli.main(["--web-data", "purge"]) == 0
+        assert capsys.readouterr().out == '{"ok":true,"removed":["vault","vault-keys","wallet-entry"]}\n'
+    else:
+        assert reply(command, capsys) == {"ok": True}
+    assert wallet_state(stubs) == {}
+    assert [call for call in stubs.calls("kwallet-query") if "--write-password" in call["argv"]] == []
+
+
+def test_staging_entry_never_reaches_gocryptfs_as_extpass():
+    # The mount's extpass reads only the real entry; the staging one is never mounted with.
+    staged = walletkey.read_argv(KQ, "kdewallet", walletkey.ENTRY_NEW)
+    walletkey.check_argv(staged)
+    assert not walletkey.is_read_argv(staged)
+    cipher, mountpoint, config = "/d/hearthside/vault", "/r/hearthside/vault", "/d/hearthside/vault-keys/wallet.conf"
+    argv = ["/usr/bin/gocryptfs", "-q", "-nosyslog", "-config", config,
+            *[item for value in staged for item in ("-extpass", value)], cipher, mountpoint]
+    with pytest.raises(webdata.HelperError):
+        vault._check_argv(argv, config=config)
