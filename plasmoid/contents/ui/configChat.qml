@@ -59,8 +59,6 @@ KCM.SimpleKCM {
     property bool cfg_tooltipShowsUsageDefault: true
     property string cfg_tooltipMetrics: ""
     property string cfg_tooltipMetricsDefault: ""
-    property bool cfg_tooltipShowsReset: true
-    property bool cfg_tooltipShowsResetDefault: true
     property string cfg_shortcutOpens: "popup"
     property string cfg_shortcutOpensDefault: "popup"
     // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so

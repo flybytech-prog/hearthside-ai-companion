@@ -60,8 +60,6 @@ KCM.ScrollViewKCM {
     property bool cfg_tooltipShowsUsageDefault: true
     property string cfg_tooltipMetrics: ""
     property string cfg_tooltipMetricsDefault: ""
-    property bool cfg_tooltipShowsReset: true
-    property bool cfg_tooltipShowsResetDefault: true
     property string cfg_shortcutOpens: "popup"
     property string cfg_shortcutOpensDefault: "popup"
     // Written only by main.qml (zoom keys, Ctrl+wheel); kept in step so
@@ -634,14 +632,6 @@ KCM.ScrollViewKCM {
                     Kirigami.ContextualHelpButton {
                         toolTipText: i18n("Percentages follow General → Display: Left shows \"62% left\", Used shows \"38% used\".")
                     }
-                }
-
-                QQC2.CheckBox {
-                    objectName: "tooltipResetChoice"
-                    enabled: page.tooltipReadingsEnabled
-                    text: i18n("Show time until reset")
-                    checked: page.cfg_tooltipShowsReset
-                    onToggled: page.cfg_tooltipShowsReset = checked
                 }
 
                 RowLayout {

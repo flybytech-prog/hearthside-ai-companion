@@ -46,7 +46,7 @@ plasmashell's memory.
 </tr>
 <tr>
 <td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: compact layout, warning colours, and the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings</sub></td>
-<td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, hover popup section: show usage and reset time on the panel icon, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
+<td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, hover popup section: show usage on the panel icon, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
 </tr>
 </table>
 
@@ -60,10 +60,11 @@ plasmashell's memory.
   Chat**.
 - **Split view**: the Chat toolbar's **Split** button shows a second site
   next to the first (the same site twice works too), each with its own site
-  picker and zoom; you type in each page yourself. It needs room: with the
-  **Large** popup size (Settings → General → Size) both fit side by side.
-  Two sites use about twice the memory of one; turning Split off closes the
-  second page.
+  picker and zoom; you type in each page yourself. Turning Split on widens
+  the popup just enough for both sites (if it isn't that wide already), and
+  turning it off puts the popup back to the width it had before. Two sites
+  use about twice the memory of one; turning Split off closes the second
+  page.
 - **Private by default**: pages run in an in-memory browser profile. You sign
   in on each site normally; nothing is saved to disk, and you are signed out
   when Plasma restarts or you choose **Clear chat data**. Every site
@@ -123,11 +124,11 @@ plasmashell's memory.
 - **Warning colours**: bars and values turn to your theme's warning colour
   from 60% used and to its critical colour from 85% used; both levels can be
   changed in steps of 5% (50% to 95%), whether the tab shows Left or Used.
-- **Hover popup**: hover over the panel icon for a short summary, such as
-  `Claude Code — Session: 62% left, resets in 2 h 10 min`. It shows the Usage
-  tab's readings, or readings you choose per provider, with or without the
-  time until each reset. Claude Code has no daily limit: its **Session** is
-  the 5-hour window and **Weekly** the 7-day one.
+- **Hover popup**: hover over the panel icon for a short summary: each
+  provider's name in bold, then one reading per line, such as **Session**
+  62% left and **Weekly** 80% left. It shows the Usage tab's readings, or
+  readings you choose per provider. Claude Code has no daily limit: its
+  **Session** is the 5-hour window and **Weekly** the 7-day one.
 - Detects installed tools through the Plasma login environment, CLI names, and
   Linux/XDG data locations, and contacts only providers that are both
   installed and tracked.
@@ -257,8 +258,8 @@ The hover popup's settings are under **Settings → AI Provider Settings**
   shows readings added later; the last ticked box can't be unticked (turn
   **Track** off instead). A reading the provider doesn't report right now is
   marked "(unavailable)".
-- **Hover popup**: **Show usage when hovering over the panel icon**, **Show
-  time until reset**, and **Readings**: **Same as the Usage tab** (the ticked
+- **Hover popup**: **Show usage when hovering over the panel icon** and
+  **Readings**: **Same as the Usage tab** (the ticked
   readings, or each provider's main reading, such as Weekly, while all of its
   readings are ticked), or untick it to choose each tracked provider's own
   readings, for example Claude Code's Session, its 5-hour window, next to

@@ -1,0 +1,16 @@
+<svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hearthside Settings → General: half heart, half gear (full colour). -->
+  <defs>
+    <linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0674a"/>
+      <stop offset="1" stop-color="#a8392a"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffc54a"/>
+      <stop offset="1" stop-color="#e07b1a"/>
+    </linearGradient>
+    <clipPath id="right"><rect x="11.35" y="0" width="11" height="22"/></clipPath>
+  </defs>
+  <path fill="url(#frame)" d="M11 20.8 L3 12.8 C0.8 10.6 0.8 7 3 4.8 C5.2 2.6 8.8 2.6 11 4.8 Z"/>
+  <path fill="url(#steel)" fill-rule="evenodd" clip-path="url(#right)" d="M17.49 9.93 L19.49 10.25 L19.49 12.95 L17.49 13.27 L16.77 15.01 L17.96 16.65 L16.05 18.56 L14.41 17.37 L12.67 18.09 L12.35 20.09 L9.65 20.09 L9.33 18.09 L7.59 17.37 L5.95 18.56 L4.04 16.65 L5.23 15.01 L4.51 13.27 L2.51 12.95 L2.51 10.25 L4.51 9.93 L5.23 8.19 L4.04 6.55 L5.95 4.64 L7.59 5.83 L9.33 5.11 L9.65 3.11 L12.35 3.11 L12.67 5.11 L14.41 5.83 L16.05 4.64 L17.96 6.55 L16.77 8.19 Z M13.6 11.6 A2.6 2.6 0 1 0 8.4 11.6 A2.6 2.6 0 1 0 13.6 11.6 Z"/>
+</svg>

@@ -705,15 +705,18 @@ function userAgentFor(url, defaultUa) {
     return userAgent(defaultUa)
 }
 
-// Preferred popup size in pixels for the given tab, times scale (Settings →
-// General → Size; anything odd is 1), clamped to the screen.
+// Preferred popup size in pixels for the given tab ("chat", "split" for the
+// web split view, else usage), times scale (Settings → General → Size;
+// anything odd is 1), clamped to the screen. Split is wide enough for two
+// chat sites side by side.
 function popupSize(tab, gu, availW, availH, scale) {
     var unit = Number(gu) > 0 ? Number(gu) : 18
     var factor = Number(scale) > 0 && isFinite(Number(scale)) ? Number(scale) : 1
     var minWidth = unit * 18
     var minHeight = unit * 15
-    var width = Math.round(unit * (tab === "chat" ? 34 : 23) * factor)
-    var height = Math.round(unit * (tab === "chat" ? 40 : 28) * factor)
+    var chat = tab === "chat" || tab === "split"
+    var width = Math.round(unit * (tab === "split" ? 52 : chat ? 34 : 23) * factor)
+    var height = Math.round(unit * (chat ? 40 : 28) * factor)
     if (Number(availW) > 0)
         width = Math.min(width, Number(availW) - unit * 2)
     if (Number(availH) > 0)

@@ -9,8 +9,6 @@
 // an empty array is left out of the tooltip, a provider not listed shows what
 // the Usage tab shows.
 
-var MINUTE_MS = 60000
-
 function metricIdsOf(providers, providerId) {
     var list = Array.isArray(providers) ? providers : []
     for (var index = 0; index < list.length; index++) {
@@ -119,52 +117,24 @@ function applyChoice(groups, choice) {
     return result
 }
 
-// The reset time as parts for the caller to translate, or null when it is
-// unknown. kind: "now", "minutes" {minutes}, "hours" {hours, minutes} or
-// "days" {days}; "days" also means the caller adds the weekday and time.
-function resetPhrase(resetsAtMs, nowMs) {
-    var target = Number(resetsAtMs)
-    var now = Number(nowMs)
-    if (resetsAtMs === null || resetsAtMs === undefined || resetsAtMs === ""
-            || !isFinite(target) || !isFinite(now))
-        return null
-    var difference = target - now
-    if (difference <= 0)
-        return {kind: "now"}
-    var minutes = Math.max(1, Math.round(difference / MINUTE_MS))
-    if (minutes < 60)
-        return {kind: "minutes", minutes: minutes}
-    var hours = Math.floor(minutes / 60)
-    if (hours < 24)
-        return {kind: "hours", hours: hours, minutes: minutes % 60}
-    return {kind: "days", days: Math.floor(hours / 24)}
-}
-
-// groups: [{name, items: [{title, value, reset}]}], already translated text;
-// reset is "" when unknown or not shown. With showsReset every reading gets
-// its own line, else one line per provider.
-function tooltipLines(groups, options) {
+// groups: [{name, items: [{title, value}]}], already translated text. The
+// hover popup shows each provider's name with one reading per line; this
+// keeps the providers that have readings, as plain strings.
+function tooltipSections(groups) {
     var list = Array.isArray(groups) ? groups : []
-    var showsReset = !!(options && options.showsReset)
-    var lines = []
+    var sections = []
     for (var groupIndex = 0; groupIndex < list.length; groupIndex++) {
         var group = list[groupIndex]
         var items = group && Array.isArray(group.items)
             ? group.items.filter(function (entry) { return !!entry && typeof entry === "object" }) : []
         if (items.length === 0)
             continue
-        var name = String(group.name || "")
-        if (showsReset) {
-            for (var itemIndex = 0; itemIndex < items.length; itemIndex++) {
-                var item = items[itemIndex]
-                var reset = item.reset ? ", " + item.reset : ""
-                lines.push(name + " — " + item.title + ": " + item.value + reset)
-            }
-        } else {
-            lines.push(name + ": " + items.map(function (entry) {
-                return entry.title + " " + entry.value
-            }).join(" · "))
-        }
+        sections.push({
+            name: String(group.name || ""),
+            items: items.map(function (entry) {
+                return {title: String(entry.title || ""), value: String(entry.value || "")}
+            })
+        })
     }
-    return lines
+    return sections
 }

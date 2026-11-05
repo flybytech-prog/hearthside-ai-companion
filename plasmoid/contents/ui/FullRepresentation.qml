@@ -18,7 +18,8 @@ PlasmaExtras.Representation {
     // The built-in Ollama chat is shown instead of the web chat.
     readonly property bool onOllama: full.onChat && root.chatSiteId === "ollama"
     readonly property var popupSize: ChatSites.popupSize(
-        full.onChat ? "chat" : "usage",
+        // Split view gets a wider popup, so both sites fit.
+        full.onChat ? (root.chatSplit && !full.onOllama ? "split" : "chat") : "usage",
         Kirigami.Units.gridUnit,
         // The popup's own screen, not the whole virtual desktop.
         Screen.width,
@@ -126,9 +127,42 @@ PlasmaExtras.Representation {
     Layout.preferredWidth: full.popupSize.width
     Layout.preferredHeight: full.popupSize.height
 
+    // Split view widens the popup window; turning split off puts it back to
+    // the width it had before. Plasma keeps the popup at the size it last closed at, so the
+    // preferred size above only counts the first time the popup opens.
+    // Only the panel popup (an AppletPopup) is resized, never a desktop view.
+    property int widthBeforeSplit: 0
+
+    function fitSplit(on) {
+        var popup = full.Window.window
+        if (!popup || String(popup).indexOf("AppletPopup") < 0)
+            return
+        if (on) {
+            var padding = Math.max(0, popup.width - full.width)
+            var wanted = ChatSites.popupSize("split", Kirigami.Units.gridUnit,
+                Screen.width, Screen.height, root.popupScale).width + padding
+            // Already widened: keep the width to go back to.
+            if (popup.width < wanted) {
+                if (full.widthBeforeSplit <= 0)
+                    full.widthBeforeSplit = popup.width
+                popup.width = wanted
+            }
+        } else if (full.widthBeforeSplit > 0) {
+            popup.width = full.widthBeforeSplit
+            full.widthBeforeSplit = 0
+        }
+    }
+
     Connections {
         target: root
+        function onChatSplitChanged() {
+            full.fitSplit(root.chatSplit)
+        }
         function onExpandedChanged() {
+            // Closing narrows the popup first, so Plasma remembers the
+            // original width; opening with split still on widens it again.
+            if (root.chatSplit)
+                full.fitSplit(root.expanded)
             if (root.expanded && full.onOllama)
                 ollamaView.focusLater()
             else if (root.expanded && full.onChat)

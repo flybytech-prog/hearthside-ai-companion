@@ -51,7 +51,7 @@ an account, a plan name, a reading or an error from a provider.
 | `usageCompact` | AI Provider Settings → Layout: Compact | `true` or `false` (the default) |
 | `usageWarnPercent`, `usageCriticalPercent` | AI Provider Settings → Warning / Critical colour from | Percent used in steps of 5: warning 50 to 90 (60 by default), critical 55 to 95 (85 by default) |
 | `configSchemaVersion` | Written by the widget | The settings format, now `3`; it makes the upgrade step above run once |
-| `tooltipShowsUsage`, `tooltipShowsReset` | AI Provider Settings → Hover popup | `true` (the default) or `false` |
+| `tooltipShowsUsage` | AI Provider Settings → Hover popup | `true` (the default) or `false`. (An older `tooltipShowsReset` entry is no longer read.) |
 | `tooltipMetrics` | AI Provider Settings → Hover popup → Readings | The hover popup's own readings, for example `{"claude":["session","weekly"]}`, or empty (the default) for Same as the Usage tab. On the first start after the upgrade that made the reading boxes filter the Usage tab, a saved `providerMetrics` choice moves here (unless this already had one), and `providerMetrics` becomes `{}` |
 | `usageMode` | General → Display, or the popup's Left / Used | `remaining` (the default) or `used` |
 | `refreshInterval` | General → Refresh every | Seconds: 60, 300 (the default), 900, 1800 or 3600 |

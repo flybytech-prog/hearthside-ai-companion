@@ -696,6 +696,19 @@ TestCase {
         compare(ChatSites.popupSize("chat", gu, 0, undefined), {width: 34 * gu, height: 40 * gu})
     }
 
+    // Split view: wide enough for two chat sites, same height as Chat.
+    function test_popupSizeSplit() {
+        var gu = 18
+        compare(ChatSites.popupSize("split", gu, 1920, 1080), {width: 52 * gu, height: 40 * gu})
+        compare(ChatSites.popupSize("split", gu, 1920, 1080, 1.25),
+                {width: Math.round(52 * gu * 1.25), height: Math.round(40 * gu * 1.25)})
+        compare(ChatSites.popupSize("split", gu, 1920, 1080, 0.8),
+                {width: Math.round(52 * gu * 0.8), height: Math.round(40 * gu * 0.8)})
+        // Still clamped to the screen.
+        compare(ChatSites.popupSize("split", gu, 800, 600), {width: 800 - 2 * gu, height: 600 - 4 * gu})
+        compare(ChatSites.popupSize("split", gu, 200, 200), {width: 18 * gu, height: 15 * gu})
+    }
+
     // Settings → General → Size scales the popup, still within the screen.
     function test_popupSizeScale() {
         var gu = 18

@@ -92,7 +92,6 @@ GENERAL_CONFIG_KEYS = {
     "popupSize": ("String", "normal"),
     "tooltipShowsUsage": ("Bool", "true"),
     # The hover tooltip's reset times and its own readings ("" = same as Usage).
-    "tooltipShowsReset": ("Bool", "true"),
     "tooltipMetrics": ("String", ""),
     # Usage tab: provider order ("" = catalog order), compact rows, bar colours.
     "providerOrder": ("String", ""),
@@ -2504,7 +2503,8 @@ LOCAL_OWNER_CHECK = UI / "LocalOwnerCheck.qml"
 # PlaceholderMessage read their text as rich text and expose no textFormat,
 # so their `text:`/`explanation:` may only be fixed literals.
 
-HELPER_TEXT_FILES = (USAGE_VIEW, CONFIG_USAGE, FULL_REPRESENTATION)
+USAGE_TOOLTIP = UI / "UsageTooltip.qml"
+HELPER_TEXT_FILES = (USAGE_VIEW, CONFIG_USAGE, FULL_REPRESENTATION, USAGE_TOOLTIP)
 MESSAGE_ELEMENT = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:InlineMessage|PlaceholderMessage)\s*\{"
 HELPER_TEXT_BANS = {name: RICH_TEXT_BANS[name] for name in (
     "RichText", "StyledText", "MarkdownText", "AutoText", "onLinkActivated", "linkActivated",
@@ -2577,6 +2577,16 @@ def test_tooltip_is_plain_text():
      "text: page.providerStatus("),
     (FULL_REPRESENTATION, "textFormat: Text.PlainText\n                    text: siteDelegate.modelData.name",
      "text: siteDelegate.modelData.name"),
+    (USAGE_TOOLTIP, "                    textFormat: Text.PlainText\n                    font.bold: true\n",
+     "                    font.bold: true\n"),
+    (USAGE_TOOLTIP, "                    textFormat: Text.PlainText\n                    font.bold: true\n",
+     "                    textFormat: Text.StyledText\n                    font.bold: true\n"),
+    (USAGE_TOOLTIP, "                            textFormat: Text.PlainText\n                            opacity: 0.75\n",
+     "                            opacity: 0.75\n"),
+    (USAGE_TOOLTIP, "                            textFormat: Text.PlainText\n                            horizontalAlignment",
+     "                            textFormat: Text.RichText\n                            horizontalAlignment"),
+    (USAGE_TOOLTIP, "            textFormat: Text.PlainText\n            text: tip.title\n",
+     "            text: tip.title\n"),
 ])
 def test_proof_helper_text_rule_catches(path, old, new):
     assert _helper_text_problems(_mutated(path, old, new))
@@ -4887,7 +4897,6 @@ CONFIG_GENERAL = CONFIG_PAGES[0]
 # functions that may write it (each of them must).
 USAGE_PAGE_WRITERS = {
     "tooltipShowsUsage": "tooltipUsageChoice",
-    "tooltipShowsReset": "tooltipResetChoice",
     "usageCompact": "usageCompactChoice",
     "tooltipMetrics": ("setTooltipSame", "setTooltipMetric"),
     "providerMetrics": ("setMetric",),
@@ -4954,15 +4963,14 @@ def test_usage_and_tooltip_settings_are_written_only_by_the_usage_page():
 
 
 USAGE_WRITER_MUTATIONS = [
-    (CONFIG_USAGE, "onToggled: page.cfg_tooltipShowsReset = checked", "onToggled: page.cfg_tooltipShowsReset = true"),
-    (CONFIG_USAGE, "                    onToggled: page.cfg_tooltipShowsReset = checked\n",
-     "                    onToggled: page.cfg_tooltipShowsUsage = checked\n"),
+    (CONFIG_USAGE, "                        onToggled: page.cfg_tooltipShowsUsage = checked\n",
+                   "                        onToggled: page.cfg_usageCompact = checked\n"),
     (CONFIG_USAGE, "onToggled: page.cfg_tooltipShowsUsage = checked", "onToggled: page.cfg_tooltipShowsUsage = true"),
     (CONFIG_USAGE, "onToggled: page.cfg_usageCompact = checked", "onToggled: page.cfg_usageCompact = !checked"),
     (CONFIG_USAGE, 'objectName: "usageCompactChoice"', 'objectName: "usageDenseChoice"'),
     (CONFIG_USAGE, "onToggled: page.setTooltipSame(checked)", 'onToggled: page.cfg_tooltipMetrics = ""'),
     (CONFIG_USAGE, "    function setTooltipSame(same) {\n",
-     "    function clear() { page.cfg_tooltipShowsReset = false }\n    function setTooltipSame(same) {\n"),
+     "    function clear() { page.cfg_tooltipShowsUsage = false }\n    function setTooltipSame(same) {\n"),
     (CONFIG_USAGE, "    function lastShownMetric(providerId, metricId) {\n",
      "    function reset() { page.cfg_providerMetrics = \"{}\" }\n    function lastShownMetric(providerId, metricId) {\n"),
     (CONFIG_USAGE, "        page.cfg_providerMetrics = JSON.stringify(metrics)\n", "\n"),
@@ -4977,8 +4985,8 @@ USAGE_WRITER_MUTATIONS = [
      "    property bool cfg_tooltipShowsUsageDefault: true\n    function f() { page.cfg_tooltipShowsUsage = false }\n"),
     (CONFIG_GENERAL, 'import "SettingsLogic.js" as SettingsLogic\n',
      'import "SettingsLogic.js" as SettingsLogic\nimport "TooltipLogic.js" as TooltipLogic\n'),
-    (UI / "configChat.qml", "    property bool cfg_tooltipShowsResetDefault: true\n",
-     "    property bool cfg_tooltipShowsResetDefault: true\n    function f() { page.cfg_tooltipShowsReset = false }\n"),
+    (UI / "configChat.qml", "    property bool cfg_tooltipShowsUsageDefault: true\n",
+     "    property bool cfg_tooltipShowsUsageDefault: true\n    function f() { page.cfg_tooltipShowsUsage = false }\n"),
     (UI / "configChat.qml", "    property string cfg_providerOrderDefault: \"\"\n",
      "    property string cfg_providerOrderDefault: \"\"\n    function f() { page.cfg_providerOrder = \"[]\" }\n"),
     (MAIN_QML, "    function chatNext() {",
@@ -5123,69 +5131,12 @@ def test_proof_tooltip_logic_needs_pragma():
     assert _alert_logic_problems(code)
 
 
-# The tooltip clock: one 60 s Timer, running only while the tooltip shows
-# reset times, that writes root.tooltipNowMs and nothing else; nothing else
-# writes tooltipNowMs.
-TOOLTIP_CLOCK_RUNNING = (r"(?m)^\s*running\s*:\s*root\s*\.\s*usageShown\s*&&\s*root\s*\.\s*tooltipShowsUsage\s*&&\s*"
-                         r"root\s*\.\s*tooltipShowsReset\s*$")
-# One member per line, and only these: no extra handler can hide in the clock.
-TOOLTIP_CLOCK_MEMBERS = r"(?:interval|repeat|triggeredOnStart|running|onTriggered)\s*:[^;{}]*$"
-TOOLTIP_CLOCK_TRIGGERED = r"(?m)^\s*onTriggered\s*:\s*root\s*\.\s*tooltipNowMs\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*$"
-
-
-def _tooltip_clock_problems(sources):
-    problems = []
-    for name, code in sources.items():
-        writes = _hits(r"\btooltipNowMs\s*(?:[-+*/%&|^]|\?\?)?=(?!=)|\btooltipNowMs\s*(?:\+\+|--)", code)
-        if _base(name) != MAIN_QML.name:
-            problems += [f"{name}:{line}: only main.qml's tooltip clock writes tooltipNowMs" for line in writes]
-            continue
-        clocks = [(start, end) for start, end in _block_spans(code, r"\bTimer\s*\{")
-                  if re.search(r"\btooltipNowMs\b", code[start:end])]
-        if len(clocks) != 1:
-            problems.append(f"{name}: one Timer writes tooltipNowMs, found {len(clocks)}")
-            continue
-        start, end = clocks[0]
-        clock = code[start:end]
-        if not re.search(r"(?m)^\s*interval\s*:\s*60000\s*$", clock) or len(_hits(TOOLTIP_CLOCK_RUNNING, clock)) != 1:
-            problems.append(f"{name}: the tooltip clock is `interval: 60000` and runs only while "
-                            "usageShown && tooltipShowsUsage && tooltipShowsReset")
-        members = [line.strip() for line in clock[1:-1].splitlines() if line.strip()]
-        if any(not re.match(TOOLTIP_CLOCK_MEMBERS, member) for member in members) \
-                or len(_hits(TOOLTIP_CLOCK_TRIGGERED, clock)) != 1 or len(_hits(r"\bonTriggered\b", clock)) != 1 \
-                or len(_hits(r"(?<![=!<>])=(?!=)", clock)) != 1:
-            problems.append(f"{name}: the tooltip clock does only `onTriggered: root.tooltipNowMs = Date.now()`")
-        inside = [line for line in writes if _line_of(code, start) <= line <= _line_of(code, end)]
-        if len(writes) != 1 or len(inside) != 1:
-            problems.append(f"{name}: tooltipNowMs is written only by the tooltip clock, lines {writes}")
-    return problems
-
-
-def test_tooltip_clock_only_ticks_the_tooltip():
-    problems = _tooltip_clock_problems(_all_code())
-    assert not problems, problems
-
-
-TOOLTIP_CLOCK_MUTATIONS = [
-    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
-     "        onTriggered: { root.tooltipNowMs = Date.now(); root.refresh() }\n"),
-    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
-     "        onTriggered: root.tooltipNowMs = Date.now()\n        onRunningChanged: root.refresh()\n"),
-    (MAIN_QML, "        onTriggered: root.tooltipNowMs = Date.now()\n",
-     "        onTriggered: root.tooltipNowMs = Date.now()\n        onTriggeredChanged: Plasmoid.configuration.usageMode = \"used\"\n"),
-    (MAIN_QML, "        running: root.usageShown && root.tooltipShowsUsage && root.tooltipShowsReset\n",
-     "        running: true\n"),
-    (MAIN_QML, "        interval: 60000\n        repeat: true\n", "        interval: 1000\n        repeat: true\n"),
-    (MAIN_QML, "    function chatNext() {", "    function x() { root.tooltipNowMs = 0 }\n    function chatNext() {"),
-    (UI / "UsageView.qml", None, "\n    function f() { root.tooltipNowMs = 0 }\n"),
-]
-
-
-@pytest.mark.parametrize(("path", "old", "new"), TOOLTIP_CLOCK_MUTATIONS,
-                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(TOOLTIP_CLOCK_MUTATIONS)])
-def test_proof_tooltip_clock_rule_catches(path, old, new):
-    sources = _sources_with(path, snippet=new) if old is None else _sources_with(path, old, new)
-    assert _tooltip_clock_problems(sources)
+# The hover popup shows no reset times, so it has no clock of its own.
+def test_hover_popup_has_no_reset_clock():
+    sources = _all_code()
+    problems = [f"{name}:{line}" for name, code in sources.items()
+                for line in _hits(r"\b(?:tooltipNowMs|tooltipShowsReset|resetPhrase)\b", code)]
+    assert not problems, f"the hover popup's reset times were removed; found {problems}"
 
 
 # Settings schema 2 -> 3 runs once: main.qml migrates the reading choices
