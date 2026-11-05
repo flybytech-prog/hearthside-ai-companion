@@ -133,6 +133,28 @@ PlasmaExtras.Representation {
     // Only the panel popup (an AppletPopup) is resized, never a desktop view.
     property int widthBeforeSplit: 0
 
+    // Settings → General → Size: resize the panel popup to the new size
+    // (Plasma would otherwise keep the size it last closed at). With split
+    // on it gets the split width, and turning split off goes to the new
+    // Chat width.
+    function applyPopupSize() {
+        var popup = full.Window.window
+        if (!popup || String(popup).indexOf("AppletPopup") < 0)
+            return
+        root.popupSizePending = false
+        var paddingWidth = Math.max(0, popup.width - full.width)
+        var paddingHeight = Math.max(0, popup.height - full.height)
+        var split = root.chatSplit && full.onChat && !full.onOllama
+        var size = ChatSites.popupSize(split ? "split" : full.onChat ? "chat" : "usage",
+            Kirigami.Units.gridUnit, Screen.width, Screen.height, root.popupScale)
+        full.widthBeforeSplit = split
+            ? ChatSites.popupSize("chat", Kirigami.Units.gridUnit, Screen.width, Screen.height,
+                                  root.popupScale).width + paddingWidth
+            : 0
+        popup.width = size.width + paddingWidth
+        popup.height = size.height + paddingHeight
+    }
+
     function fitSplit(on) {
         var popup = full.Window.window
         if (!popup || String(popup).indexOf("AppletPopup") < 0)
@@ -158,11 +180,17 @@ PlasmaExtras.Representation {
         function onChatSplitChanged() {
             full.fitSplit(root.chatSplit)
         }
+        function onPopupSizePendingChanged() {
+            if (root.popupSizePending)
+                full.applyPopupSize()
+        }
         function onExpandedChanged() {
             // Closing narrows the popup first, so Plasma remembers the
             // original width; opening with split still on widens it again.
             if (root.chatSplit)
                 full.fitSplit(root.expanded)
+            if (root.expanded && root.popupSizePending)
+                full.applyPopupSize()
             if (root.expanded && full.onOllama)
                 ollamaView.focusLater()
             else if (root.expanded && full.onChat)

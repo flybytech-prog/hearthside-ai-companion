@@ -230,6 +230,13 @@ fi
 icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 mkdir -p -- "$icon_directory"
 cp -f -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
+# Settings page icons (config.qml), single colour: Plasma recolours them to
+# the theme like its own icons. Unlinked first, like the notifyrc below.
+for settings_icon in general ai chat; do
+    rm -f -- "$icon_directory/hearthside-settings-$settings_icon.svg"
+    cp -- "$project_directory/assets/hearthside-settings-$settings_icon.svg" \
+        "$icon_directory/hearthside-settings-$settings_icon.svg"
+done
 
 # Usage alert events (System Settings → Notifications → Hearthside). The old
 # file is unlinked first, so a symlink in its place is replaced, never followed.

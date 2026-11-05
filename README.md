@@ -219,7 +219,8 @@ starts with Plasma while it remains on a panel.
 
 - **Popup**: **Open on** Chat or Usage; **Show tabs** Usage and Chat (at
   least one stays on); **Size** Compact, Normal or Large (never larger than
-  the screen); **Keep the popup open when clicking elsewhere**. A hidden Chat
+  the screen; changing it resizes the popup, which otherwise keeps the size
+  you last left it at); **Keep the popup open when clicking elsewhere**. A hidden Chat
   tab starts no chat page, web engine or Ollama chat, and hiding it locks
   open saved sign-ins. A hidden Usage tab runs no usage refresh, and the panel
   icon's tooltip shows only the name. The keyboard shortcut itself is set in

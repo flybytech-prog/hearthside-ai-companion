@@ -55,6 +55,10 @@ PlasmoidItem {
     // The tab the popup shows: popupTab while it is visible, else the other.
     readonly property string shownTab: SettingsLogic.shownTab(root.popupTab, root.popupTabs)
     readonly property real popupScale: SettingsLogic.popupScale(Plasmoid.configuration.popupSize)
+    // Settings → General → Size changed: the popup takes the new size the
+    // next time it can (FullRepresentation.applyPopupSize clears this).
+    property bool popupSizePending: false
+    onPopupScaleChanged: root.popupSizePending = true
     readonly property bool tooltipShowsUsage: Plasmoid.configuration.tooltipShowsUsage !== false
     readonly property var tooltipChoice: TooltipLogic.parseTooltipMetrics(
         Plasmoid.configuration.tooltipMetrics, Catalog.providers)

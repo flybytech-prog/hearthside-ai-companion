@@ -128,6 +128,20 @@ def test_install_replaces_an_old_copy_and_resets_its_mode(tmp_path, old_mode):
     assert stat.S_IMODE((directory / "hearthside.notifyrc").stat().st_mode) == 0o644
 
 
+def test_install_replaces_a_settings_icon_symlink_instead_of_writing_through_it(tmp_path):
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    directory = tmp_path / "home" / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    directory.mkdir(parents=True)
+    (directory / "hearthside-settings-general.svg").symlink_to(target)
+    completed, _ = run_install(tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert target.read_text() == "keep"
+    assert not (directory / "hearthside-settings-general.svg").is_symlink()
+    assert (directory / "hearthside-settings-general.svg").read_bytes() == \
+        (ROOT / "assets" / "hearthside-settings-general.svg").read_bytes()
+
+
 def test_install_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
     target = tmp_path / "precious"
     target.write_text("keep")
@@ -141,11 +155,14 @@ def test_install_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
     assert (directory / "hearthside.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
 
 
-def test_install_writes_only_the_icon_and_the_notifyrc_under_home(tmp_path):
+def test_install_writes_only_the_icons_and_the_notifyrc_under_home(tmp_path):
     completed, home = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
     written = sorted(path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file())
     assert written == [
+        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-ai.svg",
+        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-chat.svg",
+        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-general.svg",
         ".local/share/icons/hicolor/scalable/apps/hearthside.svg",
         ".local/share/knotifications6/hearthside.notifyrc",
     ]
