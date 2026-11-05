@@ -35,11 +35,15 @@ plasmashell's memory.
 </tr>
 <tr>
 <td align="center"><img src="docs/chat-locked.png" alt="Locked encrypted sign-ins card with Unlock and private-session buttons" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
-<td align="center"><img src="docs/usage.png" alt="Usage tab with Claude Code session and weekly meters" width="400"><br><sub>Usage meters</sub></td>
+<td align="center"><img src="docs/usage.png" alt="Usage tab with the last-updated time, a Refresh button, and Claude Code session and weekly meters" width="400"><br><sub>Usage meters</sub></td>
 </tr>
 <tr>
 <td align="center"><img src="docs/settings-general.png" alt="Settings, General page: popup, usage and privacy options" width="400"><br><sub>Settings → General</sub></td>
 <td align="center"><img src="docs/settings-chat.png" alt="Settings, Chat page: the list of chat sites" width="400"><br><sub>Settings → Chat</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: compact layout, warning colours, and the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings</sub></td>
+<td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, hover popup section: show usage and reset time on the panel icon, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
 </tr>
 </table>
 
