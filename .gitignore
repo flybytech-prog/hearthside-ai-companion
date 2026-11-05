@@ -30,3 +30,6 @@ dist/
 *.local
 secrets/
 fixtures/live/
+
+# Local Claude Code session notes and settings (never part of the project)
+.claude/

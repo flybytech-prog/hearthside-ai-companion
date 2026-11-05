@@ -1,5 +1,7 @@
 import QtQuick
+import QtQuick.Layouts
 import QtTest
+import org.kde.kirigami as Kirigami
 import "../../plasmoid/contents/ui"
 
 // The hover popup layout: title, each provider in bold, one reading per
@@ -60,6 +62,41 @@ TestCase {
         var providers = findAll(tip, "tooltipProvider")
         compare(providers[0].text, "<b>x</b>")
         compare(providers[0].textFormat, Text.PlainText)
+    }
+
+    // Long names and titles elide; the popup stays at most 24 grid units wide.
+    function test_longNamesElide() {
+        var long = ""
+        for (var index = 0; index < 30; index++)
+            long += "Provider name "
+        var tip = createTemporaryObject(tooltipComponent, this, {
+            title: long,
+            sections: [{name: long, items: [{title: long, value: "41% left"}]}]
+        })
+        verify(tip)
+        tryVerify(function () { return tip.implicitWidth > 0 })
+        verify(tip.implicitWidth <= Kirigami.Units.gridUnit * 24)
+        compare(tip.Layout.maximumWidth, tip.implicitWidth)
+        var provider = findAll(tip, "tooltipProvider")[0]
+        var title = findAll(tip, "tooltipReadingTitle")[0]
+        var value = findAll(tip, "tooltipReadingValue")[0]
+        compare(provider.elide, Text.ElideRight)
+        compare(title.elide, Text.ElideRight)
+        tryVerify(function () { return provider.truncated && title.truncated })
+        compare(provider.text, long)
+        compare(provider.textFormat, Text.PlainText)
+        compare(title.textFormat, Text.PlainText)
+        // The value is still shown whole, inside the popup.
+        verify(!value.truncated)
+        compare(value.text, "41% left")
+        verify(value.mapToItem(tip, value.width, 0).x <= tip.implicitWidth)
+        // Short content keeps its own width.
+        var small = createTemporaryObject(tooltipComponent, this, {
+            sections: [{name: "Codex", items: [{title: "Weekly", value: "80% left"}]}]
+        })
+        tryVerify(function () { return small.implicitWidth > 0 })
+        verify(small.implicitWidth < Kirigami.Units.gridUnit * 24)
+        verify(!findAll(small, "tooltipProvider")[0].truncated)
     }
 
     function test_empty() {

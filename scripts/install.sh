@@ -36,18 +36,24 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Could not run the Hearthside helper. Nothing was deleted." >&2
         exit 1
     fi
-    # The usage alert events file goes too, but only once the data is gone.
-    remove_notifyrc() {
+    # The usage alert events file and the app and settings icons go too, but
+    # only once the data is gone. rm unlinks a symlink, never its target.
+    remove_installed_files() {
         rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6/hearthside.notifyrc"
+        uninstall_icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+        rm -f -- "$uninstall_icons/hearthside.svg" \
+            "$uninstall_icons/hearthside-settings-general.svg" \
+            "$uninstall_icons/hearthside-settings-ai.svg" \
+            "$uninstall_icons/hearthside-settings-chat.svg"
     }
     case "$reply" in
         '{"ok":true,"removed":[]}')
-            remove_notifyrc
+            remove_installed_files
             echo "No Hearthside chat sign-in data found."
             ;;
         '{"ok":true,"removed":["'*'"]}')
             # Categories, in this order: vault, vault-keys, wallet-entry.
-            remove_notifyrc
+            remove_installed_files
             case "$reply" in *'"vault"'*) echo "Deleted: encrypted chat folder (saved chat sign-ins)." ;; esac
             case "$reply" in *'"vault-keys"'*) echo "Deleted: KDE Wallet unlock slot of the encrypted chat folder." ;; esac
             case "$reply" in *'"wallet-entry"'*) echo "Deleted: the encrypted chat folder's key in KDE Wallet." ;; esac
@@ -229,9 +235,11 @@ fi
 # Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthside").
 icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 mkdir -p -- "$icon_directory"
-cp -f -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
+# Unlinked first, like the notifyrc below, so a symlink is replaced, never followed.
+rm -f -- "$icon_directory/hearthside.svg"
+cp -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
 # Settings page icons (config.qml), single colour: Plasma recolours them to
-# the theme like its own icons. Unlinked first, like the notifyrc below.
+# the theme like its own icons. Unlinked first too.
 for settings_icon in general ai chat; do
     rm -f -- "$icon_directory/hearthside-settings-$settings_icon.svg"
     cp -- "$project_directory/assets/hearthside-settings-$settings_icon.svg" \

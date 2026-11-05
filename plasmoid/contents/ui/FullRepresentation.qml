@@ -17,15 +17,26 @@ PlasmaExtras.Representation {
     readonly property bool onChat: full.chatAvailable && root.shownTab === "chat"
     // The built-in Ollama chat is shown instead of the web chat.
     readonly property bool onOllama: full.onChat && root.chatSiteId === "ollama"
+    // Split view is on and actually shown (it stays on across tab switches).
+    readonly property bool splitShown: root.chatSplit && full.onChat && !full.onOllama
     readonly property var popupSize: ChatSites.popupSize(
         // Split view gets a wider popup, so both sites fit.
-        full.onChat ? (root.chatSplit && !full.onOllama ? "split" : "chat") : "usage",
+        full.splitShown ? "split" : full.onChat ? "chat" : "usage",
         Kirigami.Units.gridUnit,
         // The popup's own screen, not the whole virtual desktop.
         Screen.width,
         Screen.height,
         root.popupScale
     )
+
+    // A theme icon name, else fallbackName: Hearthside's own icons are only
+    // in the theme after install.sh, not after a plain kpackagetool6 install.
+    component IconChoice: Kirigami.Icon {
+        required property string fallbackName
+        readonly property string name: status === Kirigami.Icon.Error ? fallbackName : String(source)
+        visible: false
+        fallback: ""
+    }
 
     // The chat site picker (fixed catalog names and icons).
     component SitePicker: PlasmaComponents.ComboBox {
@@ -120,6 +131,21 @@ PlasmaExtras.Representation {
     Component.onCompleted: {
         full.takePendingDrop()
         full.takePendingDropError()
+        // Size changed before the first open, or opened before this item
+        // existed: once the popup window is there.
+        Qt.callLater(full.catchUp)
+    }
+    // The popup window can come later than this item.
+    Window.onWindowChanged: full.catchUp()
+
+    // Only while open and laid out, so the window's padding is right; a
+    // closed popup catches up when it opens (onExpandedChanged).
+    function catchUp() {
+        if (!root.expanded || full.width <= 0)
+            return
+        if (root.popupSizePending)
+            full.applyPopupSize()
+        full.fitSplit(full.splitShown)
     }
 
     Layout.minimumWidth: Kirigami.Units.gridUnit * 18
@@ -127,11 +153,14 @@ PlasmaExtras.Representation {
     Layout.preferredWidth: full.popupSize.width
     Layout.preferredHeight: full.popupSize.height
 
-    // Split view widens the popup window; turning split off puts it back to
-    // the width it had before. Plasma keeps the popup at the size it last closed at, so the
-    // preferred size above only counts the first time the popup opens.
+    // Split view widens the popup window; hiding split (Split off, another
+    // tab, Ollama) puts it back to the width it had before. Plasma keeps the
+    // popup at the size it last closed at, so the preferred size above only
+    // counts the first time the popup opens.
     // Only the panel popup (an AppletPopup) is resized, never a desktop view.
     property int widthBeforeSplit: 0
+    // The popup was open this session (fitSplit's first-open repair).
+    property bool openedOnce: false
 
     // Settings → General → Size: resize the panel popup to the new size
     // (Plasma would otherwise keep the size it last closed at). With split
@@ -144,7 +173,7 @@ PlasmaExtras.Representation {
         root.popupSizePending = false
         var paddingWidth = Math.max(0, popup.width - full.width)
         var paddingHeight = Math.max(0, popup.height - full.height)
-        var split = root.chatSplit && full.onChat && !full.onOllama
+        var split = full.splitShown
         var size = ChatSites.popupSize(split ? "split" : full.onChat ? "chat" : "usage",
             Kirigami.Units.gridUnit, Screen.width, Screen.height, root.popupScale)
         full.widthBeforeSplit = split
@@ -155,40 +184,47 @@ PlasmaExtras.Representation {
         popup.height = size.height + paddingHeight
     }
 
+    // The width decisions are ChatSites.splitWidthStep's. On the first open
+    // of the session it also repairs a width Plasma saved at split width
+    // (closing hides the window, and saves its size, before narrowing).
     function fitSplit(on) {
         var popup = full.Window.window
         if (!popup || String(popup).indexOf("AppletPopup") < 0)
             return
-        if (on) {
-            var padding = Math.max(0, popup.width - full.width)
-            var wanted = ChatSites.popupSize("split", Kirigami.Units.gridUnit,
-                Screen.width, Screen.height, root.popupScale).width + padding
-            // Already widened: keep the width to go back to.
-            if (popup.width < wanted) {
-                if (full.widthBeforeSplit <= 0)
-                    full.widthBeforeSplit = popup.width
-                popup.width = wanted
-            }
-        } else if (full.widthBeforeSplit > 0) {
-            popup.width = full.widthBeforeSplit
-            full.widthBeforeSplit = 0
+        var repair = root.expanded && !full.openedOnce
+        if (root.expanded)
+            full.openedOnce = true
+        var size = function (tab) {
+            return ChatSites.popupSize(tab, Kirigami.Units.gridUnit, Screen.width, Screen.height,
+                                       root.popupScale).width
         }
+        var step = ChatSites.splitWidthStep({
+            show: on === true,
+            popupWidth: popup.width,
+            padding: Math.max(0, popup.width - full.width),
+            splitWidth: size("split"),
+            normalWidth: size(full.onChat ? "chat" : "usage"),
+            before: full.widthBeforeSplit,
+            repair: repair && !full.splitShown
+        })
+        full.widthBeforeSplit = step.before
+        if (step.width > 0)
+            popup.width = step.width
     }
+
+    onSplitShownChanged: full.fitSplit(root.expanded && full.splitShown)
 
     Connections {
         target: root
-        function onChatSplitChanged() {
-            full.fitSplit(root.chatSplit)
-        }
         function onPopupSizePendingChanged() {
             if (root.popupSizePending)
                 full.applyPopupSize()
         }
         function onExpandedChanged() {
-            // Closing narrows the popup first, so Plasma remembers the
-            // original width; opening with split still on widens it again.
-            if (root.chatSplit)
-                full.fitSplit(root.expanded)
+            // Closing narrows the popup; opening with split shown widens it
+            // again. The first open also checks the saved width.
+            if (full.splitShown || full.widthBeforeSplit > 0 || (root.expanded && !full.openedOnce))
+                full.fitSplit(root.expanded && full.splitShown)
             if (root.expanded && root.popupSizePending)
                 full.applyPopupSize()
             if (root.expanded && full.onOllama)
@@ -240,21 +276,36 @@ PlasmaExtras.Representation {
                     PlasmaComponents.TabButton {
                         text: i18n("Chat")
                         // Hearthside's icons, as in Settings (install.sh).
-                        icon.name: "hearthside-settings-chat"
+                        icon.name: chatIcon.name
                         onClicked: root.popupTab = "chat"
+                        IconChoice {
+                            id: chatIcon
+                            source: "hearthside-settings-chat"
+                            fallbackName: "dialog-messages"
+                        }
                     }
                     PlasmaComponents.TabButton {
                         text: i18n("Usage")
-                        icon.name: "hearthside-settings-ai"
+                        icon.name: usageIcon.name
                         onClicked: root.popupTab = "usage"
+                        IconChoice {
+                            id: usageIcon
+                            source: "hearthside-settings-ai"
+                            fallbackName: "speedometer"
+                        }
                     }
                 }
                 PlasmaComponents.ToolButton {
-                    icon.name: "hearthside-settings-general"
+                    icon.name: settingsIcon.name
                     display: QQC2.AbstractButton.IconOnly
                     onClicked: Plasmoid.internalAction("configure").trigger()
                     QQC2.ToolTip.text: i18n("Configure…")
                     QQC2.ToolTip.visible: hovered
+                    IconChoice {
+                        id: settingsIcon
+                        source: "hearthside-settings-general"
+                        fallbackName: "configure"
+                    }
                 }
             }
 

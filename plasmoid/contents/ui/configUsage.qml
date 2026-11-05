@@ -249,6 +249,12 @@ KCM.ScrollViewKCM {
     }
 
     // level: "normal", "warning" or "critical"; "" is the default colour.
+    // The colour dialog's choice as "#rrggbb", always opaque, so a
+    // translucent colour can't turn into "" (normalizeColour still checks it).
+    function opaqueColour(colour) {
+        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))
+    }
+
     function setUsageColour(level, colour) {
         var value = UsageLogic.normalizeColour(colour)
         if (level === "normal")
@@ -295,7 +301,7 @@ KCM.ScrollViewKCM {
             id: colourDialog
             title: i18n("Choose a colour")
             selectedColor: colourChoice.shown
-            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))
+            onAccepted: page.setUsageColour(colourChoice.level, page.opaqueColour(selectedColor))
         }
         QQC2.ToolButton {
             objectName: colourChoice.level + "ColourReset"

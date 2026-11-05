@@ -142,6 +142,19 @@ def test_install_replaces_a_settings_icon_symlink_instead_of_writing_through_it(
         (ROOT / "assets" / "hearthside-settings-general.svg").read_bytes()
 
 
+def test_install_replaces_an_app_icon_symlink_instead_of_writing_through_it(tmp_path):
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    directory = tmp_path / "home" / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    directory.mkdir(parents=True)
+    (directory / "hearthside.svg").symlink_to(target)
+    completed, _ = run_install(tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert target.read_text() == "keep"
+    assert not (directory / "hearthside.svg").is_symlink()
+    assert (directory / "hearthside.svg").read_bytes() == (ROOT / "assets" / "hearthside.svg").read_bytes()
+
+
 def test_install_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
     target = tmp_path / "precious"
     target.write_text("keep")
@@ -167,3 +180,66 @@ def test_install_writes_only_the_icons_and_the_notifyrc_under_home(tmp_path):
         ".local/share/knotifications6/hearthside.notifyrc",
     ]
     assert sorted(os.listdir(tmp_path / "project")) == ["assets", "plasmoid", "scripts"]
+
+
+# --- --uninstall-web-data: the icons ------------------------------------------------------------
+
+ICON_NAMES = ("hearthside.svg", "hearthside-settings-general.svg", "hearthside-settings-ai.svg",
+              "hearthside-settings-chat.svg")
+
+
+def run_uninstall(tmp_path, reply_text):
+    """--uninstall-web-data with a python3 stub that prints ``reply_text`` as the helper's reply."""
+    project = _copied_project(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    stubs = tmp_path / "stub-bin"
+    stubs.mkdir(exist_ok=True)
+    _stub(stubs, "python3", f"#!/bin/sh\nprintf '%s\\n' '{reply_text}'\n")
+    return subprocess.run(
+        ["sh", str(project / "scripts" / "install.sh"), "--uninstall-web-data"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home)}, timeout=60, check=False,
+    )
+
+
+def _icon_directory(tmp_path):
+    directory = tmp_path / "home" / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+@pytest.mark.parametrize("reply_text", ['{"ok":true,"removed":[]}', '{"ok":true,"removed":["vault"]}'])
+def test_uninstall_web_data_removes_the_icons_and_nothing_else(tmp_path, reply_text):
+    directory = _icon_directory(tmp_path)
+    for name in ICON_NAMES:
+        (directory / name).write_text("<svg/>")
+    neighbour = directory / "hearthside-other.svg"
+    neighbour.write_text("keep")
+    completed = run_uninstall(tmp_path, reply_text)
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert sorted(os.listdir(directory)) == ["hearthside-other.svg"]
+    assert neighbour.read_text() == "keep"
+
+
+def test_uninstall_web_data_removes_icon_symlinks_not_their_targets(tmp_path):
+    directory = _icon_directory(tmp_path)
+    targets = []
+    for name in ICON_NAMES:
+        target = tmp_path / f"precious-{name}"
+        target.write_text("keep")
+        (directory / name).symlink_to(target)
+        targets.append(target)
+    completed = run_uninstall(tmp_path, '{"ok":true,"removed":[]}')
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert os.listdir(directory) == []
+    assert [target.read_text() for target in targets] == ["keep"] * len(ICON_NAMES)
+
+
+def test_uninstall_web_data_keeps_the_icons_when_nothing_was_deleted(tmp_path):
+    directory = _icon_directory(tmp_path)
+    for name in ICON_NAMES:
+        (directory / name).write_text("<svg/>")
+    completed = run_uninstall(tmp_path, '{"ok":false,"error":"not-locked"}')
+    assert completed.returncode == 1
+    assert sorted(os.listdir(directory)) == sorted(ICON_NAMES)

@@ -316,9 +316,14 @@ Manual installation remains available:
 ```bash
 python3 -m pip install --user --break-system-packages .
 kpackagetool6 -t Plasma/Applet -i plasmoid
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthside{,-settings-general,-settings-ai,-settings-chat}.svg
+cp assets/hearthside.svg assets/hearthside-settings-{general,ai,chat}.svg ~/.local/share/icons/hicolor/scalable/apps/
 ```
 
 Use `-u plasmoid` instead of `-i` when the package is already installed.
+The app icon and the settings and tab icons are loaded from
+`~/.local/share/icons/hicolor/scalable/apps/`, so copy them there too.
 
 To delete saved chat sign-ins when you stop using Hearthside, first lock the
 encrypted folder in the Chat tab (or turn Stay signed in off), then run:
@@ -327,9 +332,20 @@ encrypted folder in the Chat tab (or turn Stay signed in off), then run:
 ./scripts/install.sh --uninstall-web-data
 ```
 
-It deletes the encrypted folder and the usage alert events file
-(`knotifications6/hearthside.notifyrc`) and nothing else, and refuses while
-the folder is unlocked.
+It deletes the encrypted folder, the usage alert events file
+(`knotifications6/hearthside.notifyrc`) and the icons
+(`icons/hicolor/scalable/apps/hearthside*.svg`, the four listed above) and
+nothing else, and refuses while the folder is unlocked.
+
+To remove a manual installation:
+
+```bash
+kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthside
+python3 -m pip uninstall --break-system-packages hearthside
+rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthside{,-settings-general,-settings-ai,-settings-chat}.svg
+rm -f ~/.local/share/knotifications6/hearthside.notifyrc
+```
+
 When upgrading from AI Usage 2.x by hand, remove the old helper and widget
 first, so the two never refresh the same sign-ins at once:
 

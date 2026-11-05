@@ -723,3 +723,36 @@ function popupSize(tab, gu, availW, availH, scale) {
         height = Math.min(height, Number(availH) - unit * 4)
     return { width: Math.max(minWidth, width), height: Math.max(minHeight, height) }
 }
+
+// The panel popup's width around split view (FullRepresentation resizes the
+// window itself, since Plasma keeps the size it last closed at). In:
+// show: split view is shown now; popupWidth, padding: the window's width and
+// what it adds around the popup's content; splitWidth, normalWidth:
+// popupSize() widths for "split" and for the tab shown without split;
+// before: the width to go back to (0: none); repair: the first open of the
+// session, when a width saved before narrowing (Plasma restart) is put back.
+// Returns {width: the new window width (0: leave it), before}.
+function splitWidthStep(input) {
+    var step = input || {}
+    var pixels = function (value) {
+        var number = Number(value)
+        return isFinite(number) && number > 0 ? Math.round(number) : 0
+    }
+    var popupWidth = pixels(step.popupWidth)
+    var padding = pixels(step.padding)
+    var before = pixels(step.before)
+    var split = pixels(step.splitWidth) > 0 ? pixels(step.splitWidth) + padding : 0
+    var normal = pixels(step.normalWidth) > 0 ? pixels(step.normalWidth) + padding : 0
+    if (step.show === true) {
+        // Already wide enough: keep the width to go back to.
+        if (split > 0 && popupWidth < split)
+            return { width: split, before: before > 0 ? before : popupWidth }
+        return { width: 0, before: before }
+    }
+    if (before > 0)
+        return { width: before, before: 0 }
+    if (step.repair === true && split > 0 && normal > 0 && normal !== popupWidth
+            && Math.abs(popupWidth - split) <= 1)
+        return { width: normal, before: 0 }
+    return { width: 0, before: 0 }
+}

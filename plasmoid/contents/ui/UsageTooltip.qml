@@ -14,7 +14,10 @@ Item {
     // [{name, items: [{title, value}]}]
     property var sections: []
 
-    implicitWidth: column.implicitWidth + Kirigami.Units.largeSpacing * 2
+    // At most 24 grid units wide; long names and titles elide.
+    readonly property real maximumColumnWidth: Kirigami.Units.gridUnit * 24 - Kirigami.Units.largeSpacing * 2
+
+    implicitWidth: column.width + Kirigami.Units.largeSpacing * 2
     implicitHeight: column.implicitHeight + Kirigami.Units.largeSpacing * 2
     Layout.minimumWidth: implicitWidth
     Layout.minimumHeight: implicitHeight
@@ -32,11 +35,13 @@ Item {
         objectName: "tooltipColumn"
         x: Kirigami.Units.largeSpacing
         y: Kirigami.Units.largeSpacing
+        width: Math.min(column.implicitWidth, tip.maximumColumnWidth)
         spacing: Kirigami.Units.smallSpacing
 
         Kirigami.Heading {
             level: 3
             Layout.fillWidth: true
+            elide: Text.ElideRight
             textFormat: Text.PlainText
             text: tip.title
             visible: text !== ""
@@ -59,6 +64,7 @@ Item {
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
                     font.bold: true
+                    elide: Text.ElideRight
                     text: section.modelData.name
                 }
 
@@ -77,6 +83,7 @@ Item {
                             Layout.fillWidth: true
                             textFormat: Text.PlainText
                             opacity: 0.75
+                            elide: Text.ElideRight
                             text: reading.modelData.title
                         }
                         PlasmaComponents.Label {

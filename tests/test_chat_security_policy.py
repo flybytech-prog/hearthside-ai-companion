@@ -371,18 +371,37 @@ def test_webengine_and_dialogs_are_imported_only_by_chat_web_view(module_pattern
         f"{_rel(path)}:{line}"
         for path in _code_files() if path != CHAT_WEB_VIEW
         # configUsage.qml's colour boxes: only a ColorDialog (_colour_dialog_problems).
-        and not (module == "QtQuick.Dialogs" and path.name == "configUsage.qml")
+        and not _dialogs_exempt(module, path)
         for line in _hits(pattern, _read_code(path))
     ]
     assert not offenders, f"{module} may only be imported by ChatWebView.qml; found in {offenders}"
     assert _hits(pattern, _read_code(CHAT_WEB_VIEW)), f"{_rel(CHAT_WEB_VIEW)} must import {module}"
 
 
+def _dialogs_exempt(module, path):
+    """Only the real configUsage.qml (full path, not any file of that name)."""
+    return module == "QtQuick.Dialogs" and path == CONFIG_USAGE
+
+
+@pytest.mark.parametrize("path", [
+    UI / "sub" / "configUsage.qml",
+    CONTENTS / "configUsage.qml",
+    UI / "configChat.qml",
+], ids=lambda path: _rel(path))
+def test_proof_dialogs_exemption_is_the_one_path(path):
+    assert not _dialogs_exempt("QtQuick.Dialogs", path)
+    assert _dialogs_exempt("QtQuick.Dialogs", CONFIG_USAGE)
+    assert not _dialogs_exempt("QtWebEngine", CONFIG_USAGE)
+
+
 # AI Provider Settings' colour boxes use Qt's ColorDialog, which only hands
 # back a colour: configUsage.qml imports QtQuick.Dialogs once, as QtDialogs,
 # declares exactly one dialog, a ColorDialog, and no file, folder or message
-# dialog; it saves only through setUsageColour.
+# dialog; it saves only through setUsageColour, always opaque (opaqueColour).
+# The dialog sets nothing else: no options (so no alpha), no other handler.
 DIALOG_TYPES = r"\bQtDialogs\s*\.\s*(\w+)\s*\{"
+COLOUR_DIALOG_MEMBERS = ("id", "title", "selectedColor", "onAccepted")
+COLOUR_DIALOG_ACCEPTED = "page.setUsageColour(colourChoice.level, page.opaqueColour(selectedColor))"
 
 
 def _colour_dialog_problems(code):
@@ -397,8 +416,21 @@ def _colour_dialog_problems(code):
         problems.append(f"exactly one QtDialogs.ColorDialog, found {dialogs}")
     for start, body in _blocks(code, r"\bQtDialogs\s*\.\s*ColorDialog\s*\{"):
         accepted = re.findall(r"(?m)^\s*onAccepted\s*:\s*(.+)$", body)
-        if accepted != ["page.setUsageColour(colourChoice.level, String(selectedColor))"]:
+        if accepted != [COLOUR_DIALOG_ACCEPTED]:
             problems.append(f"line {_line_of(code, start)}: the ColorDialog only calls page.setUsageColour")
+        top = _top_level_raw(body)
+        members = re.findall(r"(?m)^\s*([A-Za-z_][\w.]*)\s*:", top)
+        # Anything at the top level that is not "name: value" (a child, a
+        # function, a property declaration) is a member too.
+        others = [line.strip() for line in top.splitlines()
+                  if line.strip() and not re.match(r"\s*[A-Za-z_][\w.]*\s*:", line)]
+        if sorted(members) != sorted(COLOUR_DIALOG_MEMBERS) or others:
+            problems.append(f"line {_line_of(code, start)}: the ColorDialog may only set "
+                            f"{', '.join(COLOUR_DIALOG_MEMBERS)}; found {members + others}")
+    if not re.search(r"\bfunction\s+opaqueColour\s*\(\s*colour\s*\)\s*\{\s*return\s+String\s*\(\s*"
+                     r"Qt\s*\.\s*rgba\s*\(\s*colour\.r\s*,\s*colour\.g\s*,\s*colour\.b\s*,\s*1\s*\)\s*\)\s*\}",
+                     code):
+        problems.append("opaqueColour(colour) must return String(Qt.rgba(colour.r, colour.g, colour.b, 1))")
     return problems
 
 
@@ -411,15 +443,116 @@ def test_settings_colour_dialog_is_only_a_colour_dialog():
     ("import QtQuick.Dialogs as QtDialogs\n", "import QtQuick.Dialogs as QtDialogs\nimport QtQuick.Dialogs\n"),
     ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FileDialog {\n"),
     ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FolderDialog {}\n        QtDialogs.ColorDialog {\n"),
-    ("            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n",
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
      "            onAccepted: page.cfg_usageNormalColor = String(selectedColor)\n"),
-    ("            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n",
-     "            onAccepted: { page.setUsageColour(colourChoice.level, String(selectedColor)); Qt.openUrlExternally(\"x\") }\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {{ {COLOUR_DIALOG_ACCEPTED}; Qt.openUrlExternally(\"x\") }}\n"),
+    # The colour as the dialog gave it (translucent: saved as "").
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     "            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n"),
+    # Other members of the dialog.
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            onRejected: page.cfg_usageNormalColor = \"\"\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            options: QtDialogs.ColorDialog.ShowAlphaChannel\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            onSelectedColorChanged: Qt.openUrlExternally(\"x\")\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            Component.onCompleted: open()\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            function f() {{ return 1 }}\n"),
+    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            property string x: \"\"\n"),
+    ("            title: i18n(\"Choose a colour\")\n",
+     "            title: i18n(\"Choose a colour\")\n            title: \"x\"\n"),
+    ("            selectedColor: colourChoice.shown\n", ""),
+    # The helper must keep the colour opaque.
+    ("        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))\n",
+     "        return String(Qt.rgba(colour.r, colour.g, colour.b, colour.a))\n"),
+    ("        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))\n", "        return String(colour)\n"),
     ("    function setThresholds(warn, critical) {\n",
      "    function f() { return QtDialogs.MessageDialog }\n    function setThresholds(warn, critical) {\n"),
 ])
 def test_proof_colour_dialog_rule_catches(old, new):
     assert _colour_dialog_problems(_mutated(CONFIG_USAGE, old, new))
+
+
+# No QML is built from strings or loaded by URL at runtime: no
+# Qt.createQmlObject or Qt.createComponent anywhere in the plasmoid. Loading a
+# file stays in the places that do it today: ChatView.qml's one
+# webLoader.setSource(chatView.webSource, ...) (and its Loader, with no source
+# binding) and OllamaChatView.qml's block Loader, which only picks one of its
+# own Components (sourceComponent).
+DYNAMIC_LOADERS = {"ChatView.qml": 1, "OllamaChatView.qml": 1}
+
+
+def _dynamic_creation_offenders(sources):
+    offenders = []
+    for name, code in sources.items():
+        base = Path(name).name
+        for line in _hits(r"\b(?:createQmlObject|createComponent)\b", code):
+            offenders.append(f"{name}:{line}: Qt.createQmlObject/createComponent")
+        set_sources = _hits(r"\bsetSource\s*\(", code)
+        allowed = _hits(r"\bwebLoader\s*\.\s*setSource\s*\(\s*chatView\s*\.\s*webSource\s*,", code)
+        if base == "ChatView.qml":
+            if len(set_sources) > 1 or set_sources != allowed:
+                offenders.append(f"{name}:{set_sources}: only webLoader.setSource(chatView.webSource, ...)")
+        elif set_sources:
+            offenders.append(f"{name}:{set_sources}: setSource()")
+        loaders = list(_blocks(code, r"(?<![\w.])Loader\s*\{"))
+        if len(loaders) > DYNAMIC_LOADERS.get(base, 0):
+            offenders.append(f"{name}: {len(loaders)} Loader(s)")
+        for start, body in loaders:
+            top = _top_level_raw(body)
+            if re.search(r"(?m)^\s*source\s*:", top):
+                offenders.append(f"{name}:{_line_of(code, start)}: Loader with a source")
+            if base == "OllamaChatView.qml" and not re.search(r"(?m)^\s*sourceComponent\s*:", top):
+                offenders.append(f"{name}:{_line_of(code, start)}: the block Loader picks a sourceComponent")
+            if base == "ChatView.qml" and not re.search(r"(?m)^\s*id\s*:\s*webLoader\s*$", top):
+                offenders.append(f"{name}:{_line_of(code, start)}: the one Loader is webLoader")
+        for line in _hits(r"\.\s*source\s*=(?!=)", code):
+            offenders.append(f"{name}:{line}: assigns a source")
+    return offenders
+
+
+def test_no_qml_is_created_at_runtime_outside_the_known_loaders():
+    offenders = _dynamic_creation_offenders(_all_code())
+    assert not offenders, f"runtime QML creation outside the known Loaders: {offenders}"
+
+
+@pytest.mark.parametrize(("target", "snippet"), [
+    (FULL_REPRESENTATION, "    function f() { return Qt.createQmlObject(\"import QtQuick; Item {}\", full) }\n"),
+    (MAIN_QML, "    function f() { return Qt.createComponent(\"ChatView.qml\") }\n"),
+    (MAIN_QML, "    function f() { return Qt . createComponent (\"x.qml\") }\n"),
+    (CHAT_SITES_JS, "    var c = Qt.createComponent(\"x.qml\")\n"),
+    (UI / "configGeneral.qml", "    property var f: Qt[\"createQmlObject\"]\n"),
+    (FULL_REPRESENTATION, "    Loader { source: \"ChatWebView.qml\" }\n"),
+    (FULL_REPRESENTATION, "    Loader { id: l }\n    function f() { l.setSource(\"x.qml\", {}) }\n"),
+    (FULL_REPRESENTATION, "    Loader { id: l }\n    function f() { l.source = \"x.qml\" }\n"),
+    (CHAT_VIEW, "    function f() { webLoader.setSource(\"x.qml\", {}) }\n"),
+    (CHAT_VIEW, "    function f() { webLoader.setSource(chatView.webSource, {}) }\n"),
+    (CHAT_VIEW, "    function f() { webLoader.source = \"x.qml\" }\n"),
+    (CHAT_VIEW, "    Loader { sourceComponent: null }\n"),
+    (OLLAMA_CHAT_VIEW, "    function f() { blockLoader.setSource(\"x.qml\") }\n"),
+    (OLLAMA_CHAT_VIEW, "    Loader { sourceComponent: null }\n"),
+])
+def test_proof_dynamic_creation_rule_catches(target, snippet):
+    sources = _all_code()
+    sources[_rel(target)] = _appended(target, snippet)
+    assert _dynamic_creation_offenders(sources)
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CHAT_VIEW, "            id: webLoader\n", "            id: webLoader\n            source: chatView.webSource\n"),
+    (CHAT_VIEW, "            id: webLoader\n", "            id: otherLoader\n"),
+    (OLLAMA_CHAT_VIEW, "                                    sourceComponent: segment.code ? codeBlock\n",
+     "                                    source: \"Reply.qml\"\n"
+     "                                    property var x: segment.code ? codeBlock\n"),
+])
+def test_proof_dynamic_creation_rule_catches_loader_changes(path, old, new):
+    sources = _all_code()
+    sources[_rel(path)] = _mutated(path, old, new)
+    assert _dynamic_creation_offenders(sources)
 
 
 def test_chat_sites_js_has_no_imports():

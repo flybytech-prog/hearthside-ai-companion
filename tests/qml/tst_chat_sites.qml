@@ -728,6 +728,84 @@ TestCase {
         compare(ChatSites.popupSize("usage", 10, 0, 0, 0.8), {width: 184, height: 224})
     }
 
+    // The popup width around split view (FullRepresentation.fitSplit).
+    function splitStep(show, popupWidth, before, repair) {
+        // gu 18: split 52 gu, chat 34 gu; the window adds 12 px around it.
+        return ChatSites.splitWidthStep({
+            show: show, popupWidth: popupWidth, padding: 12,
+            splitWidth: 52 * 18, normalWidth: 34 * 18, before: before, repair: repair
+        })
+    }
+
+    function test_splitWidthStepWidens() {
+        // Split shown: widen and remember the width to go back to.
+        compare(splitStep(true, 400, 0), {width: 52 * 18 + 12, before: 400})
+        // Already widened (or wider by hand): leave it, keep what to go back to.
+        compare(splitStep(true, 52 * 18 + 12, 400), {width: 0, before: 400})
+        compare(splitStep(true, 2000, 0), {width: 0, before: 0})
+        // Widened again before narrowing: the first width stays.
+        compare(splitStep(true, 500, 400), {width: 52 * 18 + 12, before: 400})
+    }
+
+    function test_splitWidthStepNarrows() {
+        // Split hidden (Split off, Usage tab, Ollama, Chat tab hidden): back.
+        compare(splitStep(false, 52 * 18 + 12, 400), {width: 400, before: 0})
+        // Nothing to go back to: leave it.
+        compare(splitStep(false, 700, 0), {width: 0, before: 0})
+        // Closing with split shown narrows; opening again with it shown widens.
+        var closed = splitStep(false, 52 * 18 + 12, 400)
+        compare(splitStep(true, closed.width, closed.before), {width: 52 * 18 + 12, before: 400})
+    }
+
+    // After a Plasma restart the saved width can be the split width (the
+    // size is saved before narrowing): the first open puts it back.
+    function test_splitWidthStepRepairsTheFirstOpen() {
+        compare(splitStep(false, 52 * 18 + 12, 0, true), {width: 34 * 18 + 12, before: 0})
+        compare(splitStep(false, 52 * 18 + 13, 0, true), {width: 34 * 18 + 12, before: 0})
+        compare(splitStep(false, 52 * 18 + 11, 0, true), {width: 34 * 18 + 12, before: 0})
+        // Only within 1 px of the split width, only on the first open.
+        compare(splitStep(false, 52 * 18 + 14, 0, true), {width: 0, before: 0})
+        compare(splitStep(false, 700, 0, true), {width: 0, before: 0})
+        compare(splitStep(false, 52 * 18 + 12, 0, false), {width: 0, before: 0})
+        compare(splitStep(false, 52 * 18 + 12, 0), {width: 0, before: 0})
+        // Never while split is shown.
+        compare(splitStep(true, 52 * 18 + 12, 0, true), {width: 0, before: 0})
+        // The Usage tab's width when Usage shows.
+        compare(ChatSites.splitWidthStep({show: false, popupWidth: 52 * 18 + 12, padding: 12,
+                                          splitWidth: 52 * 18, normalWidth: 23 * 18, repair: true}),
+                {width: 23 * 18 + 12, before: 0})
+        // A small screen clamps both to the same width: nothing to repair.
+        compare(ChatSites.splitWidthStep({show: false, popupWidth: 600, padding: 0,
+                                          splitWidth: 600, normalWidth: 600, repair: true}),
+                {width: 0, before: 0})
+    }
+
+    // A size change before the first open (applyPopupSize) leaves no width
+    // to go back to unless split is shown; the step then follows it.
+    function test_splitWidthStepAfterSizeChange() {
+        var scaled = Math.round(52 * 18 * 1.25)
+        var chat = Math.round(34 * 18 * 1.25)
+        compare(ChatSites.splitWidthStep({show: true, popupWidth: scaled + 12, padding: 12,
+                                          splitWidth: scaled, normalWidth: chat, before: chat + 12}),
+                {width: 0, before: chat + 12})
+        compare(ChatSites.splitWidthStep({show: false, popupWidth: scaled + 12, padding: 12,
+                                          splitWidth: scaled, normalWidth: chat, before: chat + 12}),
+                {width: chat + 12, before: 0})
+        // The old scale's split width is not repaired at the new scale.
+        compare(ChatSites.splitWidthStep({show: false, popupWidth: 52 * 18 + 12, padding: 12,
+                                          splitWidth: scaled, normalWidth: chat, repair: true}),
+                {width: 0, before: 0})
+    }
+
+    function test_splitWidthStepOddInput() {
+        compare(ChatSites.splitWidthStep(undefined), {width: 0, before: 0})
+        compare(ChatSites.splitWidthStep({show: "yes", popupWidth: 400, splitWidth: 936}), {width: 0, before: 0})
+        compare(ChatSites.splitWidthStep({show: true, popupWidth: "x", padding: -5, splitWidth: 936}),
+                {width: 936, before: 0})
+        compare(ChatSites.splitWidthStep({show: true, popupWidth: 400, splitWidth: NaN}), {width: 0, before: 0})
+        compare(ChatSites.splitWidthStep({show: false, popupWidth: 400, before: Infinity}), {width: 0, before: 0})
+    }
+
     // --- Local web UI owner check (M2) --------------------------------------
 
     function test_localOwnerPort() {
