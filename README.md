@@ -34,6 +34,9 @@ plasmashell's memory.
 <td align="center"><img src="docs/ollama.png" alt="Built-in Ollama chat with the llama3 model" width="400"><br><sub>Built-in Ollama chat</sub></td>
 </tr>
 <tr>
+<td align="center" colspan="2"><img src="docs/chat-split.png" alt="Split view: Gemini and ChatGPT side by side in the Hearthside popup, both answering the same question" width="700"><br><sub>Split view: two chat sites side by side</sub></td>
+</tr>
+<tr>
 <td align="center"><img src="docs/chat-locked.png" alt="Locked encrypted sign-ins card with Unlock and private-session buttons" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
 <td align="center"><img src="docs/usage.png" alt="Usage tab with the last-updated time, a Refresh button, and Claude Code session and weekly meters" width="400"><br><sub>Usage meters</sub></td>
 </tr>
