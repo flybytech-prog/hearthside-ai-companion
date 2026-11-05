@@ -98,6 +98,9 @@ GENERAL_CONFIG_KEYS = {
     "usageCompact": ("Bool", "false"),
     "usageWarnPercent": ("Int", "60"),
     "usageCriticalPercent": ("Int", "85"),
+    "usageNormalColor": ("String", ""),
+    "usageWarnColor": ("String", ""),
+    "usageCriticalColor": ("String", ""),
     # Plan R1: what the global shortcut opens, and the usage alerts.
     "shortcutOpens": ("String", "popup"),
     "alertLowEnabled": ("Bool", "false"),
@@ -367,10 +370,56 @@ def test_webengine_and_dialogs_are_imported_only_by_chat_web_view(module_pattern
     offenders = [
         f"{_rel(path)}:{line}"
         for path in _code_files() if path != CHAT_WEB_VIEW
+        # configUsage.qml's colour boxes: only a ColorDialog (_colour_dialog_problems).
+        and not (module == "QtQuick.Dialogs" and path.name == "configUsage.qml")
         for line in _hits(pattern, _read_code(path))
     ]
     assert not offenders, f"{module} may only be imported by ChatWebView.qml; found in {offenders}"
     assert _hits(pattern, _read_code(CHAT_WEB_VIEW)), f"{_rel(CHAT_WEB_VIEW)} must import {module}"
+
+
+# AI Provider Settings' colour boxes use Qt's ColorDialog, which only hands
+# back a colour: configUsage.qml imports QtQuick.Dialogs once, as QtDialogs,
+# declares exactly one dialog, a ColorDialog, and no file, folder or message
+# dialog; it saves only through setUsageColour.
+DIALOG_TYPES = r"\bQtDialogs\s*\.\s*(\w+)\s*\{"
+
+
+def _colour_dialog_problems(code):
+    problems = []
+    imports = _hits(r"(?m)^\s*import\s+QtQuick\.Dialogs\b.*$", code)
+    if len(imports) != 1 or len(_hits(r"(?m)^\s*import\s+QtQuick\.Dialogs\s+as\s+QtDialogs\s*$", code)) != 1:
+        problems.append("import QtQuick.Dialogs once, as QtDialogs")
+    if _hits(r"\b(?:FileDialog|FolderDialog|MessageDialog|FontDialog)\b", code):
+        problems.append("only a ColorDialog is allowed")
+    dialogs = re.findall(DIALOG_TYPES, code)
+    if dialogs != ["ColorDialog"]:
+        problems.append(f"exactly one QtDialogs.ColorDialog, found {dialogs}")
+    for start, body in _blocks(code, r"\bQtDialogs\s*\.\s*ColorDialog\s*\{"):
+        accepted = re.findall(r"(?m)^\s*onAccepted\s*:\s*(.+)$", body)
+        if accepted != ["page.setUsageColour(colourChoice.level, String(selectedColor))"]:
+            problems.append(f"line {_line_of(code, start)}: the ColorDialog only calls page.setUsageColour")
+    return problems
+
+
+def test_settings_colour_dialog_is_only_a_colour_dialog():
+    problems = _colour_dialog_problems(_read_code(CONFIG_USAGE))
+    assert not problems, f"{_rel(CONFIG_USAGE)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("import QtQuick.Dialogs as QtDialogs\n", "import QtQuick.Dialogs as QtDialogs\nimport QtQuick.Dialogs\n"),
+    ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FileDialog {\n"),
+    ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FolderDialog {}\n        QtDialogs.ColorDialog {\n"),
+    ("            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n",
+     "            onAccepted: page.cfg_usageNormalColor = String(selectedColor)\n"),
+    ("            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n",
+     "            onAccepted: { page.setUsageColour(colourChoice.level, String(selectedColor)); Qt.openUrlExternally(\"x\") }\n"),
+    ("    function setThresholds(warn, critical) {\n",
+     "    function f() { return QtDialogs.MessageDialog }\n    function setThresholds(warn, critical) {\n"),
+])
+def test_proof_colour_dialog_rule_catches(old, new):
+    assert _colour_dialog_problems(_mutated(CONFIG_USAGE, old, new))
 
 
 def test_chat_sites_js_has_no_imports():
@@ -4903,6 +4952,9 @@ USAGE_PAGE_WRITERS = {
     "providerOrder": ("moveProvider",),
     "usageWarnPercent": ("setThresholds",),
     "usageCriticalPercent": ("setThresholds",),
+    "usageNormalColor": ("setUsageColour",),
+    "usageWarnColor": ("setUsageColour",),
+    "usageCriticalColor": ("setUsageColour",),
 }
 _USAGE_KEYS = "|".join(USAGE_PAGE_WRITERS)
 # main.qml rewrites these once, in migrateUsageMetrics().
@@ -4977,6 +5029,13 @@ USAGE_WRITER_MUTATIONS = [
     (CONFIG_USAGE, "    function setThresholds(warn, critical) {\n",
      "    function setOrder() { page.cfg_providerOrder = \"\" }\n    function setThresholds(warn, critical) {\n"),
     (CONFIG_USAGE, "        page.cfg_usageCriticalPercent = next.critical\n", "\n"),
+    (CONFIG_USAGE, "            page.cfg_usageWarnColor = value\n", "            page.cfg_usageNormalColor = value\n"),
+    (CONFIG_USAGE, "    function setThresholds(warn, critical) {\n",
+     "    function paint() { page.cfg_usageCriticalColor = \"#ff0000\" }\n    function setThresholds(warn, critical) {\n"),
+    (CONFIG_GENERAL, "    property string cfg_usageNormalColorDefault: \"\"\n",
+     "    property string cfg_usageNormalColorDefault: \"\"\n    function f() { page.cfg_usageNormalColor = \"#000000\" }\n"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.usageWarnColor = \"\" }\n    function chatNext() {"),
     (CONFIG_USAGE, "    function moveProvider(providerId, direction) {\n",
      "    function warn() { page.cfg_usageWarnPercent++ }\n    function moveProvider(providerId, direction) {\n"),
     (CONFIG_GENERAL, "    property bool cfg_usageCompactDefault: false\n",

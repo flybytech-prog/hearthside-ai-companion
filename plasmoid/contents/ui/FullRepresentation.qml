@@ -239,17 +239,18 @@ PlasmaExtras.Representation {
 
                     PlasmaComponents.TabButton {
                         text: i18n("Chat")
-                        icon.name: "dialog-messages"
+                        // Hearthside's icons, as in Settings (install.sh).
+                        icon.name: "hearthside-settings-chat"
                         onClicked: root.popupTab = "chat"
                     }
                     PlasmaComponents.TabButton {
                         text: i18n("Usage")
-                        icon.name: "speedometer"
+                        icon.name: "hearthside-settings-ai"
                         onClicked: root.popupTab = "usage"
                     }
                 }
                 PlasmaComponents.ToolButton {
-                    icon.name: "configure"
+                    icon.name: "hearthside-settings-general"
                     display: QQC2.AbstractButton.IconOnly
                     onClicked: Plasmoid.internalAction("configure").trigger()
                     QQC2.ToolTip.text: i18n("Configure…")

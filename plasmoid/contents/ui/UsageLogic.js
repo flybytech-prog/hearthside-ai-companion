@@ -224,6 +224,28 @@ function normalizeThresholds(warn, critical) {
     return {warn: low, critical: high}
 }
 
+// The default normal bar colour: a teal that reads on the background
+// (r, g, b from 0 to 1).
+function defaultNormalColour(red, green, blue) {
+    var luminance = Number(red) * 0.2126 + Number(green) * 0.7152 + Number(blue) * 0.0722
+    return luminance < 0.5 ? "#32c7d3" : "#008c95"
+}
+
+// A colour setting: "" (the default colour) or "#rrggbb" in lower case;
+// anything else is "".
+function normalizeColour(value) {
+    return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : ""
+}
+
+// A level in percent used as the settings page shows it: as used, or in
+// Left mode ("remaining") as what is left at that level.
+function shownPercent(percentUsed, mode) {
+    var used = Number(percentUsed)
+    if (!isFinite(used))
+        return 0
+    return mode === "used" ? used : 100 - used
+}
+
 // "critical", "warning" or "normal" for a used percentage.
 function usageLevel(rawUsed, thresholds) {
     var used = Number(rawUsed)

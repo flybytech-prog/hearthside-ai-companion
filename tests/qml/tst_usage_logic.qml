@@ -245,4 +245,28 @@ TestCase {
         compare(UsageLogic.shortCountdown(now + 125 * minute, now), {days: 0, hours: 2, minutes: 5})
         compare(UsageLogic.shortCountdown(now + 26 * hour, now), {days: 1, hours: 2, minutes: 0})
     }
+
+    function test_normalizeColour() {
+        compare(UsageLogic.normalizeColour("#A1b2C3"), "#a1b2c3")
+        compare(UsageLogic.normalizeColour(""), "")
+        compare(UsageLogic.normalizeColour("red"), "")
+        compare(UsageLogic.normalizeColour("#abc"), "")
+        compare(UsageLogic.normalizeColour("#a1b2c3ff"), "")
+        compare(UsageLogic.normalizeColour("#a1b2c3; x"), "")
+        compare(UsageLogic.normalizeColour(" #a1b2c3"), "")
+        compare(UsageLogic.normalizeColour(undefined), "")
+        compare(UsageLogic.normalizeColour(0xa1b2c3), "")
+    }
+
+    function test_shownPercent() {
+        compare(UsageLogic.shownPercent(60, "used"), 60)
+        compare(UsageLogic.shownPercent(60, "remaining"), 40)
+        compare(UsageLogic.shownPercent(85, "anything"), 15)
+        compare(UsageLogic.shownPercent("x", "used"), 0)
+    }
+
+    function test_defaultNormalColour() {
+        compare(UsageLogic.defaultNormalColour(0.1, 0.1, 0.1), "#32c7d3")
+        compare(UsageLogic.defaultNormalColour(0.95, 0.95, 0.95), "#008c95")
+    }
 }

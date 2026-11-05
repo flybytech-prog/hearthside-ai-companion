@@ -79,6 +79,12 @@ KCM.SimpleKCM {
     property int cfg_usageWarnPercentDefault: 60
     property int cfg_usageCriticalPercent: 85
     property int cfg_usageCriticalPercentDefault: 85
+    property string cfg_usageNormalColor: ""
+    property string cfg_usageNormalColorDefault: ""
+    property string cfg_usageWarnColor: ""
+    property string cfg_usageWarnColorDefault: ""
+    property string cfg_usageCriticalColor: ""
+    property string cfg_usageCriticalColorDefault: ""
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false

@@ -239,12 +239,19 @@ PlasmoidItem {
         Plasmoid.configuration.usageWarnPercent, Plasmoid.configuration.usageCriticalPercent)
     readonly property var tooltipGroups: TooltipLogic.applyChoice(
         root.tooltipProviderGroups(), root.tooltipChoice)
+    // AI Provider Settings → the colour boxes; "" keeps the default colour.
+    readonly property string customNormalColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageNormalColor)
+    readonly property string customWarnColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageWarnColor)
+    readonly property string customCriticalColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageCriticalColor)
+    readonly property color warnUsageColor: root.customWarnColor !== ""
+        ? root.customWarnColor : Kirigami.Theme.neutralTextColor
+    readonly property color criticalUsageColor: root.customCriticalColor !== ""
+        ? root.customCriticalColor : Kirigami.Theme.negativeTextColor
     readonly property color normalUsageColor: {
+        if (root.customNormalColor !== "")
+            return root.customNormalColor
         var background = Kirigami.Theme.backgroundColor
-        var luminance = background.r * 0.2126
-            + background.g * 0.7152
-            + background.b * 0.0722
-        return luminance < 0.5 ? "#32c7d3" : "#008c95"
+        return UsageLogic.defaultNormalColour(background.r, background.g, background.b)
     }
 
     function configuredList(value, fallback) {
@@ -324,18 +331,20 @@ PlasmoidItem {
     function barColor(rawUsed) {
         var level = UsageLogic.usageLevel(rawUsed, root.usageThresholds)
         if (level === "critical")
-            return Kirigami.Theme.negativeTextColor
+            return root.criticalUsageColor
         if (level === "warning")
-            return Kirigami.Theme.neutralTextColor
+            return root.warnUsageColor
         return root.normalUsageColor
     }
 
+    // Values below the warning level keep the text colour, so they stay
+    // readable whatever the normal bar colour is.
     function valueColor(rawUsed) {
         var level = UsageLogic.usageLevel(rawUsed, root.usageThresholds)
         if (level === "critical")
-            return Kirigami.Theme.negativeTextColor
+            return root.criticalUsageColor
         if (level === "warning")
-            return Kirigami.Theme.neutralTextColor
+            return root.warnUsageColor
         return Kirigami.Theme.textColor
     }
 

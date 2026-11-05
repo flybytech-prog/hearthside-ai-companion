@@ -121,9 +121,11 @@ plasmashell's memory.
 - **Compact layout** (optional): one slim bar per reading with its name,
   value and a short time until reset (such as Weekly, 38%, 2d 4h), without
   plan names or captions; errors still show, on one line.
-- **Warning colours**: bars and values turn to your theme's warning colour
-  from 60% used and to its critical colour from 85% used; both levels can be
-  changed in steps of 5% (50% to 95%), whether the tab shows Left or Used.
+- **Colours**: bars use a teal colour, then turn to your theme's warning
+  colour from 60% used (40% left) and to its critical colour from 85% used
+  (15% left). Both levels can be changed in steps of 5%, and each of the
+  three colours can be set with a colour box (a reset button goes back to
+  the default).
 - **Hover popup**: hover over the panel icon for a short summary: each
   provider's name in bold, then one reading per line, such as **Session**
   62% left and **Weekly** 80% left. It shows the Usage tab's readings, or
@@ -245,11 +247,14 @@ The hover popup's settings are under **Settings → AI Provider Settings**
 
 ### Settings → AI Provider Settings
 
-- **Usage tab**: **Layout: Compact** (one slim bar per reading), **Warning
-  colour from** (50% to 90% used, 60% by default) and **Critical colour
-  from** (55% to 95% used, 85% by default); when one pick passes the other
-  level, that other level moves so the critical one stays higher), and the
-  **Refresh status** button, which checks the tracked providers once.
+- **Usage tab**: **Layout: Compact** (one slim bar per reading); **Normal
+  colour**; **Warning colour from** (60% used by default) and **Critical
+  colour from** (85% used by default), each with its colour box. The levels
+  read as left or used, as **General → Display** shows (with Left the
+  defaults read 40% and 15%); when one pick passes the other level, that
+  other level moves so the critical one stays further along. The reset button
+  next to a colour box goes back to the default colour. The **Refresh
+  status** button checks the tracked providers once.
 - **Providers and readings**: one row per provider, in the order the Usage
   tab, the hover popup and the notifications list them. The **Move up** and
   **Move down** arrow buttons move a tracked provider past the next tracked
@@ -299,7 +304,8 @@ kdialog and fuse3 for Stay signed in; otherwise it prints the command to run.
 Ollama is only described, since you choose the build for your graphics card.
 It then removes the old AI Usage widget, helper, and cache if they are
 present, installs the dependency-free Python helper into the user Python site,
-installs or upgrades the plasmoid and the colour app icon, and optionally
+installs or upgrades the plasmoid, the colour app icon and the settings and
+tab icons, and optionally
 reloads Plasma.
 
 Then right-click the panel, choose **Add Widgets…**, search for **Hearthside**,

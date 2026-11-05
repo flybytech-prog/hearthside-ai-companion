@@ -95,5 +95,14 @@
         <entry name="usageCriticalPercent" type="Int">
             <default>85</default>
         </entry>
+        <entry name="usageNormalColor" type="String">
+            <default></default>
+        </entry>
+        <entry name="usageWarnColor" type="String">
+            <default></default>
+        </entry>
+        <entry name="usageCriticalColor" type="String">
+            <default></default>
+        </entry>
     </group>
 </kcfg>

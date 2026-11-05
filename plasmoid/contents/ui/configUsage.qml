@@ -3,6 +3,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
+import QtQuick.Dialogs as QtDialogs
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ProviderCatalog.js" as Catalog
@@ -80,6 +81,12 @@ KCM.ScrollViewKCM {
     property int cfg_usageWarnPercentDefault: 60
     property int cfg_usageCriticalPercent: 85
     property int cfg_usageCriticalPercentDefault: 85
+    property string cfg_usageNormalColor: ""
+    property string cfg_usageNormalColorDefault: ""
+    property string cfg_usageWarnColor: ""
+    property string cfg_usageWarnColorDefault: ""
+    property string cfg_usageCriticalColor: ""
+    property string cfg_usageCriticalColorDefault: ""
 
     property var catalogModel: Catalog.providers
     // The provider rows in the Usage tab's order.
@@ -89,11 +96,12 @@ KCM.ScrollViewKCM {
         page.cfg_usageWarnPercent, page.cfg_usageCriticalPercent)
     // Warning 50–90, critical 55–95: every pick is kept, the other level
     // moves out of its way.
+    // The levels read as used or left, like General → Display.
     readonly property var warnChoices: UsageLogic.WARN_PERCENTS.map(function (percent) {
-        return { value: percent, text: i18n("%1% used", percent) }
+        return { value: percent, text: i18nc("@item level", "%1%", UsageLogic.shownPercent(percent, page.cfg_usageMode)) }
     })
     readonly property var criticalChoices: UsageLogic.CRITICAL_PERCENTS.map(function (percent) {
-        return { value: percent, text: i18n("%1% used", percent) }
+        return { value: percent, text: i18nc("@item level", "%1%", UsageLogic.shownPercent(percent, page.cfg_usageMode)) }
     })
     // The arrows order the tracked providers only.
     readonly property var trackedIds: page.tracked()
@@ -238,6 +246,68 @@ KCM.ScrollViewKCM {
 
     ListModel {
         id: providerRows
+    }
+
+    // level: "normal", "warning" or "critical"; "" is the default colour.
+    function setUsageColour(level, colour) {
+        var value = UsageLogic.normalizeColour(colour)
+        if (level === "normal")
+            page.cfg_usageNormalColor = value
+        else if (level === "warning")
+            page.cfg_usageWarnColor = value
+        else if (level === "critical")
+            page.cfg_usageCriticalColor = value
+    }
+
+    // A colour box: the chosen colour, else the default one; the reset
+    // button next to it goes back to the default.
+    component ColourChoice: RowLayout {
+        id: colourChoice
+
+        property string level
+        property string chosen
+        property color fallback
+
+        spacing: Kirigami.Units.smallSpacing
+
+        readonly property color shown: colourChoice.chosen !== "" ? colourChoice.chosen : colourChoice.fallback
+
+        QQC2.Button {
+            objectName: colourChoice.level + "ColourButton"
+            enabled: page.cfg_showUsageTab
+            implicitWidth: Kirigami.Units.gridUnit * 3
+            Accessible.name: i18n("Choose a colour")
+            QQC2.ToolTip.text: i18n("Choose a colour")
+            QQC2.ToolTip.visible: hovered
+            onClicked: colourDialog.open()
+
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.smallSpacing + 1
+                radius: Kirigami.Units.cornerRadius / 2
+                color: parent.enabled ? colourChoice.shown : "transparent"
+                border.color: Kirigami.Theme.textColor
+                border.width: 1
+                opacity: parent.enabled ? 1 : 0.4
+            }
+        }
+        QtDialogs.ColorDialog {
+            id: colourDialog
+            title: i18n("Choose a colour")
+            selectedColor: colourChoice.shown
+            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))
+        }
+        QQC2.ToolButton {
+            objectName: colourChoice.level + "ColourReset"
+            enabled: page.cfg_showUsageTab
+            visible: colourChoice.chosen !== ""
+            icon.name: "edit-reset"
+            display: QQC2.AbstractButton.IconOnly
+            text: i18n("Use the default colour")
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.visible: hovered
+            onClicked: page.setUsageColour(colourChoice.level, "")
+        }
     }
 
     function setThresholds(warn, critical) {
@@ -414,6 +484,14 @@ KCM.ScrollViewKCM {
                     }
                 }
 
+                ColourChoice {
+                    Kirigami.FormData.label: i18n("Normal colour:")
+                    level: "normal"
+                    chosen: UsageLogic.normalizeColour(page.cfg_usageNormalColor)
+                    fallback: UsageLogic.defaultNormalColour(Kirigami.Theme.backgroundColor.r,
+                        Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b)
+                }
+
                 RowLayout {
                     Kirigami.FormData.label: i18n("Warning colour from:")
                     spacing: Kirigami.Units.smallSpacing
@@ -427,23 +505,37 @@ KCM.ScrollViewKCM {
                         currentIndex: page.choiceIndex(page.warnChoices, page.thresholds.warn, 2)
                         onActivated: page.setThresholds(currentValue, page.thresholds.critical)
                     }
+                    ColourChoice {
+                        level: "warning"
+                        chosen: UsageLogic.normalizeColour(page.cfg_usageWarnColor)
+                        fallback: Kirigami.Theme.neutralTextColor
+                    }
                     Kirigami.ContextualHelpButton {
-                        toolTipText: i18n("Bars and values turn to the warning colour from this much used, and to the critical colour from the Critical level, whether the popup shows Left or Used. The critical level stays above the warning level.")
+                        toolTipText: i18n("Bars and values turn to the warning colour at this level and to the critical colour at the Critical level. The levels read as left or used, as General → Display shows: with Left, 40% means 40% left. The critical level always stays past the warning level. The colour boxes choose each colour; the reset button next to a box goes back to the default.")
                     }
                 }
 
-                QQC2.ComboBox {
-                    objectName: "usageCriticalChoice"
+                RowLayout {
                     Kirigami.FormData.label: i18n("Critical colour from:")
-                    enabled: page.cfg_showUsageTab
-                    textRole: "text"
-                    valueRole: "value"
-                    model: page.criticalChoices
-                    currentIndex: page.choiceIndex(page.criticalChoices, page.thresholds.critical, 6)
-                    onActivated: {
-                        // Keeps the pick: the warning level moves below it.
-                        var warn = Math.min(page.thresholds.warn, currentValue - 5)
-                        page.setThresholds(warn, currentValue)
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.ComboBox {
+                        objectName: "usageCriticalChoice"
+                        enabled: page.cfg_showUsageTab
+                        textRole: "text"
+                        valueRole: "value"
+                        model: page.criticalChoices
+                        currentIndex: page.choiceIndex(page.criticalChoices, page.thresholds.critical, 6)
+                        onActivated: {
+                            // Keeps the pick: the warning level moves below it.
+                            var warn = Math.min(page.thresholds.warn, currentValue - 5)
+                            page.setThresholds(warn, currentValue)
+                        }
+                    }
+                    ColourChoice {
+                        level: "critical"
+                        chosen: UsageLogic.normalizeColour(page.cfg_usageCriticalColor)
+                        fallback: Kirigami.Theme.negativeTextColor
                     }
                 }
             }
