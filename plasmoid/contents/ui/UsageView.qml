@@ -11,7 +11,8 @@ import "ProviderCatalog.js" as Catalog
 // Usage tab body, moved verbatim from FullRepresentation.qml.
 // Names, plans, captions, errors and amounts come from the helper (and so
 // from provider servers): every label shows them as plain text only, never
-// as rich text that could load images or links.
+// as rich text that could load images or links, and at most
+// UsageLogic.MAX_SHOWN_CHARS long (UsageLogic.shownText).
 // Settings → AI Provider Settings → Usage tab picks the providers' order,
 // their readings (none ticked = all) and the compact layout.
 ColumnLayout {
@@ -74,7 +75,7 @@ ColumnLayout {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.Wrap
             opacity: 0.75
-            text: root.lastError
+            text: UsageLogic.shownText(root.lastError)
         }
     }
 
@@ -156,13 +157,13 @@ ColumnLayout {
                             Layout.fillWidth: true
                             level: 3
                             textFormat: Text.PlainText
-                            text: providerSection.modelData.display_name
+                            text: UsageLogic.shownText(providerSection.modelData.display_name)
                             elide: Text.ElideRight
                         }
                         PlasmaComponents.Label {
-                            visible: !!providerSection.modelData.plan
+                            visible: UsageLogic.shownText(providerSection.modelData.plan) !== ""
                             textFormat: Text.PlainText
-                            text: providerSection.modelData.plan || ""
+                            text: UsageLogic.shownText(providerSection.modelData.plan)
                             opacity: 0.65
                             elide: Text.ElideRight
                         }
@@ -193,7 +194,7 @@ ColumnLayout {
                         PlasmaComponents.Label {
                             Layout.fillWidth: true
                             textFormat: Text.PlainText
-                            text: providerSection.modelData.display_name
+                            text: UsageLogic.shownText(providerSection.modelData.display_name)
                             font.bold: true
                             elide: Text.ElideRight
                         }
@@ -308,7 +309,7 @@ ColumnLayout {
                                         PlasmaComponents.Label {
                                             Layout.fillWidth: true
                                             textFormat: Text.PlainText
-                                            text: quotaCard.modelData.caption
+                                            text: UsageLogic.shownText(quotaCard.modelData.caption)
                                             opacity: 0.72
                                             elide: Text.ElideRight
                                         }
@@ -514,7 +515,7 @@ ColumnLayout {
     }
 
     function failureText(providerData, nowMs) {
-        var text = providerData.error_message || providerData.status
+        var text = UsageLogic.shownText(providerData.error_message || providerData.status)
         if (providerData.status === "stale")
             text = i18n("Showing the last successful reading. %1", text)
         var retry = relativeRetry(providerData.retry_at, nowMs)
@@ -556,7 +557,7 @@ ColumnLayout {
     // The catalog's name for a reading, else the helper's caption.
     function readingTitle(providerId, window) {
         var metric = window ? Catalog.metric(providerId, window.kind) : null
-        return metric ? metric.title : String(window && window.caption ? window.caption : "")
+        return metric ? metric.title : UsageLogic.shownText(window && window.caption ? window.caption : "")
     }
 
     // Compact: "2d 4h", "3h 5m", "12m", or "" when unknown.
@@ -606,7 +607,9 @@ ColumnLayout {
         if (billing.kind === "flex_credit_balance")
             return i18n(
                 "%1 (~$%2)",
-                billing.remaining_credits,
+                // A number keeps i18n's locale formatting; only text is cut.
+                typeof billing.remaining_credits === "number" && isFinite(billing.remaining_credits)
+                    ? billing.remaining_credits : UsageLogic.shownText(billing.remaining_credits),
                 Number(billing.usd_value || 0).toFixed(2)
             )
         return ""

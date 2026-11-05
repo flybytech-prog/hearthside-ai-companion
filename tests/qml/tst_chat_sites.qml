@@ -15,11 +15,13 @@ TestCase {
         })
     }
 
-    function popup(url, siteId, isDialog, customUrls) {
+    // Clicked (userInitiated) unless clicked is false.
+    function popup(url, siteId, isDialog, customUrls, clicked) {
         return ChatSites.classifyNewWindow({
             url: url,
             siteId: siteId === undefined ? "claude" : siteId,
             isDialog: !!isDialog,
+            userInitiated: clicked !== false,
             customUrls: customUrls
         })
     }
@@ -232,6 +234,26 @@ TestCase {
         compare(ChatSites.classifyNewWindow(null), "block")
     }
 
+    // L1: a sign-in window opens only for a click; a script-opened one is
+    // dropped, and "external" still needs the click in ChatWebView.
+    function test_newWindowOverlayNeedsAClick() {
+        var none = undefined
+        compare(popup("https://accounts.google.com/o/oauth2/auth", "claude", false, none, false), "block")
+        compare(popup("https://example.com/", "claude", true, none, false), "block")
+        compare(popup("about:blank", "claude", true, none, false), "block")
+        compare(popup("", "claude", true, none, false), "block")
+        compare(popup("https://example.com/paper", "claude", false, none, false), "external")
+        compare(ChatSites.classifyNewWindow({url: "https://accounts.google.com/", siteId: "claude"}), "block")
+        compare(ChatSites.classifyNewWindow({url: "https://accounts.google.com/", siteId: "claude",
+            userInitiated: "true"}), "block")
+        compare(ChatSites.classifyNewWindow({url: "https://accounts.google.com/", siteId: "claude",
+            userInitiated: 1}), "block")
+        compare(ChatSites.classifyNewWindow({url: "https://accounts.google.com/", siteId: "claude",
+            userInitiated: true}), "overlay")
+        compare(ChatSites.classifyNewWindow({url: "", isDialog: true, siteId: "claude",
+            userInitiated: true}), "overlay")
+    }
+
     function test_parseUrl() {
         compare(ChatSites.parseUrl("https://claude.ai/new"),
                 {scheme: "https", host: "claude.ai", port: ""})
@@ -279,14 +301,33 @@ TestCase {
         verify(!ChatSites.isLoopbackHost(undefined))
     }
 
+    // L5: frames, pages and windows never reach these names of this computer.
+    function test_newLocalNamesAreBlocked() {
+        var names = ["localhost.localdomain", "app.localhost.localdomain", "ip6-localhost",
+                     "ip6-loopback", "prime"]
+        for (var index = 0; index < names.length; index++) {
+            var url = "https://" + names[index] + ":3998/x"
+            compare(nav(url, "claude", false, true), "block", url)
+            compare(nav(url, "claude", true, true), "block", url)
+            compare(nav(url, "claude", false, false), "block", url)
+            compare(popup(url, "claude", true), "block", url)
+            compare(popup(url, "claude", false), "block", url)
+        }
+    }
+
     function test_isLocalAddress() {
         var local = ["localhost", "127.0.0.1", "[::1]", "127.0.0.2", "127.1", "0.0.0.0", "0",
                      "2130706433", "0x7f000001", "0x7f.1", "017700000001", "foo.localhost",
-                     "1.2.3.4.5", "08.1.1.1", "999.1.1.1"]
+                     "1.2.3.4.5", "08.1.1.1", "999.1.1.1",
+                     // L5: /etc/hosts names of this computer and every name
+                     // without a dot (the machine's own name, LAN names).
+                     "localhost.localdomain", "LOCALHOST.LOCALDOMAIN.", "app.localhost.localdomain",
+                     "ip6-localhost", "ip6-loopback", "prime", "myhost", "router", "a-b_c"]
         for (var index = 0; index < local.length; index++)
             verify(ChatSites.isLocalAddress(local[index]), local[index])
         var remote = ["claude.ai", "192.168.1.5", "10.0.0.1", "8.8.8.8", "localhost.example.com",
-                      "127.example.com", "", null]
+                      "127.example.com", "localhost.localdomain.example.com", "ip6-localhost.example.com",
+                      "mylocalhost.localdomain.example", "", null]
         for (var other = 0; other < remote.length; other++)
             verify(!ChatSites.isLocalAddress(remote[other]), String(remote[other]))
     }
@@ -307,6 +348,10 @@ TestCase {
             ["claude", "https://127.0.0.1:8443/", false, "loopback-not-allowed"],
             ["claude", "https://[::1]/", false, "loopback-not-allowed"],
             ["chatgpt", "https://2130706433/", false, "loopback-not-allowed"],
+            ["claude", "https://localhost.localdomain/", false, "loopback-not-allowed"],
+            ["claude", "https://ip6-localhost/", false, "loopback-not-allowed"],
+            ["claude", "https://myhost:8443/", false, "loopback-not-allowed"],
+            ["local", "https://myhost:8443/", true, ""],
             ["claude", "https://user:pw@claude.ai/", false, "userinfo"],
             ["claude", "javascript:https://user@x/", false, "scheme"],
             ["local", "http://user@localhost:3000/", false, "userinfo"],
@@ -797,6 +842,38 @@ TestCase {
                 {width: 0, before: 0})
     }
 
+    // R3: with maxPadding, a widening or first-open repair waits while the
+    // measured padding is outside 0..maxPadding (window not laid out yet);
+    // narrowing back never waits.
+    function test_splitWidthStepWaitsForAPlausiblePadding() {
+        var step = function (show, padding, before, repair) {
+            return ChatSites.splitWidthStep({
+                show: show, popupWidth: 400, padding: padding, maxPadding: 4 * 18,
+                splitWidth: 52 * 18, normalWidth: 34 * 18, before: before, repair: repair
+            })
+        }
+        compare(step(true, 12, 0), {width: 52 * 18 + 12, before: 400})
+        compare(step(true, 0, 0), {width: 52 * 18, before: 400})
+        compare(step(true, 4 * 18, 0), {width: 52 * 18 + 4 * 18, before: 400})
+        compare(step(true, 4 * 18 + 1, 0), {width: 0, before: 0, wait: true})
+        compare(step(true, -1, 0), {width: 0, before: 0, wait: true})
+        compare(step(true, -400, 300), {width: 0, before: 300, wait: true})
+        compare(step(true, NaN, 0), {width: 0, before: 0, wait: true})
+        compare(step(true, undefined, 0), {width: 0, before: 0, wait: true})
+        compare(step(true, "x", 0), {width: 0, before: 0, wait: true})
+        // The first-open repair waits too.
+        compare(step(false, 500, 0, true), {width: 0, before: 0, wait: true})
+        // Narrowing back goes ahead whatever the padding.
+        compare(step(false, -50, 300), {width: 300, before: 0})
+        compare(step(false, 9999, 300), {width: 300, before: 0})
+        compare(step(false, 9999, 0), {width: 0, before: 0})
+        // Without maxPadding nothing waits (old callers).
+        compare(ChatSites.splitWidthStep({show: true, popupWidth: 400, padding: 9999,
+                                          splitWidth: 52 * 18}), {width: 52 * 18 + 9999, before: 400})
+        compare(ChatSites.splitWidthStep({show: true, popupWidth: 400, padding: -5, maxPadding: 0,
+                                          splitWidth: 52 * 18}), {width: 52 * 18, before: 400})
+    }
+
     function test_splitWidthStepOddInput() {
         compare(ChatSites.splitWidthStep(undefined), {width: 0, before: 0})
         compare(ChatSites.splitWidthStep({show: "yes", popupWidth: 400, splitWidth: 936}), {width: 0, before: 0})
@@ -823,6 +900,13 @@ TestCase {
         compare(port("https://foo.localhost:9000/"), 9000)
         compare(port("https://127.1:9001/"), 9001)
         compare(port("https://0x7f000001:9002/"), 9002)
+        // L5: these names are this computer too; never loaded unchecked.
+        compare(port("https://localhost.localdomain:9003/"), 9003)
+        compare(port("https://app.localhost.localdomain/"), 443)
+        compare(port("https://ip6-localhost:9004/"), 9004)
+        compare(port("https://ip6-loopback/"), 443)
+        compare(port("https://prime:8080/"), 8080)
+        compare(port("https://myhost/"), 443)
         // Not this computer, not Local, or nothing to check.
         compare(port("https://example.com/"), 0)
         compare(port("https://example.com:3000/"), 0)

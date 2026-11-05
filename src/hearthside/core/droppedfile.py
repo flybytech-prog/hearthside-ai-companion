@@ -8,8 +8,11 @@ Only small regular text files are read: the last path component may not be a
 symlink (``O_NOFOLLOW``), FIFOs, devices and directories are refused before
 anything is opened (and ``O_NONBLOCK`` keeps a swapped-in FIFO from blocking),
 and the size must be 1..131072 bytes, which also refuses ``/proc`` files
-(they report size 0); files on the ``/proc`` and ``/sys`` filesystems are
-refused by device too. The text must be strict UTF-8 without
+(they report size 0). Files on kernel pseudo-filesystems (proc, sysfs,
+efivarfs, debugfs, ...) are refused by filesystem type, looked up in
+``/proc/self/mountinfo`` before the file is opened; when mountinfo cannot be
+read or names no filesystem for the file, nothing is read. The text must be
+strict UTF-8 without
 NUL characters and at most 32000 characters. Runs no program, writes nothing.
 """
 
@@ -55,32 +58,102 @@ def _open_error(error: OSError) -> DropError:
     return DropError("os-error")
 
 
-# Kernel interfaces, never user files. /proc reports size 0 anyway, but sysfs
-# attributes report 4096, so both are refused by device as well.
-PSEUDO_ROOTS = ("/proc", "/sys")
+# Kernel interfaces, never user files: sysfs attributes report size 4096,
+# efivarfs variables their real size, so the size check alone is not enough.
+PSEUDO_FILESYSTEMS = frozenset({
+    "proc", "sysfs", "efivarfs", "securityfs", "pstore", "debugfs", "tracefs", "cgroup", "cgroup2",
+    "bpf", "configfs", "fusectl", "devpts", "mqueue", "hugetlbfs", "binfmt_misc", "autofs",
+    "rpc_pipefs", "nsfs",
+})
+MOUNTINFO = "/proc/self/mountinfo"
+MAX_MOUNTINFO = 16 * 1024 * 1024
 
 
-def _pseudo_devices() -> set[int]:
-    devices = set()
+def _read_mountinfo() -> bytes:
+    """``/proc/self/mountinfo``; DropError (os-error) when it cannot be read whole."""
     try:
-        root = os.stat("/").st_dev
+        descriptor = os.open(MOUNTINFO, os.O_RDONLY | os.O_CLOEXEC | os.O_NOCTTY)
     except OSError:
-        return devices
-    for path in PSEUDO_ROOTS:
+        raise DropError("os-error") from None
+    try:
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_MOUNTINFO:
+                raise DropError("os-error")
+            chunks.append(chunk)
+    except OSError:
+        raise DropError("os-error") from None
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def _unescape(field: bytes) -> bytes:
+    """Undo the kernel's octal escapes (``\\040`` space and the like)."""
+    return re.sub(rb"\\([0-7]{3})", lambda match: bytes([int(match.group(1), 8) & 0xFF]), field)
+
+
+def _mounts(text: bytes) -> list[tuple[int, int, bytes, str]]:
+    """(major, minor, mount point, filesystem type) per mountinfo line."""
+    mounts = []
+    for line in text.splitlines():
+        fields = line.split(b" ")
         try:
-            device = os.stat(path).st_dev
-        except OSError:
+            separator = fields.index(b"-", 6)
+            major, minor = (int(part) for part in fields[2].split(b":"))
+        except ValueError:
             continue
-        if device != root:  # Not mounted (a plain directory): nothing to refuse.
-            devices.add(device)
-    return devices
+        if len(fields) <= separator + 1:
+            continue
+        fstype = fields[separator + 1].decode("ascii", "replace")
+        mounts.append((major, minor, _unescape(fields[4]), fstype))
+    return mounts
+
+
+def _under(path: bytes, mountpoint: bytes) -> bool:
+    return mountpoint == b"/" or path == mountpoint or path.startswith(mountpoint.rstrip(b"/") + b"/")
+
+
+def _filesystem_types(path: bytes, device: int) -> set[str]:
+    """The filesystem type(s) the file is on.
+
+    Every mount of the file's device number (bind mounts share it). A device
+    no mount line names (a btrfs subvolume, say) falls back to the mount with
+    the longest mount point above the file's real path. Fails closed: no
+    mountinfo or no matching mount is DropError (os-error).
+    """
+    mounts = _mounts(_read_mountinfo())
+    if not mounts:
+        raise DropError("os-error")
+    by_device = {fstype for major, minor, _point, fstype in mounts
+                 if (major, minor) == (os.major(device), os.minor(device))}
+    if by_device:
+        return by_device
+    real = os.path.realpath(path)
+    best: Optional[tuple[int, str]] = None
+    for _major, _minor, point, fstype in mounts:
+        if _under(real, point) and (best is None or len(point) >= best[0]):
+            best = (len(point), fstype)
+    if best is None:
+        raise DropError("os-error")
+    return {best[1]}
 
 
 def _check_size(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or info.st_size == 0 or info.st_dev in _pseudo_devices():
+    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
         raise DropError("not-file")
     if info.st_size > MAX_BYTES:
         raise DropError("too-large")
+
+
+def _check_filesystem(path: bytes, info: os.stat_result) -> None:
+    if _filesystem_types(path, info.st_dev) & PSEUDO_FILESYSTEMS:
+        raise DropError("not-file")
 
 
 def read_text(path: bytes) -> str:
@@ -91,6 +164,9 @@ def read_text(path: bytes) -> str:
     if stat.S_ISLNK(before.st_mode):
         raise DropError("not-file")
     _check_size(before)
+    # Before the open: opening some debugfs or sysfs files has side effects.
+    # The open below must then be the same file (device and inode).
+    _check_filesystem(path, before)
     try:
         descriptor = os.open(path, _FLAGS)
     except OSError as error:

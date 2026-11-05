@@ -548,6 +548,8 @@ def test_proof_dynamic_creation_rule_catches(target, snippet):
     (OLLAMA_CHAT_VIEW, "                                    sourceComponent: segment.code ? codeBlock\n",
      "                                    source: \"Reply.qml\"\n"
      "                                    property var x: segment.code ? codeBlock\n"),
+    # Only the sourceComponent line goes: the block Loader must still pick one.
+    (OLLAMA_CHAT_VIEW, "sourceComponent: segment.code ? codeBlock\n", "property var x: segment.code ? codeBlock\n"),
 ])
 def test_proof_dynamic_creation_rule_catches_loader_changes(path, old, new):
     sources = _all_code()
@@ -2738,17 +2740,17 @@ def test_tooltip_is_plain_text():
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.plan",
-     "text: providerSection.modelData.plan"),
-    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.plan",
-     "textFormat: Text.StyledText\n                            text: providerSection.modelData.plan"),
-    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: providerSection.modelData.display_name",
-     "text: providerSection.modelData.display_name"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: UsageLogic.shownText(providerSection.modelData.plan)",
+     "text: UsageLogic.shownText(providerSection.modelData.plan)"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: UsageLogic.shownText(providerSection.modelData.plan)",
+     "textFormat: Text.StyledText\n                            text: UsageLogic.shownText(providerSection.modelData.plan)"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                            text: UsageLogic.shownText(providerSection.modelData.display_name)",
+     "text: UsageLogic.shownText(providerSection.modelData.display_name)"),
     (USAGE_VIEW, "textFormat: Text.PlainText\n                                wrapMode: Text.Wrap\n"
                  "                                text: usage.failureText(",
      "wrapMode: Text.Wrap\n                                text: usage.failureText("),
-    (USAGE_VIEW, "textFormat: Text.PlainText\n                                            text: quotaCard.modelData.caption",
-     "text: quotaCard.modelData.caption"),
+    (USAGE_VIEW, "textFormat: Text.PlainText\n                                            text: UsageLogic.shownText(quotaCard.modelData.caption)",
+     "text: UsageLogic.shownText(quotaCard.modelData.caption)"),
     (USAGE_VIEW, "textFormat: Text.PlainText\n                                    text: usage.billingValue(",
      "text: usage.billingValue("),
     (USAGE_VIEW, '        text: i18n("Couldn\'t load usage")\n',
@@ -5467,3 +5469,477 @@ def test_proof_schema_version_xml_default_3_is_caught():
     entries = _main_xml_entries()
     entries["configSchemaVersion"] = dict(entries["configSchemaVersion"], default="3")
     assert _schema_version_problems(entries, {})
+
+
+# --- M1 (pentest 2026-11-05): no dynamic names, no accepts, pinned handlers ---
+#
+# Earlier rules looked for names such as `.grant(` or `offTheRecord: false`,
+# so `permission["gr" + "ant"]()`, `error.acceptCertificate()`, `page.settings.
+# javascriptCanPaste = true` or an extra `|| verdict === "block"` passed. These
+# rules close that: in the files that can reach a web page or its profile no
+# member is picked by a computed name (only the listed loop-index uses of
+# local arrays); names of trusted members can't be built from strings; the
+# accepting calls exist only where the user saves a download; no pinned
+# setting or profile property is ever assigned; and the four security
+# handlers have exactly their reviewed shape.
+
+# Files that hold the web view or reach it (ChatView.web, FullRepresentation's
+# chatView). Nothing else can touch a WebEngine object.
+WEBENGINE_FILES = (CHAT_WEB_VIEW, CHAT_VIEW, FULL_REPRESENTATION)
+# The only computed member accesses: (receiver, key) of local arrays indexed by
+# a loop counter, and the pair entries panes[index][0] / [1].
+COMPUTED_ACCESS_ALLOWED = {
+    "ChatWebView.qml": {("views", "index"), ("panes", "index"), ("files", "index"), ("panes", "at"),
+                        ("panes[index]", "0"), ("panes[index]", "1")},
+}
+# Receivers and counters above are only ever set like this (normalized lines).
+COMPUTED_NAMES = ("views", "panes", "files", "index", "at")
+COMPUTED_NAME_SETTERS = (
+    r"var views = chatWeb\.viewList\(\)",
+    r"var views = \[\]",
+    r'var panes = \[\["a", chatWeb\.siteId\], \["b", chatWeb\.splitActive \? chatWeb\.siteIdB : ""\]\]',
+    r'var panes = chatWeb\.splitActive \? \["a", "b"\] : \["a"\]',
+    r"var files = uploadDialog\.selectedFiles",
+    r"for \(var index = 0; index < (?:views\.length|panes\.length|pages\.count|files\.length); index\+\+\)(?: \{)?",
+    r"for \(var index = visitedSites\.count - 1; index >= 0; index--\) \{",
+    r"for \(var at = 0; at < panes\.length; at\+\+\) \{",
+    r"for \(var at = item; at; at = at\.parent\) \{",
+)
+_JS_KEYWORDS_BEFORE_ARRAY = {"return", "typeof", "in", "of", "case", "else", "do", "void", "new", "delete",
+                             "yield", "await", "instanceof", "throw"}
+WEBENGINE_DYNAMIC_BANS = {
+    "eval": r"\beval\b",
+    "Reflect": r"\bReflect\b",
+    "Function constructor": r"\bFunction\b",
+    "with statement": r"\bwith\s*\(",
+    "Object property writers": r"\bObject\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf|fromEntries)\b",
+    "Proxy": r"\bProxy\b",
+}
+# WebEngine settings and profile properties: declared once, never assigned.
+PINNED_SETTINGS = ("screenCaptureEnabled", "pluginsEnabled", "dnsPrefetchEnabled", "navigateOnDropEnabled",
+                   "localContentCanAccessFileUrls", "allowRunningInsecureContent",
+                   "javascriptCanAccessClipboard", "javascriptCanPaste", "focusOnNavigationEnabled",
+                   "unknownUrlSchemePolicy")
+PINNED_PROFILE = tuple(name for name, _ in PROFILE_BINDINGS)
+PERMISSION_HANDLER = "{ permission.deny() }"
+CERTIFICATE_HANDLER = "{ error.rejectCertificate() }"
+DOWNLOAD_HANDLER = (
+    "{ if (download.isSavePageDownload || chatWeb.pendingDownload !== null) { download.cancel() return } "
+    "chatWeb.pendingDownload = download chatWeb.pendingDownloadName = download.downloadFileName "
+    "var source = download.view && typeof download.view.site === \"string\" "
+    "? ChatSites.byId(download.view.site) : null "
+    "chatWeb.pendingDownloadSite = source ? source.name : \"\" downloadTimeout.restart() }"
+)
+SAVE_DOWNLOAD = ("{ var download = chatWeb.pendingDownload chatWeb.clearPendingDownload() "
+                 "if (download) download.accept() }")
+NAV_HEAD = (
+    "{ var verdict = ChatSites.classifyNavigation({ url: request.url.toString(), "
+    "isMainFrame: request.isMainFrame, linkClicked: request.navigationType "
+    "=== WebEngineNavigationRequest.LinkClickedNavigation, siteId: page.site, "
+    "customUrls: chatWeb.customUrls }) if (verdict === \"allow\") {"
+)
+NAV_TAIL = " request.reject() if (verdict === \"external\") chatWeb.askExternal(request.url.toString()) }"
+
+
+def _normalized(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _computed_access_problems(name, code):
+    """Computed member access, computed object keys and setters of the allowed names."""
+    problems = []
+    blanked = _strip_comments(code, blank_strings=True)
+    allowed = COMPUTED_ACCESS_ALLOWED.get(_base(name), set())
+    for match in re.finditer(r"\[", blanked):
+        start = match.start()
+        before = blanked[:start].rstrip()
+        end = start
+        depth = 0
+        for end in range(start, len(blanked)):
+            if blanked[end] == "[":
+                depth += 1
+            elif blanked[end] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+        key = code[start + 1:end].strip()
+        last = before[-1:] if before else ""
+        word = re.search(r"[\w$]+$", before)
+        access = last in (")", "]") or (word is not None and word.group(0) not in _JS_KEYWORDS_BEFORE_ARRAY
+                                        and not word.group(0).isdigit())
+        line = _line_of(code, start)
+        if not access:
+            if last in ("{", ",") and re.match(r"\s*:", blanked[end + 1:]):
+                problems.append(f"{name}:{line}: computed object key [{key}]")
+            continue
+        if last == "]":
+            receiver = re.search(r"([\w$]+)\s*\[\s*([\w$]+)\s*\]$", before)
+            receiver = f"{receiver.group(1)}[{receiver.group(2)}]" if receiver else "?"
+            dotted = re.search(r"\.\s*[\w$]+\s*\[\s*[\w$]+\s*\]$", before) is not None
+        elif last == ")":
+            receiver, dotted = "(...)", True
+        else:
+            receiver = word.group(0)
+            dotted = re.search(r"\.\s*[\w$]+$", before) is not None
+        if dotted or (receiver, key) not in allowed:
+            problems.append(f"{name}:{line}: computed member access {receiver}[{key}]")
+    # The allowed receivers and counters are set only as pinned.
+    setter = r"(?<![\w$.])(?:views|panes|files|index|at)\s*(?:=(?!=)|\+\+|--|[-+*/%&|^]=|<<=|>>>?=)" \
+             r"|(?:\+\+|--)\s*(?:index|at)\b"
+    lines = sorted({_line_of(blanked, hit.start()) for hit in re.finditer(setter, blanked)})
+    code_lines = code.splitlines()
+    for line in lines:
+        text = _normalized(code_lines[line - 1])
+        if not any(re.fullmatch(pattern, text) for pattern in COMPUTED_NAME_SETTERS):
+            problems.append(f"{name}:{line}: index/receiver name set outside the pinned loops: {text}")
+    names = "|".join(COMPUTED_NAMES)
+    for line in _hits(rf"(?<![\w$.])(?:{names})\s+(?:in|of)\b", blanked):
+        problems.append(f"{name}:{line}: for-in/of over a pinned name")
+    for params in re.finditer(r"(?:\bfunction\b\s*[\w$]*\s*\(([^)]*)\)|\(([^)]*)\)\s*=>|\bcatch\s*\(([^)]*)\))",
+                              blanked):
+        listed = params.group(1) or params.group(2) or params.group(3) or ""
+        if re.search(rf"(?<![\w$])(?:{names})(?![\w$])", listed):
+            problems.append(f"{name}:{_line_of(blanked, params.start())}: parameter named like a pinned name")
+    return problems
+
+
+def _dynamic_name_problems(sources):
+    problems = []
+    for path in WEBENGINE_FILES:
+        name = _rel(path)
+        code = sources.get(name, "")
+        problems += _computed_access_problems(name, code)
+        for rule, pattern in WEBENGINE_DYNAMIC_BANS.items():
+            problems += [f"{name}:{line}: {rule}" for line in _hits(pattern, code)]
+        problems += [f"{name}:{line}: template literal" for line in _hits(r"`", code)]
+        # Names must not be built from pieces of strings.
+        literal = r"""(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')"""
+        problems += [f"{name}:{line}: string literals concatenated"
+                     for line in _hits(rf"{literal}\s*\+\s*{literal}", code)]
+    return problems
+
+
+def _accept_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        problems += [f"{name}:{line}: acceptCertificate" for line in _hits(r"acceptCertificate", code)]
+    web_name = _rel(CHAT_WEB_VIEW)
+    web = sources.get(web_name, "")
+    save = _function_body(web, "saveDownload")
+    if save is None or _normalized(save) != SAVE_DOWNLOAD:
+        problems.append(f"ChatWebView.saveDownload must be exactly `{SAVE_DOWNLOAD}`")
+    for path in WEBENGINE_FILES:
+        name = _rel(path)
+        code = sources.get(name, "")
+        for match in re.finditer(r"\.\s*accept\b", code):
+            inside = save is not None and name == web_name and web.find(save) <= match.start() < web.find(save) + len(save)
+            if not inside:
+                problems.append(f"{name}:{_line_of(code, match.start())}: .accept outside saveDownload")
+    calls = [(name, match.start()) for name, code in sources.items()
+             for match in re.finditer(r"\bsaveDownload\b", code)]
+    view = sources.get(_rel(CHAT_VIEW), "")
+    good = [(name, offset) for name, offset in calls
+            if name == _rel(CHAT_VIEW)
+            and re.search(r"(?m)^\s*onTriggered\s*:\s*chatView\s*\.\s*web\s*\.\s*$", view[:offset].splitlines()[-1] + "\n"[:0])
+            and re.match(r"saveDownload\s*\(\s*\)\s*$", view[offset:].split("\n", 1)[0])]
+    defined = [(name, offset) for name, offset in calls
+               if name == web_name and re.search(r"\bfunction\s+$", web[:offset])]
+    if len(good) != 1 or len(defined) != 1 or len(calls) != 2:
+        problems.append("saveDownload is defined once and called only by `onTriggered: chatView.web.saveDownload()`")
+    return problems
+
+
+def _pinned_assignment_problems(sources):
+    problems = []
+    names = "|".join(PINNED_SETTINGS + PINNED_PROFILE)
+    for name, code in sources.items():
+        problems += [f"{name}:{line}: assigns a pinned WebEngine property"
+                     for line in _hits(rf"\b(?:{names})\s*(?:=(?!=)|[-+*/%&|^]=|\+\+|--)", code)]
+    web = sources.get(_rel(CHAT_WEB_VIEW), "")
+    for setting in PINNED_SETTINGS:
+        if len(_hits(rf"\b{setting}\b", web)) != 1 or len(_hits(rf"(?m)^\s*settings\s*\.\s*{setting}\s*:", web)) != 1:
+            problems.append(f"ChatWebView.qml: {setting} must appear once, as its `settings.{setting}:` binding")
+        for name, code in sources.items():
+            if name != _rel(CHAT_WEB_VIEW) and _hits(rf"\b{setting}\b", code):
+                problems.append(f"{name}: names the WebEngine setting {setting}")
+    for prop in PINNED_PROFILE:
+        if len(_hits(rf"\b{prop}\b", web)) != 1:
+            problems.append(f"ChatWebView.qml: {prop} must appear once, inside the profile block")
+    return problems
+
+
+def _security_handler_problems(web):
+    problems = []
+    for signal, expected in (("onPermissionRequested", PERMISSION_HANDLER),
+                             ("onCertificateError", CERTIFICATE_HANDLER)):
+        bodies = [body for _, body in _handler_bodies(web, signal)]
+        if [_normalized(body) for body in bodies] != [expected]:
+            problems.append(f"{signal} must be exactly `{expected}` once, got {[_normalized(b) for b in bodies]}")
+    downloads = [body for _, body in _handler_bodies(web, "onDownloadRequested")]
+    if [_normalized(body) for body in downloads] != [_normalized(DOWNLOAD_HANDLER)]:
+        problems.append("onDownloadRequested must keep the download pending (exact reviewed body)")
+    navs = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(navs) != 1:
+        return problems + [f"exactly one onNavigationRequested handler, found {len(navs)}"]
+    body = navs[0]
+    blanked = _strip_comments(body, blank_strings=True)
+    opener = re.search(r'if\s*\(\s*verdict\s*===\s*"allow"\s*\)\s*\{', body)
+    if not opener:
+        return problems + ['onNavigationRequested must test `if (verdict === "allow") {` literally']
+    brace = opener.end() - 1
+    end = _brace_end(blanked, brace)
+    head, allow, tail = body[:brace + 1], body[brace + 1:end - 1], body[end:]
+    if _normalized(head) != NAV_HEAD:
+        problems.append(f"onNavigationRequested must start exactly `{NAV_HEAD}`, got `{_normalized(head)}`")
+    if _normalized(" " + tail) != _normalized(NAV_TAIL):
+        problems.append(f"onNavigationRequested must reject every other verdict: `...}}{NAV_TAIL}`, "
+                        f"got `{_normalized(tail)}`")
+    if re.search(r"\bverdict\b", allow):
+        problems.append("onNavigationRequested: the allow branch must not look at verdict again")
+    if not re.search(r"\breturn\s*$", allow.rstrip()):
+        problems.append("onNavigationRequested: the allow branch must end with return")
+    return problems
+
+
+def _m1_problems(sources):
+    web = sources.get(_rel(CHAT_WEB_VIEW), "")
+    return (_dynamic_name_problems(sources) + _accept_problems(sources)
+            + _pinned_assignment_problems(sources) + _security_handler_problems(web))
+
+
+def test_webengine_files_use_no_computed_names():
+    problems = _dynamic_name_problems(_all_code())
+    assert not problems, problems
+
+
+def test_certificates_and_downloads_are_never_accepted_by_code():
+    problems = _accept_problems(_all_code())
+    assert not problems, problems
+
+
+def test_pinned_webengine_properties_are_never_assigned():
+    problems = _pinned_assignment_problems(_all_code())
+    assert not problems, problems
+
+
+def test_security_handlers_have_their_reviewed_shape():
+    problems = _security_handler_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+# Each case is one way around the rules; the first seven are the pentest's
+# bypasses that passed the whole suite before (2026-11-05).
+M1_MUTATIONS = [
+    # 1 grant
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                if (permission.permissionType < 0) permission.deny(); else permission[\"gr\" + \"ant\"]()\n"),
+    # 2 cert
+    (CHAT_WEB_VIEW, "error.rejectCertificate()", "error.acceptCertificate()"),
+    # 3 nav
+    (CHAT_WEB_VIEW, 'if (verdict === "allow") {', 'if (verdict === "allow" || verdict === "block") {'),
+    # 4 download
+    (CHAT_WEB_VIEW, "            chatWeb.pendingDownload = download\n", "            download.accept()\n"),
+    # 5 runjs2
+    (CHAT_WEB_VIEW, "            onLoadingChanged: (loadingInfo) => {\n",
+     "            onLoadingChanged: (loadingInfo) => {\n"
+     "                if (loadingInfo.status === WebEngineLoadingInfo.LoadSucceededStatus)\n"
+     "                    page[\"runJava\" + \"Script\"](\"document.cookie\", function (c) { chatWeb.externalHost = String(c) })\n"),
+    # 6 clipboard
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+     "                page.settings.javascriptCanAccessClipboard = true\n"
+     "                page.settings.javascriptCanPaste = true\n"
+     "                page.settings.localContentCanAccessFileUrls = true\n"),
+    # 7 offrecord2
+    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
+     "        chatWeb.syncViews()\n        chatProfile[\"persistentCookies\" + \"Policy\"] = 2\n"
+     "        chatProfile[\"offThe\" + \"Record\"] = false\n    }\n\n    Component.onDestruction"),
+    # computed names in other spellings and files
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                var name = \"grant\"\n                permission[name]()\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                (permission)[\"grant\"]()\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                permission.deny()\n                var p = { [\"gr\" + \"ant\"]: 1 }\n"),
+    (CHAT_WEB_VIEW, "            if (views[index] !== view)", "            if (views[index + 0] !== view)"),
+    (CHAT_WEB_VIEW, "            if (views[index] !== view)", "            if (chatWeb.views[index] !== view)"),
+    (CHAT_WEB_VIEW, "        var views = chatWeb.viewList()\n        var urls = []",
+     "        var views = chatProfile\n        var urls = []"),
+    (CHAT_WEB_VIEW, "        for (var index = 0; index < views.length; index++) {\n            if (views[index] !== view)",
+     "        for (var index = \"offTheRecord\"; index < views.length; index++) {\n            if (views[index] !== view)"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                permission.deny()\n                for (var index in permission) {}\n"),
+    (CHAT_WEB_VIEW, "    function viewFor(siteId, pane) {", "    function viewFor(siteId, pane, index) {"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                eval(\"1\")\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                permission.deny()\n                Reflect.get(permission, \"deny\")\n"),
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+     "                Object.assign(page.settings, { pluginsEnabled: true })\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n",
+     "                permission.deny()\n                var f = new Function(\"p\", \"p.deny()\")\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                var t = `x`\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                var s = \"gr\" + 'ant'\n"),
+    (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()", "onTriggered: chatView.web[\"saveDownload\"]()"),
+    (FULL_REPRESENTATION, "onClicked: chatView.openExternally()", "onClicked: chatView[\"web\"].saveDownload()"),
+    # accepting calls
+    (CHAT_WEB_VIEW, "                request.reject()\n                if (verdict === \"external\")",
+     "                request.accept()\n                if (verdict === \"external\")"),
+    (CHAT_WEB_VIEW, "            downloadTimeout.restart()\n        }",
+     "            downloadTimeout.restart()\n            Qt.callLater(download.accept)\n        }"),
+    (CHAT_WEB_VIEW, "            downloadTimeout.restart()\n        }",
+     "            downloadTimeout.restart()\n            chatWeb.saveDownload()\n        }"),
+    (CHAT_WEB_VIEW, "        if (download)\n            download.accept()\n    }",
+     "        download.accept()\n    }"),
+    (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()", "onTriggered: chatView.web.saveDownload()"),
+    (MAIN_QML, "    function chatNext() {", "    property string x: \"acceptCertificate\"\n    function chatNext() {"),
+    # pinned properties
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+     "                var s = page.settings\n                s.pluginsEnabled = true\n"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
+     "        chatWeb.syncViews()\n        chatProfile.persistentPermissionsPolicy = 0\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
+     "        chatWeb.syncViews()\n        chatProfile.spellCheckEnabled = true\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "            settings.focusOnNavigationEnabled: false\n",
+     "            settings.focusOnNavigationEnabled: false\n            settings.javascriptCanPaste: true\n"),
+    (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()",
+     "onTriggered: chatView.web.currentView.settings.pluginsEnabled = true"),
+    # handler shapes
+    (CHAT_WEB_VIEW, '                if (verdict === "allow") {',
+     '                if (verdict === "block")\n                    return\n                if (verdict === "allow") {'),
+    (CHAT_WEB_VIEW, 'if (verdict === "allow") {', 'if ("allow" === verdict) {'),
+    (CHAT_WEB_VIEW, 'if (verdict === "allow") {', 'if (verdict == "allow") {'),
+    (CHAT_WEB_VIEW, "                request.reject()\n                if (verdict === \"external\")",
+     "                if (verdict === \"external\")"),
+    (CHAT_WEB_VIEW, "                    page.checkUserAgent(request)\n                    return\n",
+     "                    page.checkUserAgent(request)\n                    return\n                    if (verdict) {}\n"),
+    (CHAT_WEB_VIEW, "                permission.deny()\n", "                if (permission.isValid)\n                    permission.deny()\n"),
+    (CHAT_WEB_VIEW, "                error.rejectCertificate()\n", "                error.defer()\n"),
+    (CHAT_WEB_VIEW, "            if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {",
+     "            if (chatWeb.pendingDownload !== null) {"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), M1_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(M1_MUTATIONS)])
+def test_proof_m1_rules_catch(path, old, new):
+    assert _m1_problems(_sources_with(path, old, new))
+
+
+# The seven pentest bypasses, each caught by the rule meant for it.
+@pytest.mark.parametrize(("index", "checker"), [
+    (0, _dynamic_name_problems), (1, _accept_problems),
+    (2, lambda sources: _security_handler_problems(sources[_rel(CHAT_WEB_VIEW)])),
+    (3, _accept_problems), (4, _dynamic_name_problems), (5, _pinned_assignment_problems),
+    (6, _dynamic_name_problems),
+])
+def test_proof_pentest_bypass_caught_by_its_rule(index, checker):
+    path, old, new = M1_MUTATIONS[index]
+    assert checker(_sources_with(path, old, new))
+
+
+# --- L1: a sign-in window opens only for a click ------------------------------
+#
+# ChatWebView hands request.userInitiated to ChatSites.classifyNewWindow,
+# which returns "overlay" only when it is exactly true; script-opened windows
+# are blocked (dropped, as other blocked windows).
+
+NEW_WINDOW_HANDLER = r"\bonNewWindowRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{"
+NEW_WINDOW_CLICK = r"\buserInitiated\s*:\s*request\s*\.\s*userInitiated\s*===\s*true\s*,"
+OVERLAY_ON_CLICK = r'\bclicked\s*\?\s*"overlay"\s*:\s*"block"'
+
+
+def _new_window_click_problems(web, sites):
+    problems = []
+    windows = [body for _, body in _blocks(web, NEW_WINDOW_HANDLER)]
+    if len(windows) != 1 or len(re.findall(NEW_WINDOW_CLICK, windows[0])) != 1 \
+            or len(_hits(r"\buserInitiated\s*:", web)) != 1:
+        problems.append("onNewWindowRequested must pass `userInitiated: request.userInitiated === true,` "
+                        "to ChatSites.classifyNewWindow, once")
+    body = _function_body(sites, "classifyNewWindow")
+    if body is None:
+        return problems + ["ChatSites.js: function classifyNewWindow( must be defined once"]
+    if len(re.findall(r"\bvar\s+clicked\s*=\s*info\s*\.\s*userInitiated\s*===\s*true\s*$", body, re.M)) != 1 \
+            or len(re.findall(r"\bclicked\s*=", body)) != 1:
+        problems.append("classifyNewWindow: `var clicked = info.userInitiated === true`, set once")
+    overlays = len(re.findall(r'"overlay"', body))
+    if overlays == 0 or overlays != len(re.findall(OVERLAY_ON_CLICK, body)):
+        problems.append('classifyNewWindow returns "overlay" only as `clicked ? "overlay" : "block"`')
+    return problems
+
+
+def test_sign_in_window_opens_only_for_a_click():
+    problems = _new_window_click_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_SITES_JS))
+    assert not problems, problems
+
+
+NEW_WINDOW_CLICK_MUTATIONS = [
+    (CHAT_WEB_VIEW, "                    userInitiated: request.userInitiated === true,\n", ""),
+    (CHAT_WEB_VIEW, "userInitiated: request.userInitiated === true,", "userInitiated: true,"),
+    (CHAT_WEB_VIEW, "userInitiated: request.userInitiated === true,", "userInitiated: request.userInitiated || true,"),
+    (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    if (!https)',
+     '        return "overlay"\n    if (!https)'),
+    (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    return "external"',
+     '        return "overlay"\n    return "external"'),
+    (CHAT_SITES_JS, "    var clicked = info.userInitiated === true\n", "    var clicked = true\n"),
+    (CHAT_SITES_JS, "    var clicked = info.userInitiated === true\n",
+     "    var clicked = info.userInitiated !== false\n"),
+    (CHAT_SITES_JS, "    var clicked = info.userInitiated === true\n",
+     "    var clicked = info.userInitiated === true\n    clicked = true\n"),
+    (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    if (!https)',
+     '        return clicked ? "overlay" : "overlay"\n    if (!https)'),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), NEW_WINDOW_CLICK_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(NEW_WINDOW_CLICK_MUTATIONS)])
+def test_proof_new_window_click_rule_catches(path, old, new):
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    sites = _mutated(path, old, new) if path == CHAT_SITES_JS else _read_code(CHAT_SITES_JS)
+    assert _new_window_click_problems(web, sites)
+
+
+# --- Delete with the wallet entry left behind --------------------------------
+#
+# `--vault destroy` replying wallet-failed means the folder is gone but its
+# KDE Wallet entry stayed; a retry would report ok without touching the
+# wallet. The General page says so with its own fixed message instead of
+# "Try again".
+
+DESTROY_WALLET_MAP = (r'\belse\s+if\s*\(\s*op\s*===\s*"destroy"\s*&&\s*reply\s*\.\s*error\s*===\s*"wallet-failed"\s*\)'
+                      r'\s*page\s*\.\s*vaultMessage\s*=\s*"deleted-wallet-left"')
+DESTROY_WALLET_TEXT = (
+    'case "deleted-wallet-left": return i18n("The encrypted folder was deleted, but its key could not be '
+    'removed from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager.")'
+)
+
+
+def _destroy_wallet_message_problems(code):
+    problems = []
+    finish = _function_body(code, "finishVault") or ""
+    if len(re.findall(DESTROY_WALLET_MAP, finish)) != 1:
+        problems.append('finishVault maps a destroy that replied wallet-failed to "deleted-wallet-left"')
+    text = _function_body(code, "vaultText") or ""
+    if _normalized(text).count(DESTROY_WALLET_TEXT) != 1:
+        problems.append(f"vaultText must have `{DESTROY_WALLET_TEXT}`")
+    if 'return i18n("KDE Wallet didn\'t answer or was cancelled. Try again.")' not in _normalized(text):
+        problems.append("vaultText keeps the wallet-failed text for every other action")
+    return problems
+
+
+def test_destroy_names_the_wallet_entry_it_left():
+    problems = _destroy_wallet_message_problems(_read_code(CONFIG_GENERAL))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('        else if (op === "destroy" && reply.error === "wallet-failed")\n'
+     '            page.vaultMessage = "deleted-wallet-left"\n', ""),
+    ('op === "destroy" && reply.error === "wallet-failed"', 'op === "remove-key" && reply.error === "wallet-failed"'),
+    ('page.vaultMessage = "deleted-wallet-left"', 'page.vaultMessage = "wallet-failed"'),
+    ("(folder Hearthside, entry encrypted-chat-folder)", "(folder Hearthside)"),
+    ('            return i18n("KDE Wallet didn\'t answer or was cancelled. Try again.")\n',
+     '            return i18n("The encrypted folder was deleted.")\n'),
+])
+def test_proof_destroy_wallet_message_rule_catches(old, new):
+    assert _destroy_wallet_message_problems(_mutated(CONFIG_GENERAL, old, new))

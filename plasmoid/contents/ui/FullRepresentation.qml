@@ -187,13 +187,12 @@ PlasmaExtras.Representation {
     // The width decisions are ChatSites.splitWidthStep's. On the first open
     // of the session it also repairs a width Plasma saved at split width
     // (closing hides the window, and saves its size, before narrowing).
-    function fitSplit(on) {
+    // A window not laid out yet has an odd padding: then nothing widens and
+    // the first open isn't used up; it is tried once more, later.
+    function fitSplit(on, retried) {
         var popup = full.Window.window
         if (!popup || String(popup).indexOf("AppletPopup") < 0)
             return
-        var repair = root.expanded && !full.openedOnce
-        if (root.expanded)
-            full.openedOnce = true
         var size = function (tab) {
             return ChatSites.popupSize(tab, Kirigami.Units.gridUnit, Screen.width, Screen.height,
                                        root.popupScale).width
@@ -201,15 +200,28 @@ PlasmaExtras.Representation {
         var step = ChatSites.splitWidthStep({
             show: on === true,
             popupWidth: popup.width,
-            padding: Math.max(0, popup.width - full.width),
+            padding: popup.width - full.width,
+            maxPadding: Kirigami.Units.gridUnit * 4,
             splitWidth: size("split"),
             normalWidth: size(full.onChat ? "chat" : "usage"),
             before: full.widthBeforeSplit,
-            repair: repair && !full.splitShown
+            repair: root.expanded && !full.openedOnce && !full.splitShown
         })
+        if (step.wait === true) {
+            if (retried !== true)
+                Qt.callLater(full.fitSplitAgain)
+            return
+        }
+        if (root.expanded)
+            full.openedOnce = true
         full.widthBeforeSplit = step.before
         if (step.width > 0)
             popup.width = step.width
+    }
+
+    // fitSplit's one retry, for the state by then.
+    function fitSplitAgain() {
+        full.fitSplit(root.expanded && full.splitShown, true)
     }
 
     onSplitShownChanged: full.fitSplit(root.expanded && full.splitShown)

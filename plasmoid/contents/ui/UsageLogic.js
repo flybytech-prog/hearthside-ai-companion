@@ -16,6 +16,23 @@ var CRITICAL_PERCENTS = COLOUR_PERCENTS.slice(1)
 var DEFAULT_WARN = 60
 var DEFAULT_CRITICAL = 85
 var MINUTE_MS = 60000
+// Longest provider-supplied text (name, plan, caption, error) shown as is.
+var MAX_SHOWN_CHARS = 200
+
+// Helper (and so provider server) text as shown in the Usage tab: a string
+// or number as text, cut to MAX_SHOWN_CHARS with "…" at the end (never in
+// the middle of a surrogate pair); anything else is "".
+function shownText(value) {
+    var text = typeof value === "string" ? value
+        : typeof value === "number" && isFinite(value) ? String(value) : ""
+    if (text.length <= MAX_SHOWN_CHARS)
+        return text
+    var cut = MAX_SHOWN_CHARS - 1
+    var last = text.charCodeAt(cut - 1)
+    if (last >= 0xd800 && last <= 0xdbff)
+        cut -= 1
+    return text.slice(0, cut) + "\u2026"
+}
 
 // A plain array from an array or an array-like list (a Repeater's
 // modelData hands its lists over as sequences, not arrays); else [].

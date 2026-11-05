@@ -19,6 +19,11 @@ var MAX_PROMPT_CHARS = 32000
 var MAX_REPLY_CHARS = 200000
 var MAX_MODELS = 200
 var MAX_SERVER_ERROR_CHARS = 300
+// Unread text a reply may hold: a stream line not yet ended by "\n", or a
+// whole GET reply. More stops reading (I3).
+var MAX_BUFFERED_CHARS = 1048576
+// A non-200 reply is only read for its error message, up to this size.
+var MAX_ERROR_REPLY_CHARS = 65536
 var MAX_INT = 2147483648
 // A personality (system prompt) per model, memory only.
 var MAX_SYSTEM_CHARS = 8000
@@ -372,7 +377,8 @@ function feedLine(state, line) {
 // complete "\n"-terminated lines from offset are read, plus the last line
 // when final. Text before offset ends in a complete line, so later
 // re-decoding of the body doesn't move it. After done or an error nothing
-// more is read.
+// more is read. A line (ended or not) over MAX_BUFFERED_CHARS is never
+// parsed: the reply ends as "too-long".
 function feedStream(state, responseText, final) {
     var next = copyStream(state)
     if (next.done || next.error !== "")
@@ -383,6 +389,11 @@ function feedStream(state, responseText, final) {
     while (true) {
         var end = text.indexOf("\n", next.offset)
         var line
+        var length = (end >= 0 ? end : text.length) - next.offset
+        if (length > MAX_BUFFERED_CHARS) {
+            next.error = "too-long"
+            break
+        }
         if (end >= 0) {
             line = text.slice(next.offset, end)
             next.offset = end + 1
@@ -396,6 +407,20 @@ function feedStream(state, responseText, final) {
             break
     }
     return next
+}
+
+// Whether a reply text is over limit characters (anything but a string is not).
+function tooLarge(text, limit) {
+    return typeof text === "string" && text.length > limit
+}
+
+// The server's error message from a whole non-200 reply, "" when there is
+// none or the reply is over MAX_ERROR_REPLY_CHARS (never parsed then).
+function errorReplyDetail(responseText) {
+    if (typeof responseText !== "string" || responseText.length > MAX_ERROR_REPLY_CHARS)
+        return ""
+    var parsed = feedStream(newStream(), responseText, true)
+    return parsed.error === "server" ? parsed.errorText : ""
 }
 
 function classifyFailure(status) {

@@ -243,6 +243,10 @@ KCM.SimpleKCM {
         if (reply.ok)
             page.vaultMessage = op === "destroy" ? "deleted" : op === "add-key" ? "wallet-on"
                 : op === "remove-key" ? "wallet-off" : "changed"
+        // The folder is gone but its wallet entry stayed: a retry would
+        // report success without touching the wallet, so say what is left.
+        else if (op === "destroy" && reply.error === "wallet-failed")
+            page.vaultMessage = "deleted-wallet-left"
         else
             page.vaultMessage = reply.error === "cancelled" || reply.error === "empty-passphrase"
                 ? "" : reply.error
@@ -267,6 +271,8 @@ KCM.SimpleKCM {
             return i18n("KDE Wallet is turned off. Turn it on in System Settings first.")
         case "wallet-failed":
             return i18n("KDE Wallet didn't answer or was cancelled. Try again.")
+        case "deleted-wallet-left":
+            return i18n("The encrypted folder was deleted, but its key could not be removed from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager.")
         case "wallet-write-failed":
             return i18n("Couldn't set up KDE Wallet. The passphrase still unlocks the folder.")
         case "wrong-passphrase":

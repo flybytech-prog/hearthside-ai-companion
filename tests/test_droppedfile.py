@@ -125,7 +125,8 @@ def test_a_file_swapped_after_the_check_is_refused(tmp_path, capsys, monkeypatch
     real_open = os.open
 
     def swapping_open(target, flags, *args, **kwargs):
-        os.replace(other, path)
+        if os.fsdecode(target) == str(path):  # Not the mountinfo read.
+            os.replace(other, path)
         return real_open(target, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swapping_open)
@@ -183,3 +184,107 @@ def test_droppedfile_runs_nothing_writes_nothing_prints_nothing():
         assert not re.search(pattern, code), pattern
     for flag in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
         assert flag in code
+
+
+# --- filesystem type from mountinfo (a fake mountinfo file; real efivars are never read) -------
+
+
+def _line(device, mountpoint, fstype, mount_id=30):
+    major, minor = os.major(device), os.minor(device)
+    point = os.fsencode(str(mountpoint)).replace(b" ", b"\\040").decode("utf-8", "surrogateescape")
+    return f"{mount_id} 1 {major}:{minor} / {point} rw,relatime shared:1 - {fstype} none rw\n"
+
+
+@pytest.fixture
+def fake_mountinfo(tmp_path, monkeypatch):
+    info = tmp_path / "mountinfo"
+    monkeypatch.setattr(droppedfile, "MOUNTINFO", str(info))
+    return info
+
+
+def _text_file(tmp_path, name="notes.txt"):
+    folder = tmp_path / "files"
+    folder.mkdir(exist_ok=True)
+    path = folder / name
+    path.write_text("hello")
+    return path
+
+
+@pytest.mark.parametrize("fstype", sorted(droppedfile.PSEUDO_FILESYSTEMS))
+def test_every_pseudo_filesystem_type_is_refused_by_device(tmp_path, capsys, fake_mountinfo, fstype):
+    path = _text_file(tmp_path)
+    device = os.stat(path).st_dev
+    fake_mountinfo.write_text(_line(1, "/", "ext4", 1) + _line(device, "/sys/firmware/efi/efivars", fstype))
+    assert dropped(capsys, path) == {"ok": False, "error": "not-file"}
+
+
+def test_an_ordinary_filesystem_is_read(tmp_path, capsys, fake_mountinfo):
+    path = _text_file(tmp_path)
+    fake_mountinfo.write_text(_line(os.stat(path).st_dev, "/", "ext4"))
+    assert dropped(capsys, path) == {"ok": True, "text": "hello"}
+
+
+def test_a_bind_mount_of_a_pseudo_filesystem_is_refused(tmp_path, capsys, fake_mountinfo):
+    # Same device twice: one line says ext4, the other efivarfs. Any pseudo type refuses.
+    path = _text_file(tmp_path)
+    device = os.stat(path).st_dev
+    fake_mountinfo.write_text(_line(device, "/", "ext4", 1) + _line(device, str(tmp_path), "efivarfs", 2))
+    assert dropped(capsys, path) == {"ok": False, "error": "not-file"}
+
+
+def test_an_unknown_device_uses_the_longest_mount_point(tmp_path, capsys, fake_mountinfo):
+    path = _text_file(tmp_path)
+    other = os.makedev(4095, 4095)  # No real device; the file's own is not listed.
+    folder = os.path.realpath(path.parent)
+    fake_mountinfo.write_text(_line(other, "/", "ext4", 1) + _line(other, folder, "efivarfs", 2))
+    assert dropped(capsys, path) == {"ok": False, "error": "not-file"}
+    fake_mountinfo.write_text(_line(other, "/", "efivarfs", 1) + _line(other, folder, "btrfs", 2)
+                              + _line(other, folder + "-sibling", "sysfs", 3))
+    assert dropped(capsys, path) == {"ok": True, "text": "hello"}
+
+
+def test_a_mount_point_with_a_space_is_unescaped(tmp_path, capsys, fake_mountinfo):
+    folder = tmp_path / "with space"
+    folder.mkdir()
+    path = folder / "x.txt"
+    path.write_text("hello")
+    other = os.makedev(4095, 4095)
+    fake_mountinfo.write_text(_line(other, "/", "ext4", 1) + _line(other, os.path.realpath(folder), "debugfs", 2))
+    assert dropped(capsys, path) == {"ok": False, "error": "not-file"}
+
+
+@pytest.mark.parametrize("content", [None, "", "garbage without fields\n", "1 2 x:y / / rw - ext4 a rw\n"])
+def test_unreadable_or_useless_mountinfo_fails_closed(tmp_path, capsys, fake_mountinfo, content):
+    path = _text_file(tmp_path)
+    if content is not None:
+        fake_mountinfo.write_text(content)
+    assert dropped(capsys, path) == {"ok": False, "error": "os-error"}
+
+
+def test_no_matching_mount_fails_closed(tmp_path, capsys, fake_mountinfo):
+    path = _text_file(tmp_path)
+    fake_mountinfo.write_text(_line(os.makedev(4095, 4095), "/nonexistent-root-elsewhere", "ext4"))
+    assert dropped(capsys, path) == {"ok": False, "error": "os-error"}
+
+
+def test_a_pseudo_file_is_never_opened(tmp_path, capsys, fake_mountinfo, monkeypatch):
+    path = _text_file(tmp_path)
+    fake_mountinfo.write_text(_line(os.stat(path).st_dev, "/", "efivarfs"))
+    real_open = os.open
+    opened = []
+
+    def recording_open(target, flags, *args, **kwargs):
+        opened.append(os.fsdecode(target))
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    assert dropped(capsys, path) == {"ok": False, "error": "not-file"}
+    assert opened == [str(fake_mountinfo)]
+
+
+def test_the_real_mountinfo_allows_a_normal_file_and_refuses_sysfs(tmp_path, capsys):
+    path = _text_file(tmp_path)
+    assert dropped(capsys, path) == {"ok": True, "text": "hello"}
+    sysfs = "/sys/kernel/mm/transparent_hugepage/enabled"
+    if os.path.exists(sysfs):
+        assert dropped(capsys, sysfs) == {"ok": False, "error": "not-file"}

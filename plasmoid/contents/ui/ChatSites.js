@@ -196,14 +196,21 @@ function ipv4Value(host) {
     return value * room + last
 }
 
+// Names the usual /etc/hosts gives this computer, beside "localhost".
+var LOCAL_NAMES = ["localhost.localdomain", "ip6-localhost", "ip6-loopback"]
+
 // Wider than isLoopbackHost: everything the browser would send to this
 // computer. Used only to block, never to allow. Hosts ending in a number
-// that isn't a valid IPv4 literal are treated as local (fail closed).
+// that isn't a valid IPv4 literal are treated as local (fail closed), and
+// so is every name without a dot (the machine's own name, LAN names).
 function isLocalAddress(host) {
     var normalized = normalizeHost(host)
     if (normalized === "")
         return false
-    if (isLoopbackHost(normalized) || normalized.slice(-10) === ".localhost")
+    if (isLoopbackHost(normalized) || normalized.indexOf(".") < 0
+            || LOCAL_NAMES.indexOf(normalized) >= 0
+            || normalized.slice(-10) === ".localhost"
+            || normalized.slice(-22) === ".localhost.localdomain")
         return true
     var labels = normalized.split(".")
     if (!/^(0x[0-9a-f]*|[0-9]+)$/.test(labels[labels.length - 1]))
@@ -651,7 +658,9 @@ function classifySubframe(info) {
 }
 
 // "overlay" | "external" | "block" for a new-window request. Plain http is
-// always blocked here, even for Local.
+// always blocked here, even for Local. A sign-in window ("overlay") opens
+// only for a click (request.userInitiated === true); a script-opened one is
+// blocked.
 function classifyNewWindow(request) {
     var info = request || {}
     var site = effectiveSite(info.siteId, info.customUrls)
@@ -662,12 +671,13 @@ function classifyNewWindow(request) {
     if (parsed !== null && parsed.host !== "" && !site.local && isLocalAddress(parsed.host))
         return "block"
     var https = isHttpsUrl(url)
+    var clicked = info.userInitiated === true
     if (info.isDialog && (https || url === "" || isAboutBlank(url)))
-        return "overlay"
+        return clicked ? "overlay" : "block"
     if (!https)
         return "block"
     if (hostMatches(parsed.host, site.auth_hosts))
-        return "overlay"
+        return clicked ? "overlay" : "block"
     return "external"
 }
 
@@ -730,8 +740,12 @@ function popupSize(tab, gu, availW, availH, scale) {
 // what it adds around the popup's content; splitWidth, normalWidth:
 // popupSize() widths for "split" and for the tab shown without split;
 // before: the width to go back to (0: none); repair: the first open of the
-// session, when a width saved before narrowing (Plasma restart) is put back.
-// Returns {width: the new window width (0: leave it), before}.
+// session, when a width saved before narrowing (Plasma restart) is put back;
+// maxPadding (optional): the largest padding that can be real.
+// Returns {width: the new window width (0: leave it), before}; with
+// maxPadding, a widening or repair that would use a padding outside
+// 0..maxPadding (the window not laid out yet) returns {width: 0, before,
+// wait: true} instead: try again later.
 function splitWidthStep(input) {
     var step = input || {}
     var pixels = function (value) {
@@ -741,6 +755,11 @@ function splitWidthStep(input) {
     var popupWidth = pixels(step.popupWidth)
     var padding = pixels(step.padding)
     var before = pixels(step.before)
+    var limit = pixels(step.maxPadding)
+    var measured = Number(step.padding)
+    if (limit > 0 && (step.show === true || step.repair === true)
+            && !(isFinite(measured) && measured >= 0 && measured <= limit))
+        return { width: 0, before: before, wait: true }
     var split = pixels(step.splitWidth) > 0 ? pixels(step.splitWidth) + padding : 0
     var normal = pixels(step.normalWidth) > 0 ? pixels(step.normalWidth) + padding : 0
     if (step.show === true) {

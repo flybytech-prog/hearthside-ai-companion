@@ -855,12 +855,81 @@ def test_every_removal_clears_a_leftover_staging_entry(stubs, capsys, monkeypatc
     assert wallet_state(stubs) == {}
 
 
-def test_purge_reports_a_lone_staging_entry(stubs, capsys, monkeypatch, tmp_path):
+def test_purge_without_a_slot_leaves_a_lone_staging_entry(stubs, capsys, monkeypatch, tmp_path):
+    # The entry may belong to another data folder: without a slot here it is not ours.
     stubs.wallet.write_text(json.dumps({NEW_KEY: "0" * 64}))
     monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
     assert cli.main(["--web-data", "purge"]) == 0
-    assert capsys.readouterr().out == '{"ok":true,"removed":["wallet-entry"]}\n'
-    assert wallet_state(stubs) == {}
+    assert capsys.readouterr().out == '{"ok":true,"removed":[]}\n'
+    assert wallet_state(stubs) == {NEW_KEY: "0" * 64}
+    assert tools_called(stubs, without=()) == []
+
+
+def _stray_keys_dir(stubs, tmp_path, kind):
+    """vault-keys of this data folder without a wallet slot of ours."""
+    keys = keys_dir(stubs)
+    keys.mkdir(parents=True)
+    if kind == "unrelated-file":
+        (keys / "notes.txt").write_text("x")
+    elif kind == "symlinked-slot":
+        target = tmp_path / "elsewhere.conf"
+        target.write_text("{}")
+        (keys / "wallet.conf").symlink_to(target)
+    elif kind == "directory-slot":
+        (keys / "wallet.conf").mkdir()
+
+
+STRAY = ("empty", "unrelated-file", "symlinked-slot", "directory-slot")
+
+
+@pytest.mark.parametrize("kind", STRAY)
+@pytest.mark.parametrize("command", ["destroy", "purge"])
+def test_stray_vault_keys_leave_the_wallet_untouched(stubs, capsys, monkeypatch, tmp_path, kind, command):
+    stubs.make_locked()
+    stubs.wallet.write_text(json.dumps({KEY: "1" * 64, NEW_KEY: "0" * 64}))
+    _stray_keys_dir(stubs, tmp_path, kind)
+    stubs.log.write_text("")
+    forgot = []
+    monkeypatch.setattr(walletkey, "forget", lambda tools: forgot.append(tools) or True)
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    if command == "purge":
+        assert cli.main(["--web-data", "purge"]) == 0
+        assert capsys.readouterr().out == '{"ok":true,"removed":["vault","vault-keys"]}\n'
+    else:
+        assert reply(command, capsys) == {"ok": True}
+    assert forgot == []
+    assert not keys_dir(stubs).exists() and not stubs.cipher.exists()
+    assert wallet_state(stubs) == {KEY: "1" * 64, NEW_KEY: "0" * 64}
+    assert tools_called(stubs, without=()) == []
+
+
+@pytest.mark.parametrize("name", ["wallet.conf", "wallet.conf.old", "wallet.conf.new"])
+@pytest.mark.parametrize("command", ["destroy", "purge"])
+def test_a_slot_of_this_folder_makes_destroy_and_purge_forget(stubs, capsys, monkeypatch, tmp_path, name, command):
+    stubs.make_locked()
+    keys_dir(stubs).mkdir(parents=True)
+    (keys_dir(stubs) / name).write_text("{}")
+    (keys_dir(stubs) / name).chmod(0o400)
+    forgot = []
+    monkeypatch.setattr(walletkey, "forget", lambda tools: forgot.append(tools) or True)
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    if command == "purge":
+        assert cli.main(["--web-data", "purge"]) == 0
+        assert capsys.readouterr().out == '{"ok":true,"removed":["vault","vault-keys","wallet-entry"]}\n'
+    else:
+        assert reply(command, capsys) == {"ok": True}
+    assert len(forgot) == 1
+    assert not keys_dir(stubs).exists()
+
+
+def test_destroy_without_any_vault_keys_leaves_the_wallet_untouched(stubs, capsys, monkeypatch):
+    stubs.make_locked()
+    stubs.wallet.write_text(json.dumps({KEY: "1" * 64}))
+    stubs.log.write_text("")
+    monkeypatch.setattr(walletkey, "forget", lambda tools: pytest.fail("wallet asked"))
+    assert reply("destroy", capsys) == {"ok": True}
+    assert wallet_state(stubs) == {KEY: "1" * 64}
+    assert tools_called(stubs, without=()) == []
 
 
 @pytest.mark.parametrize("command", ["destroy", "purge"])

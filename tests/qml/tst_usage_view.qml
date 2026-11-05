@@ -304,6 +304,40 @@ TestCase {
         compare(plan.implicitWidth, plainWidth)
     }
 
+    // W1: long provider text is cut to 200 characters wherever it shows.
+    function test_longProviderTextIsCut() {
+        var long = "L".repeat(5000)
+        var snapshot = hostileSnapshot("error")
+        var provider = snapshot.providers[0]
+        provider.display_name = long
+        provider.plan = long
+        provider.error_message = long
+        provider.windows[0].caption = long
+        provider.billing_usage.remaining_credits = long
+        root.snapshot = snapshot
+        wait(20)
+        var cut = "L".repeat(199) + "\u2026"
+        var texts = shownTexts()
+        var longest = 0
+        var found = 0
+        for (var index = 0; index < texts.length; index++) {
+            if (texts[index].indexOf("LLL") >= 0) {
+                found += 1
+                verify(texts[index].indexOf(cut) >= 0, texts[index].slice(0, 40))
+                verify(texts[index].indexOf("L".repeat(200)) < 0)
+            }
+            longest = Math.max(longest, texts[index].length)
+        }
+        // Name, plan, error, caption and credits.
+        verify(found >= 5, "found " + found)
+        verify(longest < 260, "longest shown text " + longest)
+        root.snapshot = ({})
+        root.hasData = false
+        root.lastError = long
+        wait(20)
+        verify(shownTexts().indexOf(cut) >= 0)
+    }
+
     // A helper error without data: shown in a plain label, not the
     // placeholder's rich-text explanation.
     function test_helperErrorIsPlain() {

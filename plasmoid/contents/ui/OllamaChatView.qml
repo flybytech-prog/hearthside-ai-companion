@@ -425,6 +425,12 @@ ColumnLayout {
                 ollamaView.loadFailed("not-ollama")
                 return
             }
+            // A reply this large is no Ollama list; never read.
+            if (OllamaChat.tooLarge(xhr.responseText, OllamaChat.MAX_BUFFERED_CHARS)) {
+                ollamaView.dropRequest()
+                ollamaView.loadFailed("not-ollama")
+                return
+            }
             if (xhr.readyState !== 4)
                 return
             ollamaView.settle()
@@ -761,16 +767,19 @@ ColumnLayout {
         }
         var status = xhr.status
         if (status !== 200) {
+            var failure = OllamaChat.classifyFailure(status)
+            if (failure === "unexpected")
+                failure = "server-error"
+            // An error reply over the limit is dropped unread.
+            if (OllamaChat.tooLarge(xhr.responseText, OllamaChat.MAX_ERROR_REPLY_CHARS)) {
+                ollamaView.dropRequest()
+                ollamaView.finishChat("failed", failure, "")
+                return
+            }
             // Wait for the whole error reply.
             if (!finished)
                 return
-            var failure = OllamaChat.classifyFailure(status)
-            var detail = ""
-            if (failure === "server-error" || failure === "unexpected") {
-                var parsed = OllamaChat.feedStream(OllamaChat.newStream(), xhr.responseText, true)
-                detail = parsed.error === "server" ? parsed.errorText : ""
-                failure = "server-error"
-            }
+            var detail = failure === "server-error" ? OllamaChat.errorReplyDetail(xhr.responseText) : ""
             ollamaView.finishChat("failed", failure, detail)
             return
         }

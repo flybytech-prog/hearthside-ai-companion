@@ -793,6 +793,8 @@ Item {
                 var verdict = ChatSites.classifyNewWindow({
                     url: url,
                     isDialog: request.destination === WebEngineNewWindowRequest.InNewDialog,
+                    // A sign-in window opens only for a click.
+                    userInitiated: request.userInitiated === true,
                     siteId: page.site,
                     customUrls: chatWeb.customUrls
                 })

@@ -9,9 +9,11 @@ here is the copy's).
 
 import configparser
 import os
+import re
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,13 +28,14 @@ REQUIRED_QML = (
     "org/kde/plasma/plasmoid",
 )
 
-# Answers exactly the python3 calls the install path makes; anything else exits 97.
+# Answers exactly the python3 calls the install path makes (all with -P);
+# anything else exits 97.
 PYTHON_STUB = """#!/bin/sh
 case "$*" in
-    "-c "*) exit 0 ;;
-    "-m pip --version") exit 0 ;;
-    "-m pip show ai-usage-kde") exit 1 ;;
-    "-m pip install "*) exit 0 ;;
+    "-P -c "*) exit 0 ;;
+    "-P -m pip --version") exit 0 ;;
+    "-P -m pip show ai-usage-kde") exit 1 ;;
+    "-P -m pip install "*) exit 0 ;;
     "-P -m hearthside --version") echo 0.0-test ;;
     *) exit 97 ;;
 esac
@@ -61,7 +64,7 @@ def _copied_project(tmp_path):
     return project
 
 
-def run_install(tmp_path, *, xdg_data_home=None):
+def run_install(tmp_path, *, xdg_data_home=None, python_stub=PYTHON_STUB, cwd=None):
     project = _copied_project(tmp_path)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
@@ -70,7 +73,7 @@ def run_install(tmp_path, *, xdg_data_home=None):
         (qml / module).mkdir(parents=True, exist_ok=True)
     stubs = tmp_path / "stub-bin"
     stubs.mkdir(exist_ok=True)
-    _stub(stubs, "python3", PYTHON_STUB)
+    _stub(stubs, "python3", python_stub)
     _stub(stubs, "kpackagetool6", KPACKAGETOOL_STUB)
     _stub(stubs, "qtpaths6", f"#!/bin/sh\necho '{qml}'\n")
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home)}
@@ -79,6 +82,7 @@ def run_install(tmp_path, *, xdg_data_home=None):
     completed = subprocess.run(
         ["sh", str(project / "scripts" / "install.sh")],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60, check=False,
+        cwd=cwd,
     )
     return completed, home
 
@@ -97,6 +101,57 @@ def test_notifyrc_declares_the_component_and_both_alert_events():
 def test_install_script_passes_sh_n():
     completed = subprocess.run(["sh", "-n", str(INSTALL_SCRIPT)], capture_output=True, text=True, check=False)
     assert (completed.returncode, completed.stderr) == (0, "")
+
+
+def test_every_python3_call_keeps_the_working_folder_off_sys_path():
+    calls = re.findall(r"\bpython3 +-[^\n]*", INSTALL_SCRIPT.read_text(encoding="utf-8"))
+    assert len(calls) >= 7
+    assert [call for call in calls if not call.startswith("python3 -P ")] == []
+
+
+# A planted module writes a marker; the safe fake pip (on PYTHONPATH, which -P
+# keeps) answers the installer's pip calls and imports json like real pip does.
+PLANTED = "open({marker!r}, 'a').write({name!r} + '\\n')\nraise SystemExit(0)\n"
+FAKE_PIP = """import json, sys
+args = sys.argv[1:]
+with open({log!r}, "a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+sys.exit(1 if args[:1] == ["show"] else 0)
+"""
+
+
+def test_modules_planted_in_the_working_folder_never_run(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    marker = tmp_path / "planted-ran"
+    for name in ("pip", "json"):
+        (work / f"{name}.py").write_text(PLANTED.format(marker=str(marker), name=name))
+    fake = tmp_path / "fake-site" / "pip"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text("")
+    pip_log = tmp_path / "pip-calls"
+    (fake / "__main__.py").write_text(FAKE_PIP.format(log=str(pip_log)))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONPATH": str(fake.parent),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    # The plant works: without -P the working folder's pip.py runs.
+    subprocess.run([sys.executable, "-m", "pip", "--version"], cwd=work, env=env,
+                   stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
+    assert marker.read_text() == "pip\n"
+    marker.unlink()
+    # The real interpreter, with the fake pip on PYTHONPATH; only the final
+    # "hearthside --version" is answered by the stub (the copy has no src/).
+    wrapper = (
+        "#!/bin/sh\n"
+        'if [ "$*" = "-P -m hearthside --version" ]; then echo 0.0-test; exit 0; fi\n'
+        f"PYTHONPATH='{fake.parent}' PYTHONDONTWRITEBYTECODE=1 exec '{sys.executable}' \"$@\"\n"
+    )
+    completed, _ = run_install(tmp_path, python_stub=wrapper, cwd=work)
+    assert completed.returncode == 0, completed.stderr
+    assert not marker.exists()
+    calls = [line for line in pip_log.read_text().splitlines()]
+    assert calls[:2] == ['["--version"]', '["show", "ai-usage-kde"]']
+    assert calls[2].startswith('["install", "--user"')
+    assert len(calls) == 3
 
 
 def test_install_copies_the_notifyrc_with_mode_0644(tmp_path):

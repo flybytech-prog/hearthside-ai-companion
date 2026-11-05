@@ -1484,6 +1484,39 @@ def change_passphrase(environ: Optional[Mapping[str, str]] = None) -> dict[str, 
     return {"ok": True}
 
 
+def _holds_wallet_slot(keys: int) -> bool:
+    """``keys`` (an opened vault-keys) holds a wallet slot file of ours: wallet.conf,
+    or the wallet.conf.old / wallet.conf.new an interrupted set-up leaves.
+
+    Only then does the wallet entry belong to this data folder; a stray or
+    empty vault-keys (another XDG_DATA_HOME, a copied folder) does not, and
+    destroy/purge then leave the wallet alone. Symlinks and files of other
+    users do not count.
+    """
+    for name in (walletkey.SLOT_FILE, walletkey.SLOT_OLD, walletkey.SLOT_NEW):
+        try:
+            info = os.stat(name, dir_fd=keys, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+            return True
+    return False
+
+
+def _app_holds_wallet_slot(data_app: int) -> bool:
+    """For destroy: vault-keys below ``data_app`` holds a slot (anything odd: no)."""
+    try:
+        keys = open_child_dir(data_app, KEYS_DIR, create=False)
+    except HelperError:
+        return False
+    if keys is None:
+        return False
+    try:
+        return _holds_wallet_slot(keys)
+    finally:
+        _close(keys)
+
+
 def _remove_keys_dir(ctx: Context) -> None:
     with _descriptors() as opened:
         base = open_base(ctx.data_base, create=False)
@@ -1496,24 +1529,28 @@ def _remove_keys_dir(ctx: Context) -> None:
 def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     """Delete the cipher dir, the key slots and the bare mountpoint, then the wallet entry.
 
-    The files go first; wallet-failed afterwards means only the wallet entry
-    may remain (destroy again retries it).
+    The wallet entry is removed only when this data folder had a wallet slot
+    (checked before anything is deleted). The files go first; wallet-failed
+    afterwards means only the wallet entry may remain (remove-key removes it).
     """
     ctx = context(environ)
     _require_safe_rmtree()
     with vault_lock(ctx) as app:
         if settle(ctx, app) == "unlocked":
             raise HelperError("not-locked")
+        had_slot = False
         with _descriptors() as opened:
             base = open_base(ctx.data_base, create=False)
             data_app = None if base is None else open_child_dir(base, APP_DIR, create=False)
             opened.extend(fd for fd in (base, data_app) if fd is not None)
             if data_app is not None:
+                had_slot = _app_holds_wallet_slot(data_app)
                 remove_entry(data_app, VAULT_DIR)
                 remove_entry(data_app, KEYS_DIR)
         # Not mounted (checked above), so this is the bare tmpfs mountpoint.
         remove_entry(app, VAULT_DIR)
-        walletkey.forget(ctx.wallet_tools)
+        if had_slot:
+            walletkey.forget(ctx.wallet_tools)
     return {"ok": True}
 
 
@@ -1563,6 +1600,7 @@ def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> li
     if _vault_mounted(cipher_paths, mountpoints):
         raise HelperError("not-locked")
     present: list[str] = []
+    had_slot = False
     with _descriptors() as opened:
         base = open_base(base_path, create=False)
         app = None if base is None else open_child_dir(base, APP_DIR, create=False)
@@ -1572,7 +1610,11 @@ def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> li
         for name in PURGE_CATEGORIES if app is not None else ():
             child = open_child_dir(app, name, create=False)
             if child is not None:
-                _close(child)
+                try:
+                    if name == KEYS_DIR:
+                        had_slot = _holds_wallet_slot(child)
+                finally:
+                    _close(child)
                 present.append(name)
         for name in present:
             remove_entry(app, name)
@@ -1582,7 +1624,10 @@ def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> li
             except OSError:
                 pass  # Not empty or already gone: leave it.
     # Last, so the files are gone even when the wallet cannot be reached; a
-    # wallet-failed reply means only the entry may remain (run purge again).
+    # wallet-failed reply means only the entry may remain. Only a folder that
+    # had a wallet slot owns the entry: without one the wallet is not touched.
+    if not had_slot:
+        return present
     tools, _missing = walletkey.find_tools()
     if walletkey.forget(tools):
         present.append(PURGE_WALLET_ENTRY)
@@ -1593,8 +1638,9 @@ def purge(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     """Delete the encrypted folder (every saved chat sign-in is inside it) and its key slots.
 
     Refuses while anything is mounted at the vault mountpoint or from the
-    cipher dir. Runs no tool except, when kwallet-query and qdbus6 are there
-    and the wallet holds our entry, the ones that overwrite and delete it. The
+    cipher dir. Runs no tool except, when this folder had a wallet slot,
+    kwallet-query and qdbus6 are there and the wallet holds our entry, the ones
+    that overwrite and delete it. The
     reply names only the deleted categories.
     """
     try:

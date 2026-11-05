@@ -209,7 +209,13 @@ starts with Plasma while it remains on a panel.
   never opens a page, window or embedded frame on this computer for any site
   but Local web UI, and for it allows plain `http://` only at the configured
   address; background requests a page makes itself (fetch, WebSocket, images)
-  aren't filtered, as in any browser. See [docs/privacy.md](docs/privacy.md).
+  aren't filtered, as in any browser. "This computer" means `localhost`,
+  `*.localhost`, `localhost.localdomain`, `*.localhost.localdomain`,
+  `ip6-localhost`, `ip6-loopback`, every name without a dot, `[::1]`,
+  `0.0.0.0` and any `127.x.x.x` address. So a Local web UI on another machine
+  must be addressed by a full name (e.g. `nas.lan`): a short name like `nas`
+  is treated as this computer and owner-checked. See
+  [docs/privacy.md](docs/privacy.md).
 - **A chat server on another machine** (for example Open WebUI on your home
   server): give it an `https://` address with a certificate your system
   trusts (self-signed certificates are refused), or forward it to this

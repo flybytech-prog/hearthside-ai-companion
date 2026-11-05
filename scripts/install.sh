@@ -22,8 +22,8 @@ esac
 # (the installed one may be older or gone): it refuses symlinks, never follows
 # links, refuses while the encrypted folder is mounted, and replies with
 # category names only. It also deletes the folder's KDE Wallet unlock slot and,
-# when the wallet holds it, the key in the wallet (which may show KWallet's own
-# password prompt if the wallet is locked).
+# only when that slot was there and the wallet holds it, the key in the wallet
+# (which may show KWallet's own password prompt if the wallet is locked).
 if [ "$uninstall_web_data" = true ]; then
     if ! command -v python3 >/dev/null 2>&1; then
         echo "Required command not found: python3" >&2
@@ -59,7 +59,7 @@ if [ "$uninstall_web_data" = true ]; then
             case "$reply" in *'"wallet-entry"'*) echo "Deleted: the encrypted chat folder's key in KDE Wallet." ;; esac
             ;;
         '{"ok":false,"error":"wallet-failed"}')
-            echo "Deleted the Hearthside chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Run this again, or remove it in KWalletManager." >&2
+            echo "Deleted the Hearthside chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager." >&2
             exit 1
             ;;
         '{"ok":false,"error":"not-locked"}')
@@ -94,11 +94,14 @@ for executable in python3 kpackagetool6; do
 done
 
 # Required: Python 3.11+ with pip (the helper is stdlib only, pip installs it).
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+# Every python3 call runs with -P, so the working folder is never on sys.path:
+# a pip.py or json.py where the script is run from is never imported. (An
+# older Python rejects -P, which fails the version check as it should.)
+if ! python3 -P -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
     echo "Hearthside needs Python 3.11 or newer." >&2
     exit 1
 fi
-if ! python3 -m pip --version >/dev/null 2>&1; then
+if ! python3 -P -m pip --version >/dev/null 2>&1; then
     echo "Required Python module not found: pip (Arch: sudo pacman -S --needed python-pip)" >&2
     exit 1
 fi
@@ -195,8 +198,8 @@ fi
 # Migrate from AI Usage: remove the old helper first, so the old and new
 # helpers never refresh the same OAuth tokens under different lock directories.
 migrated=false
-if python3 -m pip show ai-usage-kde >/dev/null 2>&1; then
-    if ! python3 -m pip uninstall -y --break-system-packages ai-usage-kde; then
+if python3 -P -m pip show ai-usage-kde >/dev/null 2>&1; then
+    if ! python3 -P -m pip uninstall -y --break-system-packages ai-usage-kde; then
         echo "Could not remove the old ai-usage-kde helper (it may be installed system-wide). Remove it manually, then run this script again." >&2
         exit 1
     fi
@@ -219,7 +222,7 @@ if [ -d "$old_cache" ] && [ ! -L "$old_cache" ]; then
 fi
 # Old lock directories hold only empty lock files and are cleared at logout.
 
-python3 -m pip install \
+python3 -P -m pip install \
     --user \
     --upgrade \
     --force-reinstall \

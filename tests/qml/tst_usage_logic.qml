@@ -9,6 +9,33 @@ TestCase {
     readonly property double minute: 60000
     readonly property double hour: 3600000
 
+    // W1: provider text is cut to MAX_SHOWN_CHARS with an ellipsis.
+    function test_shownText() {
+        compare(UsageLogic.MAX_SHOWN_CHARS, 200)
+        compare(UsageLogic.shownText("Pro"), "Pro")
+        compare(UsageLogic.shownText(""), "")
+        compare(UsageLogic.shownText(12.5), "12.5")
+        compare(UsageLogic.shownText(NaN), "")
+        compare(UsageLogic.shownText(Infinity), "")
+        compare(UsageLogic.shownText(null), "")
+        compare(UsageLogic.shownText(undefined), "")
+        compare(UsageLogic.shownText({ toString: function () { return "x" } }), "")
+        compare(UsageLogic.shownText(["a"]), "")
+        compare(UsageLogic.shownText(true), "")
+        var exact = "a".repeat(200)
+        compare(UsageLogic.shownText(exact), exact)
+        var long = UsageLogic.shownText("b".repeat(201))
+        compare(long.length, 200)
+        compare(long, "b".repeat(199) + "\u2026")
+        compare(UsageLogic.shownText("c".repeat(100000)).length, 200)
+        // Never half a surrogate pair: an emoji at the cut goes whole.
+        var emoji = UsageLogic.shownText("d".repeat(197) + "\ud83d\ude00" + "e".repeat(10))
+        compare(emoji, "d".repeat(197) + "\ud83d\ude00" + "\u2026")
+        var split = UsageLogic.shownText("d".repeat(198) + "\ud83d\ude00" + "e".repeat(10))
+        compare(split, "d".repeat(198) + "\u2026")
+        compare(split.length, 199)
+    }
+
     function test_emptyOrOddOrderIsCatalogOrder() {
         var ids = Catalog.providerIds()
         compare(UsageLogic.normalizeOrder("", ids), ids)

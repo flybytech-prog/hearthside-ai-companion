@@ -1,0 +1,55 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>HS:{}</title></head>
+<body>
+<p>Hostile test page served as the chat site. It tries everything the Chat
+tab must refuse and writes what happened into the title ("HS:" + JSON),
+which the QML test reads. Never served outside the test's own namespace.</p>
+<!-- Frames to this computer: every spelling must be blocked. -->
+<iframe src="http://127.0.0.1:3999/frame-127.0.0.1"></iframe>
+<iframe src="http://localhost:3999/frame-localhost"></iframe>
+<iframe src="http://[::1]:3999/frame-ipv6"></iframe>
+<iframe src="http://2130706433:3999/frame-decimal"></iframe>
+<iframe src="https://127.0.0.1:3998/frame-tls-127.0.0.1"></iframe>
+<iframe src="https://localhost.localdomain:3998/frame-localhost.localdomain"></iframe>
+<iframe src="https://app.localhost:3998/frame-sub.localhost"></iframe>
+<iframe src="https://app.localhost.localdomain:3998/frame-sub.localhost.localdomain"></iframe>
+<iframe src="https://ip6-localhost:3998/frame-ip6-localhost"></iframe>
+<iframe src="https://ip6-loopback:3998/frame-ip6-loopback"></iframe>
+<iframe src="https://victimhost:3998/frame-single-label"></iframe>
+<a id="blank" href="https://localhost:3998/link-blank" target="_blank">x</a>
+<a id="self" href="https://ip6-localhost:3998/link-self">y</a>
+<script>
+var R = {};
+function report(key, value) {
+    R[key] = String(value);
+    document.title = "HS:" + JSON.stringify(R);
+}
+function settle(key, promise) {
+    promise.then(function (v) { report(key, v === undefined ? "ok" : "granted"); },
+                 function (e) { report(key, e && e.name ? e.name : "error"); });
+}
+try {
+    settle("notification", Notification.requestPermission().then(function (p) {
+        if (p !== "granted") throw { name: p }; return p; }));
+} catch (e) { report("notification", "throws"); }
+if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    settle("microphone", navigator.mediaDevices.getUserMedia({ audio: true }));
+    settle("camera", navigator.mediaDevices.getUserMedia({ video: true }));
+} else {
+    report("microphone", "absent");
+    report("camera", "absent");
+}
+navigator.geolocation.getCurrentPosition(function () { report("location", "granted"); },
+                                         function (e) { report("location", "code" + e.code); });
+settle("clipboard", navigator.clipboard.readText());
+// A script-opened sign-in window (auth host) and a script-opened link.
+setTimeout(function () {
+    var w = window.open("https://accounts.google.com/signin", "signin", "popup,width=400,height=400");
+    report("popup", w ? "object" : "null");
+    document.getElementById("blank").click();
+    document.getElementById("self").click();
+}, 300);
+// A same-site download, last, once everything else is reported.
+setTimeout(function () { report("download", "asked"); location.href = "/dl"; }, 2500);
+</script>
+</body></html>

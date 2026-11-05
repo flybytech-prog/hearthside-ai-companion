@@ -714,6 +714,66 @@ TestCase {
         compare(view.messages.get(1).body.length, 200000)
     }
 
+    // I3: a non-200 reply is dropped unread once it is over
+    // MAX_ERROR_REPLY_CHARS, before it ends; a smaller one is read once.
+    function errorChunk(request, status, text) {
+        request.answered()
+        request.status = status
+        request.readyState = 3
+        request.responseText += text
+        request.onreadystatechange()
+    }
+
+    function test_hugeErrorReplyIsDroppedUnread() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var request = sendText(view, "Hi")
+        errorChunk(request, 500, "{\"error\":\"boom\"}")
+        verify(view.generating)
+        compare(request.aborted, 0)
+        errorChunk(request, 500, " ".repeat(OllamaChat.MAX_ERROR_REPLY_CHARS))
+        compare(request.aborted, 1)
+        verify(!view.generating)
+        compare(view.problem, "server-error")
+        compare(view.problemDetail, "")
+        compare(view.messages.count, 1)
+
+        var next = sendText(view, "Again")
+        next.finish(500, "{\"error\":\"boom\"}")
+        compare(view.problem, "server-error")
+        compare(view.problemDetail, "boom")
+        var missing = sendText(view, "Once more")
+        errorChunk(missing, 404, "x".repeat(OllamaChat.MAX_ERROR_REPLY_CHARS + 1))
+        compare(missing.aborted, 1)
+        compare(view.problem, "model-missing")
+    }
+
+    function test_unendedStreamLineIsCut() {
+        var wrapper = ready()
+        var view = wrapper.view
+        var request = sendText(view, "Hi")
+        request.chunk(piece("Partial"))
+        request.chunk("{\"message\":{\"content\":\"")
+        verify(view.generating)
+        request.chunk("x".repeat(OllamaChat.MAX_BUFFERED_CHARS))
+        verify(!view.generating)
+        compare(request.aborted, 1)
+        compare(view.messages.get(1).body, "Partial")
+        compare(view.messages.get(1).phase, "cut")
+    }
+
+    function test_hugeListReplyIsNotRead() {
+        var wrapper = make({ shown: true })
+        var view = wrapper.view
+        compare(testCase.requests[0].url, "http://127.0.0.1:11434/api/version")
+        testCase.requests[0].finish(200, "{\"version\":\"0.40.13\"}")
+        var tagsRequest = testCase.requests[1]
+        tagsRequest.chunk("{\"models\":[" + " ".repeat(OllamaChat.MAX_BUFFERED_CHARS))
+        compare(tagsRequest.aborted, 1)
+        compare(view.problem, "not-ollama")
+        compare(view.modelList.length, 0)
+    }
+
     function test_promptTooLong() {
         var wrapper = ready()
         var view = wrapper.view

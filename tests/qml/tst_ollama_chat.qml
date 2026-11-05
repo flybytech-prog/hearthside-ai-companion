@@ -627,6 +627,53 @@ TestCase {
         compare(big.content.length, OllamaChat.MAX_REPLY_CHARS)
     }
 
+    // I3: an unended line is never buffered past MAX_BUFFERED_CHARS, nor a
+    // whole one read; what came before stays.
+    function test_feedStreamBufferCap() {
+        compare(OllamaChat.MAX_BUFFERED_CHARS, 1048576)
+        var head = chunk("kept")
+        var open = head + "{\"message\":{\"content\":\"" + "x".repeat(OllamaChat.MAX_BUFFERED_CHARS)
+        var state = OllamaChat.feedStream(OllamaChat.newStream(), open, false)
+        compare(state.error, "too-long")
+        compare(state.content, "kept")
+        compare(state.offset, head.length)
+        // At the limit it still waits for the rest of the line.
+        var atLimit = head + "y".repeat(OllamaChat.MAX_BUFFERED_CHARS)
+        state = OllamaChat.feedStream(OllamaChat.newStream(), atLimit, false)
+        compare(state.error, "")
+        compare(state.content, "kept")
+        // Final, or ended by a newline: still not parsed.
+        compare(OllamaChat.feedStream(OllamaChat.newStream(), open, true).error, "too-long")
+        var ended = OllamaChat.feedStream(OllamaChat.newStream(),
+                                          head + " ".repeat(OllamaChat.MAX_BUFFERED_CHARS + 1) + "\n" + chunk("late"), false)
+        compare(ended.error, "too-long")
+        compare(ended.content, "kept")
+        // Nothing more is read after it.
+        compare(OllamaChat.feedStream(ended, open + "\n" + chunk("z"), true).content, "kept")
+    }
+
+    function test_errorReplyDetail() {
+        compare(OllamaChat.MAX_ERROR_REPLY_CHARS, 65536)
+        compare(OllamaChat.errorReplyDetail("{\"error\":\"model runner stopped\"}"), "model runner stopped")
+        compare(OllamaChat.errorReplyDetail("<html>502</html>"), "")
+        compare(OllamaChat.errorReplyDetail(""), "")
+        compare(OllamaChat.errorReplyDetail(null), "")
+        compare(OllamaChat.errorReplyDetail(42), "")
+        var padded = "{\"error\":\"boom\"}" + " ".repeat(OllamaChat.MAX_ERROR_REPLY_CHARS)
+        compare(OllamaChat.errorReplyDetail(padded), "")
+        var fits = "{\"error\":\"boom\"}"
+        fits += " ".repeat(OllamaChat.MAX_ERROR_REPLY_CHARS - fits.length)
+        compare(OllamaChat.errorReplyDetail(fits), "boom")
+    }
+
+    function test_tooLarge() {
+        verify(OllamaChat.tooLarge("abcd", 3))
+        verify(!OllamaChat.tooLarge("abc", 3))
+        verify(!OllamaChat.tooLarge(null, 0))
+        verify(!OllamaChat.tooLarge(undefined, 0))
+        verify(!OllamaChat.tooLarge(["abcd"], 1))
+    }
+
     function test_feedStreamShrunkOrOddBody() {
         var state = OllamaChat.feedStream(OllamaChat.newStream(), chunk("abc"), false)
         // abort() empties responseText; the kept reply must stay.

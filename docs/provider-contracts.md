@@ -32,6 +32,13 @@ The helper never follows HTTP redirects: a 3xx from a provider is reported as
 a failed request (`invalid-response`), never sent on to the `Location`
 address with the credentials.
 
+Every request has a per-read socket timeout (15 s by default) and an overall
+deadline of 20 s across connect, TLS handshake, headers and body (every
+step except the name lookup, which cannot be interrupted); a server
+that drips its answer past the deadline is cut off and the request fails like
+an unreachable provider. Bodies are read up to 1 MiB; a larger body (declared
+or streamed) fails the request instead of being read into memory.
+
 `Retry-After` accepts seconds or an HTTP date and defaults to five minutes
 when missing or unparseable. The resulting cooldown is clamped to between now
 and 24 hours from now.
@@ -219,8 +226,12 @@ Navigation in a site view (main frame unless noted):
   equal those of Local's address exactly. Any other port, loopback spelling or
   host is blocked; with an `https:` custom address Local allows no `http:`.
 - Every site except Local is blocked from this computer under any scheme:
-  `localhost`, `*.localhost`, `[::1]`, `0.0.0.0`, and any `127.x.x.x` address in any
-  numeric spelling.
+  `localhost`, `*.localhost`, `localhost.localdomain`,
+  `*.localhost.localdomain`, `ip6-localhost`, `ip6-loopback`, every name
+  without a dot, `[::1]`, `0.0.0.0`, and any `127.x.x.x` address in any
+  numeric spelling. So a Local web UI on another machine must be addressed by
+  a full name (e.g. `nas.lan`): a short name like `nas` is treated as this
+  computer and owner-checked.
 - Embedded frames (subframes) may load `https:` from any host and `about:`,
   `blob:`, `data:` or srcdoc content, with two exceptions: an `http:` or
   `https:` frame on this computer (same test as above) is blocked for every
@@ -257,6 +268,8 @@ New windows requested by a page:
   Its plain-text title names its own host ("Sign-in window: <host>"), or
   while it has none (`about:blank`, empty, written by a script) the opener's
   ("Window opened by <host>", `ChatSites.overlayHost`).
+  A sign-in window opens only when the page's window request was
+  user-initiated (a click); script-opened windows are dropped.
 - Any other `https:` window, or a sign-in window opened from the overlay,
   gets the same "Open <host> in your browser?" prompt, and only when you
   clicked to open it; windows a page opens by itself are dropped.
@@ -466,10 +479,10 @@ at a time without following symlinks.
 | `--vault remove-key --method wallet` | Deletes the wallet slot, then overwrites the wallet entry (and a leftover staging entry) with a fresh random value and deletes it; no slot and no entry is success; needs no openssl (without it the overwrite is skipped) | `{"ok":true}` |
 | `--vault lock` | `fusermount3 -u`; retried after 0.5 s and 1 s, never forced or lazy; already locked or a dead mount is success | `{"ok":true}` |
 | `--vault change-passphrase` | `gocryptfs -passwd`, only while locked (kdialog `--password`, then `--newpassword`) | `{"ok":true}` |
-| `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when the wallet holds it; nothing there is success | `{"ok":true}` |
+| `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when this folder had a wallet slot and the wallet holds it; nothing there is success | `{"ok":true}` |
 | `--web-data prepare --store encrypted --applet N --generation G` | Creates `web/applet-N-gG/` inside the verified mount | `{"ok":true}` |
 | `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success | `{"ok":true}` |
-| `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
+| `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when `vault-keys/` held a wallet slot, kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
 
 `absent` means there is no cipher directory or it is empty. `damaged` means the
 cipher directory holds files but no regular `gocryptfs.conf`: gocryptfs can
@@ -556,8 +569,14 @@ when openssl is there), then deleted through
 `removeEntry(handle, Hearthside, <entry>, Hearthside)`,
 `close(handle, false, Hearthside)`, and checked with `keyDoesNotExist`.
 `destroy` and `purge` delete the files first and the entries last (openssl
-is not needed); there `wallet-failed` means only an entry may remain (run it
-again), and purge reports `wallet-entry` when it removed either entry.
+is not needed), and touch the wallet only when this data folder's
+`vault-keys/` held a wallet slot of ours (a regular file `wallet.conf`, or the
+`wallet.conf.old` / `wallet.conf.new` an interrupted set-up leaves; checked
+without following links before anything is deleted). A stray or empty
+`vault-keys/` leaves the wallet alone and is not reported as `wallet-entry`.
+There `wallet-failed` means only an entry may remain (`remove-key` or
+KWalletManager removes it; running destroy or purge again does not, the slot
+being gone), and purge reports `wallet-entry` when it removed either entry.
 
 Calls that may show KWallet's own password prompt (the wallet is locked):
 `kwallet-query` in `unlock --method wallet`, `add-key`, `remove-key`,
@@ -750,15 +769,21 @@ program and writes nothing.
   component, FIFO, device, directory) is refused before it is opened. Then
   `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY`; the opened file must be
   the same one.
-- Size 1 to 131072 bytes (`/proc` files report 0); files on the `/proc` and
-  `/sys` filesystems are refused by device as well. A file that grows while
+- Size 1 to 131072 bytes (`/proc` files report 0). A file that grows while
   being read is refused.
+- Before the open, the file's filesystem type comes from
+  `/proc/self/mountinfo` (the mounts of its device number; for a device no
+  line names, the longest mount point above its real path). proc, sysfs,
+  efivarfs, securityfs, pstore, debugfs, tracefs, cgroup, cgroup2, bpf,
+  configfs, fusectl, devpts, mqueue, hugetlbfs, binfmt_misc, autofs,
+  rpc_pipefs and nsfs are refused (`not-file`). Unreadable mountinfo, or no
+  mount for the file, is `os-error` (nothing is read).
 - Strict UTF-8, no NUL, at most 32000 characters.
 
 Reply: `{"ok":true,"text":"..."}` (the text only, never the path), or
 `{"ok":false,"error":E}` with `absent` (missing), `unreadable` (permission),
-`not-file` (not a regular file, a symlink, empty, `/proc`/`/sys`, or a bad
-argument), `too-large`, `not-text`, `too-long`, `os-error`.
+`not-file` (not a regular file, a symlink, empty, a kernel pseudo-filesystem,
+or a bad argument), `too-large`, `not-text`, `too-long`, `os-error`.
 
 The plasmoid runs it only for a drop of exactly one URL on the Ollama chat or
 the panel icon, with `PromptLibrary.hexPath(url)`: `file:///` URLs only (no
